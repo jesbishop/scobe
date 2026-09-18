@@ -51,7 +51,7 @@ const TEXT_TOOLS: Array<{
   Icon: typeof TitleIcon | typeof IconTextOnPath
 }> = [
   { id: 'text', label: 'Text', shortcut: 'T', Icon: TitleIcon },
-  { id: 'text-on-path', label: 'Text on path', shortcut: '', Icon: IconTextOnPath }
+  { id: 'text-on-path', label: 'Text on path', shortcut: '⇧T', Icon: IconTextOnPath }
 ]
 
 export function CanvasToolbar({
