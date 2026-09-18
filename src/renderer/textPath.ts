@@ -8,7 +8,15 @@ export function isTextOnPath(node: DesignNode): boolean {
 
 export function canHostTextPath(node: DesignNode): boolean {
   if (node.type === 'path') return (node.points?.length || 0) >= 2
-  return node.type === 'ellipse' || node.type === 'rect' || node.type === 'frame' || node.type === 'polygon' || node.type === 'star'
+  // Frames hold content — don't convert them into text paths.
+  return (
+    node.type === 'ellipse' ||
+    node.type === 'rect' ||
+    node.type === 'polygon' ||
+    node.type === 'star' ||
+    node.type === 'line' ||
+    node.type === 'arrow'
+  )
 }
 
 export function pathPointsFromNode(node: DesignNode): { points: PathPoint[]; closed: boolean } | null {
@@ -43,6 +51,19 @@ export function pathPointsFromNode(node: DesignNode): { points: PathPoint[]; clo
   }
   if (node.type === 'star') {
     return { points: starPathPoints(box.x, box.y, box.width, box.height), closed: true }
+  }
+  if (node.type === 'line' || node.type === 'arrow') {
+    const points = node.points
+    if (points && points.length >= 2) {
+      return { points: points.map((point) => ({ ...point })), closed: false }
+    }
+    return {
+      points: [
+        { x: box.x, y: box.y },
+        { x: box.x + box.width, y: box.y + box.height }
+      ],
+      closed: false
+    }
   }
   return null
 }
@@ -122,12 +143,13 @@ export function measurePlainText(
   fontWeight: number | string,
   fontSize: number,
   letterSpacing = 0,
-  lineHeight?: number
+  lineHeight?: number,
+  fontStyle: 'normal' | 'italic' = 'normal'
 ): { width: number; height: number } {
   if (!measureCanvas) measureCanvas = document.createElement('canvas')
   const ctx = measureCanvas.getContext('2d')
   if (!ctx) return { width: Math.max(8, fontSize * 0.55), height: lineHeight || Math.round(fontSize * 1.2) }
-  ctx.font = `${fontWeight || 400} ${fontSize}px ${fontFamily || 'Inter'}`
+  ctx.font = `${fontStyle === 'italic' ? 'italic ' : ''}${fontWeight || 400} ${fontSize}px ${fontFamily || 'Inter'}`
   const lines = (text || '').split('\n')
   const width = Math.max(
     8,

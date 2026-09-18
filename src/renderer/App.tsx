@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react'
+import { useCallback, useEffect, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent } from 'react'
 import { BrowserFrame } from './BrowserFrame'
 import { CanvasToolbar } from './CanvasToolbar'
 import { DesignLayer } from './DesignLayer'
@@ -40,17 +40,22 @@ import {
 import { CHAT_BROWSER_HOME, CHAT_BROWSER_ID, getCodingAgentMeta, SIDEBAR_BROWSER_ID, type CodingAgentId } from '../shared/codingAgents'
 import { nextCommentNumber } from '../shared/comments'
 import type { FramePreset } from '../shared/framePresets'
+import { CanvasContextMenu, type ContextMenuState } from './CanvasContextMenu'
+import { copyNodeAsPng } from './exportNode'
 import {
+  addOrWrapFlex,
   childrenOf,
   defaultFrameLayout,
+  duplicateSelection,
   expandWithDescendants,
   findContainingParent,
   isAutoLayout,
+  layersAtPoint,
   reflowAutoLayout,
   removeFlexFromSelection,
   resolveWorldRect,
   toRelative,
-  wrapSelectionInFlex
+  wrapSelectionInFrame
 } from '../shared/layoutEngine'
 
 function attachToParent(node: DesignNode, nodes: DesignNode[]): DesignNode {
@@ -141,6 +146,10 @@ export function App() {
   const [pathHoverId, setPathHoverId] = useState<string | null>(null)
   const [drawCursor, setDrawCursor] = useState<{ x: number; y: number } | null>(null)
   const [marqueeBox, setMarqueeBox] = useState<{ left: number; top: number; width: number; height: number } | null>(null)
+  const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null)
+  const contextMenuRef = useRef<ContextMenuState | null>(null)
+  const designClipboard = useRef<DesignNode[] | null>(null)
+  const styleClipboard = useRef<Partial<DesignNode> | null>(null)
   const [rail, setRail] = useState<RailTab>('file')
   const [theme, setTheme] = useState<'light' | 'dark'>(() => {
     try {
@@ -207,7 +216,7 @@ export function App() {
   } | null>(null)
   const drawRef = useRef<{
     id: string
-    kind: 'box' | 'path' | 'pen'
+    kind: 'box' | 'path' | 'pen' | 'text'
     type: DesignNode['type']
     startX: number
     startY: number
@@ -332,6 +341,211 @@ export function App() {
     persistTimer.current = window.setTimeout(() => {
       void window.vanta.setDesign(flowed)
     }, 200)
+  }
+
+  const collectSelectionTree = (ids: string[]) => {
+    const seed = new Set(ids)
+    const all = expandWithDescendants(designRef.current, seed)
+    return designRef.current.filter((node) => all.has(node.id))
+  }
+
+  const copySelection = () => {
+    const ids = designSelectedRef.current
+    if (!ids.length) return
+    designClipboard.current = collectSelectionTree(ids).map((node) => structuredClone(node))
+    void navigator.clipboard.writeText(JSON.stringify({ vantaDesign: designClipboard.current })).catch(() => undefined)
+  }
+
+  const duplicateSelected = () => {
+    const result = duplicateSelection(designRef.current, designSelectedRef.current)
+    if (!result) return
+    persistDesign(result.nodes)
+    setDesignSelectedIds(result.newIds)
+    setSelectedId(null)
+  }
+
+  const frameSelected = () => {
+    const wrapped = wrapSelectionInFrame(designRef.current, designSelectedRef.current, {
+      pageId: activePageRef.current,
+      id: crypto.randomUUID()
+    })
+    if (!wrapped) return
+    persistDesign(wrapped.nodes)
+    setDesignSelectedIds([wrapped.frameId])
+    setSelectedId(null)
+    setRightOpen(true)
+  }
+
+  const wrapFlexSelected = () => {
+    const result = addOrWrapFlex(designRef.current, designSelectedRef.current, {
+      pageId: activePageRef.current,
+      id: crypto.randomUUID()
+    })
+    if (!result) return
+    persistDesign(result.nodes)
+    if (result.frameId) setDesignSelectedIds([result.frameId])
+    setSelectedId(null)
+    setRightOpen(true)
+  }
+
+  const removeFlexSelected = () => {
+    persistDesign(removeFlexFromSelection(designRef.current, designSelectedRef.current))
+  }
+
+  const pasteClipboard = (mode: 'default' | 'on-top' | 'replace' = 'default') => {
+    const clip = designClipboard.current
+    if (!clip?.length) return
+    const idMap = new Map<string, string>()
+    for (const node of clip) idMap.set(node.id, crypto.randomUUID())
+    const selected = designSelectedRef.current
+    const target = selected.length === 1 ? designRef.current.find((node) => node.id === selected[0]) : null
+    const offset = mode === 'on-top' ? 0 : 24
+    let next = [...designRef.current]
+    if (mode === 'replace' && selected.length) {
+      const remove = expandWithDescendants(next, new Set(selected))
+      next = next.filter((node) => !remove.has(node.id))
+    }
+    const clones = clip.map((node) => {
+      const isRoot = !node.parentId || !idMap.has(node.parentId) || !clip.some((item) => item.id === node.parentId)
+      // roots are those whose parent isn't in the clipboard
+      const parentInClip = Boolean(node.parentId && clip.some((item) => item.id === node.parentId))
+      const clone: DesignNode = {
+        ...structuredClone(node),
+        id: idMap.get(node.id)!,
+        parentId: parentInClip ? idMap.get(node.parentId!) : mode === 'on-top' && target ? target.id : undefined,
+        pageId: activePageRef.current,
+        x: parentInClip ? node.x : node.x + offset,
+        y: parentInClip ? node.y : node.y + offset
+      }
+      if (mode === 'on-top' && target && !parentInClip) {
+        clone.parentId = target.id
+        clone.x = 16
+        clone.y = 16
+      }
+      void isRoot
+      return clone
+    })
+    const newRoots = clones.filter((node) => !node.parentId || !clones.some((item) => item.id === node.parentId)).map((node) => node.id)
+    persistDesign([...next, ...clones])
+    setDesignSelectedIds(newRoots)
+    setSelectedId(null)
+  }
+
+  const copyStylesFromSelection = () => {
+    const id = designSelectedRef.current[designSelectedRef.current.length - 1]
+    const node = designRef.current.find((item) => item.id === id)
+    if (!node) return
+    styleClipboard.current = {
+      fill: node.fill,
+      fillOpacity: node.fillOpacity,
+      fills: node.fills,
+      stroke: node.stroke,
+      strokeWidth: node.strokeWidth,
+      strokeOpacity: node.strokeOpacity,
+      strokeAlign: node.strokeAlign,
+      radius: node.radius,
+      opacity: node.opacity,
+      blendMode: node.blendMode,
+      effects: node.effects,
+      shadow: node.shadow,
+      shadowType: node.shadowType,
+      shadowX: node.shadowX,
+      shadowY: node.shadowY,
+      shadowBlur: node.shadowBlur,
+      shadowSpread: node.shadowSpread,
+      shadowColor: node.shadowColor,
+      shadowOpacity: node.shadowOpacity,
+      layerBlur: node.layerBlur,
+      backgroundBlur: node.backgroundBlur,
+      fontFamily: node.fontFamily,
+      fontSize: node.fontSize,
+      fontWeight: node.fontWeight,
+      lineHeight: node.lineHeight,
+      letterSpacing: node.letterSpacing,
+      textAlign: node.textAlign
+    }
+  }
+
+  const pasteStylesToSelection = () => {
+    const styles = styleClipboard.current
+    if (!styles) return
+    const ids = new Set(designSelectedRef.current)
+    persistDesign(designRef.current.map((node) => (ids.has(node.id) ? { ...node, ...styles } : node)))
+  }
+
+  const deleteSelected = () => {
+    const selected = new Set(designSelectedRef.current)
+    if (!selected.size) return
+    let ids = new Set(selected)
+    let changed = true
+    while (changed) {
+      changed = false
+      for (const node of designRef.current) {
+        if (node.parentId && ids.has(node.parentId) && !ids.has(node.id)) {
+          ids.add(node.id)
+          changed = true
+        }
+      }
+    }
+    persistDesign(designRef.current.filter((node) => !ids.has(node.id)))
+    setDesignSelectedIds([])
+  }
+
+  const selectParentOfSelection = () => {
+    const id = designSelectedRef.current[designSelectedRef.current.length - 1]
+    const node = designRef.current.find((item) => item.id === id)
+    if (!node?.parentId) return
+    setDesignSelectedIds([node.parentId])
+  }
+
+  const selectChildrenOfSelection = () => {
+    const id = designSelectedRef.current[designSelectedRef.current.length - 1]
+    if (!id) return
+    const kids = childrenOf(designRef.current, id)
+    if (!kids.length) return
+    setDesignSelectedIds(kids.map((node) => node.id))
+  }
+
+  const nodeCssSnippet = (node: DesignNode, asTailwind: boolean) => {
+    const w = Math.round(node.width || 0)
+    const h = Math.round(node.height || 0)
+    const radius = Math.round(node.radius || 0)
+    const fill = node.fill || 'transparent'
+    if (asTailwind) {
+      return `w-[${w}px] h-[${h}px]${radius ? ` rounded-[${radius}px]` : ''} bg-[${fill}]`
+    }
+    return `width: ${w}px;\nheight: ${h}px;\n${radius ? `border-radius: ${radius}px;\n` : ''}background: ${fill};`
+  }
+
+  const openContextMenu = (event: { preventDefault: () => void; stopPropagation: () => void; clientX: number; clientY: number; shiftKey: boolean }, world: { x: number; y: number }) => {
+    event.preventDefault()
+    event.stopPropagation()
+    const page = designRef.current.filter((node) => (node.pageId || DEFAULT_PAGE.id) === activePageRef.current)
+    const layers = layersAtPoint(world, page)
+    const top = layers[layers.length - 1]
+    if (top) {
+      const already = designSelectedRef.current.includes(top.id)
+      if (!already) {
+        setDesignSelectedIds([top.id])
+        setSelectedId(null)
+      }
+    } else if (!event.shiftKey) {
+      setDesignSelectedIds([])
+    }
+    setContextMenu({
+      x: event.clientX,
+      y: event.clientY,
+      worldX: world.x,
+      worldY: world.y,
+      layers
+    })
+    contextMenuRef.current = {
+      x: event.clientX,
+      y: event.clientY,
+      worldX: world.x,
+      worldY: world.y,
+      layers
+    }
   }
 
   const convertBrowserToDesign = async (frameId: string) => {
@@ -509,14 +723,16 @@ export function App() {
       cameraRef.current = next
       const world = worldRef.current
       if (world) {
+        // Imperative transform only — React style must not overwrite this on unrelated re-renders.
         world.style.transform = `translate(${next.x}px, ${next.y}px) scale(${next.zoom})`
         world.style.setProperty('--zoom', String(next.zoom))
+        world.setAttribute('data-zoom', String(next.zoom))
       }
       syncLayout()
-      if (cameraRaf.current != null) return
+      if (cameraRaf.current != null) window.cancelAnimationFrame(cameraRaf.current)
       cameraRaf.current = window.requestAnimationFrame(() => {
         cameraRaf.current = null
-        setCamera(cameraRef.current)
+        setCamera({ ...cameraRef.current })
       })
     },
     [syncLayout]
@@ -742,6 +958,7 @@ export function App() {
       const current = cameraRef.current
       const sx = event.clientX - rect.left
       const sy = event.clientY - rect.top
+      // Ctrl/Cmd+scroll or trackpad pinch (Chromium reports pinch as ctrl+wheel)
       if (event.ctrlKey || event.metaKey) {
         applyCamera(zoomAt(current, sx, sy, current.zoom * wheelZoomFactor(event.deltaY)))
         return
@@ -749,11 +966,13 @@ export function App() {
       const delta = wheelPan(event.deltaX, event.deltaY, event.deltaMode)
       applyCamera({ ...current, x: current.x + delta.x, y: current.y + delta.y })
     }
-    canvas.addEventListener('wheel', onWheel, { passive: false })
+    canvas.addEventListener('wheel', onWheel, { passive: false, capture: true })
     const observer = new ResizeObserver(() => syncLayout())
     observer.observe(canvas)
+    // Seed transform in case React unmounted/remounted the world node
+    applyCamera(cameraRef.current)
     return () => {
-      canvas.removeEventListener('wheel', onWheel)
+      canvas.removeEventListener('wheel', onWheel, true)
       observer.disconnect()
     }
   }, [applyCamera, syncLayout, view])
@@ -804,7 +1023,13 @@ export function App() {
 
   useEffect(() => {
     const down = async (event: KeyboardEvent) => {
-      const typing = event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement
+      const target = event.target
+      const typing =
+        target instanceof HTMLInputElement ||
+        target instanceof HTMLTextAreaElement ||
+        target instanceof HTMLSelectElement ||
+        (target instanceof HTMLElement &&
+          (target.isContentEditable || Boolean(target.closest('[contenteditable="true"], .design-text-editor, .text-on-path-input'))))
       if (event.code === 'Space' && !event.repeat && !typing) {
         space.current = true
         setSpaceHeld(true)
@@ -816,6 +1041,14 @@ export function App() {
         setAltHeld(true)
       }
       if (typing) return
+      if (designRef.current.some((node) => node.editing)) {
+        // While editing text, only allow Escape to finish — never tool/layer shortcuts.
+        if (event.key === 'Escape') {
+          const active = document.activeElement
+          if (active instanceof HTMLElement) active.blur()
+        }
+        return
+      }
       const meta = event.ctrlKey || event.metaKey
       if (meta && event.key === '0') {
         event.preventDefault()
@@ -855,6 +1088,11 @@ export function App() {
         setTool((current) => (current === 'scale' ? 'pointer' : 'scale'))
         setHandMode(false)
       } else if (!meta && event.key === 'Escape') {
+        if (contextMenuRef.current) {
+          setContextMenu(null)
+          contextMenuRef.current = null
+          return
+        }
         if (codingFullscreenRef.current) {
           setCodingFullscreen(false)
           return
@@ -866,6 +1104,21 @@ export function App() {
           }
           setActiveCommentId(null)
           setCommentDraftText('')
+          return
+        }
+        if (designSelectedRef.current.length) {
+          const id = designSelectedRef.current[designSelectedRef.current.length - 1]
+          const node = designRef.current.find((item) => item.id === id)
+          if (node?.parentId) {
+            event.preventDefault()
+            setDesignSelectedIds([node.parentId])
+            return
+          }
+          setDesignSelectedIds([])
+          setTool('pointer')
+          setDraft(null)
+          drawRef.current = null
+          setPenHover(null)
           return
         }
         setTool('pointer')
@@ -882,9 +1135,12 @@ export function App() {
           persistDesign([...designRef.current, current])
           setDesignSelectedIds([current.id])
         }
+      } else if (!meta && event.key === 'Enter' && designSelectedRef.current.length) {
+        event.preventDefault()
+        selectChildrenOfSelection()
       } else if (!meta && event.key.toLowerCase() === 'v') {
         setTool('pointer')
-      } else if (!meta && event.key.toLowerCase() === 'f') {
+      } else if (!meta && event.key.toLowerCase() === 'f' && !event.shiftKey) {
         setTool('frame')
         setRightOpen(true)
       } else if (!meta && event.code === 'KeyA' && event.shiftKey) {
@@ -892,18 +1148,38 @@ export function App() {
         const ids = designSelectedRef.current
         if (!ids.length) return
         if (event.altKey) {
-          persistDesign(removeFlexFromSelection(designRef.current, ids))
+          removeFlexSelected()
           return
         }
-        const wrapped = wrapSelectionInFlex(designRef.current, ids, {
-          pageId: activePageRef.current,
-          id: crypto.randomUUID()
-        })
-        if (!wrapped) return
-        persistDesign(wrapped.nodes)
-        setDesignSelectedIds([wrapped.frameId])
-        setSelectedId(null)
-        setRightOpen(true)
+        wrapFlexSelected()
+      } else if (!meta && event.key.toLowerCase() === 'f' && event.shiftKey) {
+        event.preventDefault()
+        if (designSelectedRef.current.length) frameSelected()
+      } else if (meta && event.key.toLowerCase() === 'd') {
+        event.preventDefault()
+        duplicateSelected()
+      } else if (meta && event.key.toLowerCase() === 'c' && !event.altKey && !event.shiftKey) {
+        if (designSelectedRef.current.length) {
+          event.preventDefault()
+          copySelection()
+        }
+      } else if (meta && event.key.toLowerCase() === 'v' && event.shiftKey) {
+        event.preventDefault()
+        pasteClipboard('on-top')
+      } else if (meta && event.key.toLowerCase() === 'r' && event.shiftKey) {
+        event.preventDefault()
+        pasteClipboard('replace')
+      } else if (meta && event.key.toLowerCase() === 'v' && !event.altKey && !event.shiftKey) {
+        if (designClipboard.current?.length) {
+          event.preventDefault()
+          pasteClipboard('default')
+        }
+      } else if (meta && event.key.toLowerCase() === 'c' && event.altKey) {
+        event.preventDefault()
+        copyStylesFromSelection()
+      } else if (meta && event.key.toLowerCase() === 'v' && event.altKey) {
+        event.preventDefault()
+        pasteStylesToSelection()
       } else if (!meta && event.key.toLowerCase() === 's' && event.shiftKey) {
         setTool('section')
       } else if (!meta && event.key.toLowerCase() === 'b') {
@@ -915,7 +1191,7 @@ export function App() {
       } else if (!meta && event.key.toLowerCase() === 'p') {
         setTool(event.shiftKey ? 'pencil' : 'pen')
       } else if (!meta && event.key.toLowerCase() === 't') {
-        setTool('text')
+        setTool(event.shiftKey ? 'text-on-path' : 'text')
       } else if (!meta && event.key.toLowerCase() === 'c') {
         setTool('comment')
       } else if (!meta && event.key.toLowerCase() === 'm' && !event.shiftKey) {
@@ -1145,6 +1421,35 @@ export function App() {
     drawRef.current = null
     setDraft(null)
     if (!gesture || !current) return
+    if (gesture.kind === 'text') {
+      const fontSize = current.fontSize || 12
+      const measured = measurePlainText('', current.fontFamily || 'Inter', current.fontWeight || 400, fontSize)
+      const dragged =
+        Math.abs((current.x || 0) - gesture.startX) > 2 ||
+        Math.abs((current.y || 0) - gesture.startY) > 2 ||
+        (current.width || 0) > measured.width + 12 ||
+        (current.height || 0) > measured.height + 8
+      const node: DesignNode = dragged
+        ? {
+            ...current,
+            width: Math.max(40, current.width || 40),
+            height: Math.max(measured.height, current.height || measured.height),
+            textResize: 'fixed',
+            editing: true
+          }
+        : {
+            ...current,
+            x: gesture.startX,
+            y: gesture.startY,
+            width: measured.width,
+            height: measured.height,
+            textResize: 'auto-width',
+            editing: true
+          }
+      persistDesign([...designRef.current, attachToParent(node, designRef.current)])
+      setDesignSelectedIds([node.id])
+      return
+    }
     if (gesture.type === 'line' || gesture.type === 'arrow') {
       const length = Math.hypot(current.width || 0, current.height || 0)
       if (length < 8) return
@@ -1239,9 +1544,16 @@ export function App() {
       }
       const pathTarget =
         currentTool === 'text-on-path' || currentTool === 'text'
-          ? findTextPathTarget(point, designRef.current.filter((node) => (node.pageId || DEFAULT_PAGE.id) === activePageRef.current))
+          ? findTextPathTarget(
+              point,
+              designRef.current.filter((node) => (node.pageId || DEFAULT_PAGE.id) === activePageRef.current)
+            )
           : null
-      if (currentTool === 'text-on-path' || pathTarget) {
+      // Text on path tool requires a path. Text tool only places on a path while hovering it.
+      const placeOnPath =
+        Boolean(pathTarget) &&
+        (currentTool === 'text-on-path' || (currentTool === 'text' && pathHoverId === pathTarget?.id))
+      if (placeOnPath) {
         if (!pathTarget) return
         const geom = pathPointsFromNode(pathTarget)
         if (!geom) return
@@ -1273,26 +1585,31 @@ export function App() {
         setPathHoverId(null)
         return
       }
-      const size = measurePlainText('', 'Inter', 400, 12)
-      const node: DesignNode = {
+      if (currentTool === 'text-on-path') return
+
+      // Figma Text tool: click = point text, drag = text box
+      const fontSize = 12
+      const measured = measurePlainText('', 'Inter', 400, fontSize)
+      drawRef.current = { id, kind: 'text', type: 'text', startX: point.x, startY: point.y }
+      setDraft({
         id,
         type: 'text',
         x: point.x,
         y: point.y,
-        width: size.width,
-        height: size.height,
+        width: measured.width,
+        height: measured.height,
         text: '',
         name: 'Text',
         pageId: activePageRef.current,
         fill: '#000000',
         fontFamily: 'Inter',
-        fontSize: 12,
+        fontSize,
         fontWeight: 400,
         textResize: 'auto-width',
-        editing: true
-      }
-      persistDesign([...designRef.current, attachToParent(node, designRef.current)])
+        editing: false
+      })
       setDesignSelectedIds([id])
+      event.currentTarget.setPointerCapture(event.pointerId)
       return
     }
     if (currentTool === 'pen' || currentTool === 'pencil' || currentTool === 'brush') {
@@ -1573,6 +1890,7 @@ export function App() {
         onRename={(id, name) => setFiles((current) => current.map((file) => (file.id === id ? { ...file, name } : file)))}
       />
       <div className="workspace">
+        {view !== 'home' && (
         <LeftSidebar
           tab={rail}
           onTab={(next) => {
@@ -1667,6 +1985,7 @@ export function App() {
             syncLayout()
           }}
         />
+        )}
         {view === 'home' ? (
           <HomeScreen
             files={files}
@@ -1694,6 +2013,12 @@ export function App() {
             className={`canvas${panning ? ' is-panning' : ''}${tool === 'hand' || handMode || spaceHeld ? ' is-hand' : ''}${['frame', 'section', 'browser', 'shape', 'pen', 'pencil', 'brush', 'text', 'text-on-path', 'comment', 'widget'].includes(tool) ? ' is-design' : ''}${pathHoverId && (tool === 'text' || tool === 'text-on-path') ? ' is-text-path' : ''}`}
             data-tool={tool}
             style={customCanvasFill ? { background: customCanvasFill } : undefined}
+            onContextMenu={(event) => {
+              if (view !== 'canvas') return
+              const target = event.target as HTMLElement
+              if (target.closest('.canvas-toolbar-stack, .canvas-toolbar, .draw-stroke-bar, .ctx-menu')) return
+              openContextMenu(event, worldFromEvent(event))
+            }}
             onPointerDown={async (event) => {
               const middle = event.button === 1
               const spacePan = event.button === 0 && space.current
@@ -1914,13 +2239,23 @@ export function App() {
             )}
             {status.state === 'error' && <div className="empty error">{status.message}</div>}
             <div
-              ref={worldRef}
+              ref={(node) => {
+                worldRef.current = node
+                if (node) {
+                  const cam = cameraRef.current
+                  node.style.transform = `translate(${cam.x}px, ${cam.y}px) scale(${cam.zoom})`
+                  node.style.setProperty('--zoom', String(cam.zoom))
+                  node.setAttribute('data-zoom', String(cam.zoom))
+                }
+              }}
               className="world"
               data-zoom={camera.zoom}
-              style={{
-                transform: `translate(${camera.x}px, ${camera.y}px) scale(${camera.zoom})`,
-                ['--zoom' as string]: String(camera.zoom)
-              }}
+              style={
+                {
+                  // Transform is owned by applyCamera so hover/selection re-renders can't reset zoom.
+                  ['--zoom' as string]: String(camera.zoom)
+                } as CSSProperties
+              }
             >
               <DesignLayer
                 nodes={pageNodes.filter((node) => node.type !== 'comment' || !node.resolved || commentsShowResolved)}
@@ -2283,12 +2618,14 @@ export function App() {
             />
           </div>
         )}
+        {view !== 'home' && (
         <RightSidebar
           zoom={Math.round(clampZoom(camera.zoom) * 100)}
           inspect={inspect}
           inspectOn={inspectOn}
           page={activePage}
           node={selected ? null : selectedNode}
+          nodes={design}
           browser={selected}
           tool={tool}
           onPatchPage={(patch) => persistPages(pages.map((page) => (page.id === activePage.id ? { ...page, ...patch } : page)))}
@@ -2352,6 +2689,7 @@ export function App() {
             />
           }
         />
+        )}
       </div>
       {view === 'canvas' && rail !== 'chat' && actionBar && (
         <FrameActionBar
@@ -2396,6 +2734,66 @@ export function App() {
           }}
           onComposerChange={setChatInput}
           onComposerSend={() => void sendChat()}
+        />
+      )}
+      {contextMenu && view === 'canvas' && (
+        <CanvasContextMenu
+          menu={contextMenu}
+          selectedIds={designSelectedIds}
+          selectedNodes={designSelectedIds
+            .map((id) => design.find((node) => node.id === id))
+            .filter((node): node is DesignNode => Boolean(node))}
+          canPaste={Boolean(designClipboard.current?.length)}
+          canPasteStyles={Boolean(styleClipboard.current)}
+          onClose={() => {
+            setContextMenu(null)
+            contextMenuRef.current = null
+          }}
+          onSelectLayer={(id) => {
+            setDesignSelectedIds([id])
+            setSelectedId(null)
+          }}
+          onSelectParent={selectParentOfSelection}
+          onSelectChildren={selectChildrenOfSelection}
+          onCopy={copySelection}
+          onCopyLink={() => {
+            const id = designSelectedIds[designSelectedIds.length - 1]
+            void navigator.clipboard
+              .writeText(id ? `vanta://node/${id}` : `vanta://file/${activeFileId}`)
+              .catch(() => undefined)
+          }}
+          onCopyAsPng={() => {
+            const node = designSelectedIds
+              .map((id) => design.find((item) => item.id === id))
+              .filter((item): item is DesignNode => Boolean(item))
+              .at(-1)
+            if (!node) return
+            void copyNodeAsPng(node, design).catch(() => undefined)
+          }}
+          onCopyAsTailwind={() => {
+            const nodes = designSelectedIds
+              .map((id) => design.find((node) => node.id === id))
+              .filter((node): node is DesignNode => Boolean(node))
+            const text = nodes.map((node) => nodeCssSnippet(node, true)).join('\n')
+            void navigator.clipboard.writeText(text).catch(() => undefined)
+          }}
+          onCopyAsReact={() => {
+            const nodes = designSelectedIds
+              .map((id) => design.find((node) => node.id === id))
+              .filter((node): node is DesignNode => Boolean(node))
+            const text = nodes.map((node) => nodeCssSnippet(node, false)).join('\n\n')
+            void navigator.clipboard.writeText(text).catch(() => undefined)
+          }}
+          onPaste={() => pasteClipboard('default')}
+          onPasteOnTop={() => pasteClipboard('on-top')}
+          onPasteReplace={() => pasteClipboard('replace')}
+          onDuplicate={duplicateSelected}
+          onCopyStyles={copyStylesFromSelection}
+          onPasteStyles={pasteStylesToSelection}
+          onFrameSelection={frameSelected}
+          onWrapFlex={wrapFlexSelected}
+          onRemoveFlex={removeFlexSelected}
+          onDelete={deleteSelected}
         />
       )}
     </div>

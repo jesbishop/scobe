@@ -17,6 +17,7 @@
     "@modelcontextprotocol/sdk": "^1.30.0",
     "@mui/icons-material": "^9.4.0",
     "@mui/material": "^9.4.0",
+    "@paper-design/shaders-react": "0.0.80",
     "express": "^5.2.1",
     "motion": "^13.2.0",
     "ws": "^8.18.3",
