@@ -1,0 +1,180 @@
+/** Exact Figma frame presets (from Figma Frame panel). */
+
+export type FramePreset = {
+  name: string
+  width: number
+  height: number
+}
+
+export type FramePresetCategory = {
+  id: string
+  label: string
+  presets: FramePreset[]
+}
+
+export const FRAME_PRESET_CATEGORIES: FramePresetCategory[] = [
+  {
+    id: 'phone',
+    label: 'Phone',
+    presets: [
+      { name: 'iPhone 17', width: 402, height: 874 },
+      { name: 'iPhone 16 & 17 Pro', width: 402, height: 874 },
+      { name: 'iPhone 16', width: 393, height: 852 },
+      { name: 'iPhone 16 & 17 Pro Max', width: 440, height: 956 },
+      { name: 'iPhone 16 Plus', width: 430, height: 932 },
+      { name: 'iPhone Air', width: 420, height: 912 },
+      { name: 'iPhone 14 & 15 Pro Max', width: 430, height: 932 },
+      { name: 'iPhone 14 & 15 Pro', width: 393, height: 852 },
+      { name: 'iPhone 13 & 14', width: 390, height: 844 },
+      { name: 'iPhone 14 Plus', width: 428, height: 926 },
+      { name: 'Android Compact', width: 412, height: 917 },
+      { name: 'Android Medium', width: 360, height: 800 }
+    ]
+  },
+  {
+    id: 'tablet',
+    label: 'Tablet',
+    presets: [
+      { name: 'iPad mini 8.3"', width: 744, height: 1133 },
+      { name: 'Surface Pro 8', width: 1440, height: 960 },
+      { name: 'iPad Pro 11"', width: 834, height: 1194 },
+      { name: 'iPad Pro 12.9"', width: 1024, height: 1366 },
+      { name: 'Android Expanded', width: 1280, height: 800 }
+    ]
+  },
+  {
+    id: 'desktop',
+    label: 'Desktop',
+    presets: [
+      { name: 'MacBook Air', width: 1280, height: 832 },
+      { name: 'MacBook Pro 14"', width: 1512, height: 982 },
+      { name: 'MacBook Pro 16"', width: 1728, height: 1117 },
+      { name: 'Desktop', width: 1440, height: 1024 },
+      { name: 'Wireframes', width: 1440, height: 1024 },
+      { name: 'TV', width: 1280, height: 720 }
+    ]
+  },
+  {
+    id: 'presentation',
+    label: 'Presentation',
+    presets: [
+      { name: 'Slide 16:9', width: 1920, height: 1080 },
+      { name: 'Slide 4:3', width: 1024, height: 768 }
+    ]
+  },
+  {
+    id: 'watch',
+    label: 'Watch',
+    presets: [
+      { name: 'Apple Watch Series 10 42mm', width: 187, height: 223 },
+      { name: 'Apple Watch Series 10 46mm', width: 208, height: 248 },
+      { name: 'Apple Watch 41mm', width: 176, height: 215 },
+      { name: 'Apple Watch 45mm', width: 198, height: 242 },
+      { name: 'Apple Watch 44mm', width: 184, height: 224 },
+      { name: 'Apple Watch 40mm', width: 162, height: 197 }
+    ]
+  },
+  {
+    id: 'paper',
+    label: 'Paper',
+    presets: [
+      { name: 'A4', width: 595, height: 842 },
+      { name: 'A5', width: 420, height: 595 },
+      { name: 'A6', width: 297, height: 420 },
+      { name: 'Letter', width: 612, height: 792 },
+      { name: 'Tabloid', width: 792, height: 1224 }
+    ]
+  },
+  {
+    id: 'social',
+    label: 'Social media',
+    presets: [
+      { name: 'Twitter post', width: 1200, height: 675 },
+      { name: 'Twitter header', width: 1500, height: 500 },
+      { name: 'Facebook post', width: 1200, height: 630 },
+      { name: 'Facebook cover', width: 820, height: 312 },
+      { name: 'Instagram post', width: 1080, height: 1350 },
+      { name: 'Instagram story', width: 1080, height: 1920 },
+      { name: 'Dribbble shot', width: 400, height: 300 },
+      { name: 'Dribbble shot HD', width: 800, height: 600 },
+      { name: 'LinkedIn cover', width: 1584, height: 396 }
+    ]
+  },
+  {
+    id: 'community',
+    label: 'Figma Community',
+    presets: [
+      { name: 'Plugin icon', width: 128, height: 128 },
+      { name: 'Profile banner', width: 1680, height: 240 },
+      { name: 'Plugin / file cover', width: 1920, height: 1080 }
+    ]
+  }
+]
+
+/** Curated sizes for live browser viewports (phone / tablet / desktop / presentation). */
+export const BROWSER_SIZE_PRESETS: FramePresetCategory[] = [
+  {
+    id: 'phone',
+    label: 'Phone',
+    presets: [
+      { name: 'iPhone 16', width: 393, height: 852 },
+      { name: 'iPhone 16 Plus', width: 430, height: 932 },
+      { name: 'iPhone 16 & 17 Pro Max', width: 440, height: 956 },
+      { name: 'iPhone Air', width: 420, height: 912 },
+      { name: 'iPhone 13 & 14', width: 390, height: 844 },
+      { name: 'Android Compact', width: 412, height: 917 },
+      { name: 'Android Medium', width: 360, height: 800 }
+    ]
+  },
+  {
+    id: 'tablet',
+    label: 'Tablet',
+    presets: [
+      { name: 'iPad mini 8.3"', width: 744, height: 1133 },
+      { name: 'iPad Pro 11"', width: 834, height: 1194 },
+      { name: 'iPad Pro 12.9"', width: 1024, height: 1366 }
+    ]
+  },
+  {
+    id: 'desktop',
+    label: 'Desktop',
+    presets: [
+      { name: 'MacBook Air', width: 1280, height: 832 },
+      { name: 'MacBook Pro 14"', width: 1512, height: 982 },
+      { name: 'Desktop', width: 1440, height: 1024 },
+      { name: 'TV', width: 1280, height: 720 }
+    ]
+  },
+  {
+    id: 'presentation',
+    label: 'Presentation',
+    presets: [
+      { name: 'Slide 16:9', width: 1920, height: 1080 },
+      { name: 'Slide 4:3', width: 1024, height: 768 }
+    ]
+  }
+]
+
+/** Flat list used by the browser frame action bar. */
+export const DEVICE_PRESETS = BROWSER_SIZE_PRESETS.flatMap((category) =>
+  category.presets.map((preset) => ({
+    id: `${category.id}:${preset.name}`,
+    label: preset.name,
+    category: category.label,
+    width: preset.width,
+    height: preset.height
+  }))
+)
+
+/** Flat list of every Figma frame preset (for design-frame size switching). */
+export const ALL_FRAME_PRESETS = FRAME_PRESET_CATEGORIES.flatMap((category) =>
+  category.presets.map((preset) => ({
+    id: `${category.id}:${preset.name}`,
+    label: preset.name,
+    category: category.label,
+    width: preset.width,
+    height: preset.height
+  }))
+)
+
+export type DevicePresetId = (typeof DEVICE_PRESETS)[number]['id']
