@@ -113,6 +113,15 @@ export type PathPoint = {
   outY?: number
 }
 
+export type ExportFormat = 'PNG' | 'JPG' | 'SVG' | 'PDF'
+
+export type ExportSetting = {
+  id: string
+  format: ExportFormat
+  /** Multiplier, e.g. 1, 2, 3 or 0.5 */
+  scale: number
+}
+
 export type DesignNode = {
   id: string
   type:
@@ -144,24 +153,59 @@ export type DesignNode = {
   parentId?: string | null
   fill?: string
   fillOpacity?: number
+  /** Figma-style paint stack (solid / gradient / image / video / shader). */
+  fills?: import('./paint').Paint[]
   opacity?: number
   radius?: number
   rotation?: number
+  /** Mirror horizontally / vertically (Figma flip). */
+  flipX?: boolean
+  flipY?: boolean
+  /** When true, W/H stay proportional in the inspector and on canvas resize. */
+  aspectLocked?: boolean
   stroke?: string
   strokeWidth?: number
   strokeOpacity?: number
+  /** Figma-style stroke alignment. Shapes default inside; lines default center. */
+  strokeAlign?: 'center' | 'inside' | 'outside'
   shadow?: boolean
+  /** Drop shadow vs inner shadow when `shadow` is enabled. */
+  shadowType?: 'drop' | 'inner'
   shadowX?: number
   shadowY?: number
   shadowBlur?: number
+  shadowSpread?: number
   shadowColor?: string
+  shadowOpacity?: number
+  /** Gaussian blur applied to the layer (px). */
+  layerBlur?: number
+  /** Background / backdrop blur (px). */
+  backgroundBlur?: number
+  /** Figma-style effect stack (preferred over legacy shadow / blur fields). */
+  effects?: import('./effects').DesignEffect[]
   blendMode?: string
+  /** Persisted export presets (Figma Export section). */
+  exportSettings?: ExportSetting[]
   fontFamily?: string
   fontWeight?: number | string
+  /** CSS font-style — italic when using italic Google Font variants. */
+  fontStyle?: 'normal' | 'italic'
   fontSize?: number
+  /** Line height in px. Omit / 0 = Auto. */
   lineHeight?: number
+  /** Letter spacing value; unit via letterSpacingUnit (Figma default %). */
   letterSpacing?: number
-  textAlign?: 'left' | 'center' | 'right'
+  letterSpacingUnit?: 'percent' | 'px'
+  textAlign?: 'left' | 'center' | 'right' | 'justify'
+  textAlignVertical?: 'top' | 'middle' | 'bottom'
+  textDecoration?: 'none' | 'underline' | 'line-through'
+  textCase?: 'none' | 'upper' | 'lower' | 'title' | 'small-caps'
+  paragraphSpacing?: number
+  /** First-line indent in px (Figma paragraph indent). */
+  paragraphIndent?: number
+  textTruncation?: boolean
+  maxLines?: number
+  listStyle?: 'none' | 'ordered' | 'unordered'
   textResize?: 'auto-width' | 'auto-height' | 'fixed'
   /** 0–100 start position for text on a path */
   textPathOffset?: number
@@ -171,6 +215,12 @@ export type DesignNode = {
   clipsContent?: boolean
   /** Auto-layout / flex container settings (frames only). */
   layout?: AutoLayout
+  /** Child horizontal sizing inside an auto-layout parent (Fixed / Hug / Fill). */
+  layoutSizingH?: LayoutSizing
+  /** Child vertical sizing inside an auto-layout parent (Fixed / Hug / Fill). */
+  layoutSizingV?: LayoutSizing
+  /** When true, child ignores auto-layout flow (Figma Absolute position). */
+  layoutAbsolute?: boolean
   /** PNG/JPEG data URL for type === 'image'. */
   imageDataUrl?: string
   /** Comment thread fields (type === 'comment') */
@@ -183,14 +233,22 @@ export type DesignNode = {
 
 export type AutoLayoutAlign = 'start' | 'center' | 'end' | 'stretch'
 export type AutoLayoutJustify = 'start' | 'center' | 'end' | 'space-between'
+export type LayoutSizing = 'fixed' | 'hug' | 'fill'
 
 export type AutoLayout = {
   mode: 'none' | 'horizontal' | 'vertical'
-  gap?: number
+  /** Fixed gap in px, or `'auto'` (Figma Gap → Auto / space-between). */
+  gap?: number | 'auto'
+  /** Gap between wrapped rows/columns (Figma counter-axis spacing). */
+  counterGap?: number
   padding?: number | { t: number; r: number; b: number; l: number }
   alignItems?: AutoLayoutAlign
   justifyContent?: AutoLayoutJustify
   wrap?: boolean
+  /** Frame width behavior (Figma: Fixed / Hug / Fill). */
+  sizingH?: LayoutSizing
+  /** Frame height behavior (Figma: Fixed / Hug / Fill). */
+  sizingV?: LayoutSizing
 }
 
 export type CommentMessage = {
