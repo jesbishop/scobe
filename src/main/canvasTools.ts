@@ -82,13 +82,23 @@ function parseLayout(input: Record<string, unknown> | undefined): AutoLayout | u
   if (!input) return undefined
   const mode = String(input.mode || 'none')
   if (mode !== 'none' && mode !== 'horizontal' && mode !== 'vertical') return undefined
+  const gapRaw = input.gap
+  const gap =
+    gapRaw === 'auto' || gapRaw === 'Auto'
+      ? ('auto' as const)
+      : gapRaw != null
+        ? Number(gapRaw)
+        : undefined
   return {
     mode,
-    gap: input.gap != null ? Number(input.gap) : undefined,
+    gap: gap != null && (gap === 'auto' || Number.isFinite(gap)) ? gap : undefined,
+    counterGap: input.counterGap != null ? Number(input.counterGap) : undefined,
     padding: input.padding != null ? Number(input.padding) : undefined,
     alignItems: input.alignItems as AutoLayout['alignItems'],
     justifyContent: input.justifyContent as AutoLayout['justifyContent'],
-    wrap: input.wrap != null ? Boolean(input.wrap) : undefined
+    wrap: input.wrap != null ? Boolean(input.wrap) : undefined,
+    sizingH: input.sizingH as AutoLayout['sizingH'],
+    sizingV: input.sizingV as AutoLayout['sizingV']
   }
 }
 

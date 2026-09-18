@@ -23,6 +23,13 @@ import WidgetsOutlinedIcon from '@mui/icons-material/WidgetsOutlined'
 import LanguageIcon from '@mui/icons-material/Language'
 import FullscreenIcon from '@mui/icons-material/Fullscreen'
 import FullscreenExitIcon from '@mui/icons-material/FullscreenExit'
+import NotificationsNoneOutlinedIcon from '@mui/icons-material/NotificationsNoneOutlined'
+import AccessTimeIcon from '@mui/icons-material/AccessTime'
+import PublicOutlinedIcon from '@mui/icons-material/PublicOutlined'
+import DescriptionOutlinedIcon from '@mui/icons-material/DescriptionOutlined'
+import DeleteOutlineIcon from '@mui/icons-material/DeleteOutlined'
+import Inventory2OutlinedIcon from '@mui/icons-material/Inventory2Outlined'
+import AdminPanelSettingsOutlinedIcon from '@mui/icons-material/AdminPanelSettingsOutlined'
 import type { BrowserFrame, DesignNode, DesignPage, DesignTool, InspectInfo } from '../shared/types'
 import type { FramePreset } from '../shared/framePresets'
 import { DesignInspector } from './DesignInspector'
@@ -42,6 +49,7 @@ import {
   IconNavVariables,
   IconPlus,
   IconSection,
+  IconSparkle,
   IconSun,
   IconTextOnPath,
   type IconProps
@@ -603,6 +611,7 @@ export function RightSidebar({
   inspectOn,
   page,
   node,
+  nodes = [],
   browser,
   tool,
   onPatchPage,
@@ -625,6 +634,7 @@ export function RightSidebar({
   inspectOn: boolean
   page: DesignPage
   node: DesignNode | null
+  nodes?: DesignNode[]
   browser: BrowserFrame | null
   tool?: DesignTool
   onPatchPage: (patch: Partial<DesignPage>) => void
@@ -672,14 +682,21 @@ export function RightSidebar({
             <span className="avatar sm rightbar-avatar">J</span>
             <IconCaret size={12} />
           </button>
-          <button type="button" className="rightbar-zoom" title="Reset zoom" onClick={onZoom}>
-            {zoom}%
-          </button>
+          <span className="rightbar-chrome-spacer" />
         </div>
-        <button type="button" className="rightbar-copy-link" onClick={onCopyLink}>
-          <span>Copy link</span>
-          <kbd>Ctrl + L</kbd>
-        </button>
+        {!commentsMode && !browserPanel && (
+          <div className="rightbar-tabs" role="tablist" aria-label="Properties">
+            <button type="button" role="tab" aria-selected="true" className="is-on">
+              Design
+            </button>
+            <button type="button" role="tab" aria-selected="false" disabled title="Coming soon">
+              Prototype
+            </button>
+            <button type="button" className="rightbar-zoom" title="Reset zoom" onClick={onZoom}>
+              {zoom}%
+            </button>
+          </div>
+        )}
       </div>
       <div className="props">
         {commentsMode ? (
@@ -688,6 +705,7 @@ export function RightSidebar({
           <DesignInspector
             page={page}
             node={node}
+            nodes={nodes}
             browser={browser}
             inspect={inspect}
             inspectOn={inspectOn}
@@ -717,118 +735,270 @@ export function HomeScreen({
 }) {
   const [prompt, setPrompt] = useState('')
   const [composerOpen, setComposerOpen] = useState(true)
+  const [nav, setNav] = useState<'recents' | 'community' | 'drafts' | 'folders' | 'resources' | 'trash' | 'admin'>('recents')
   const [tab, setTab] = useState<'recent' | 'shared-files' | 'shared-folders'>('recent')
   const [layout, setLayout] = useState<'grid' | 'list'>('grid')
+  const [search, setSearch] = useState('')
   const canMake = prompt.trim().length > 0
-  const sorted = [...files].sort((a, b) => (b.editedAt || 0) - (a.editedAt || 0))
+  const sorted = [...files]
+    .filter((file) => !search.trim() || file.name.toLowerCase().includes(search.trim().toLowerCase()))
+    .sort((a, b) => (b.editedAt || 0) - (a.editedAt || 0))
 
   return (
     <div className="home">
-      <div className="home-scroll">
-        {composerOpen && (
-          <section className="home-composer">
-            <div className="home-composer-head">
-              <div className="home-composer-title">
-                <h1>Describe your idea and make it come to life</h1>
-                <span className="home-ai-badge">AI</span>
-              </div>
-              <button type="button" className="home-composer-close" title="Dismiss" onClick={() => setComposerOpen(false)}>
-                <CloseIcon sx={{ fontSize: 18 }} />
-              </button>
-            </div>
-            <form
-              className="home-composer-box"
-              onSubmit={(event) => {
-                event.preventDefault()
-                if (!canMake) return
-                onCreateFromPrompt(prompt.trim())
-                setPrompt('')
-              }}
-            >
-              <input
-                value={prompt}
-                onChange={(event) => setPrompt(event.target.value)}
-                placeholder="Build a mind mapping tool with branching nodes and customization…"
-              />
-              <button type="submit" className={`home-make-btn${canMake ? ' is-ready' : ''}`} disabled={!canMake}>
-                Make a file
-                <ArrowForwardIcon sx={{ fontSize: 16 }} />
-              </button>
-            </form>
-          </section>
-        )}
+      <aside className="home-sidebar">
+        <div className="home-sidebar-top">
+          <button type="button" className="home-user">
+            <span className="home-user-avatar">J</span>
+            <span className="home-user-name">Jesse Bishop</span>
+            <KeyboardArrowDownIcon sx={{ fontSize: 18, color: '#8d8d8d' }} />
+          </button>
+          <button type="button" className="home-bell" title="Notifications">
+            <NotificationsNoneOutlinedIcon sx={{ fontSize: 20 }} />
+          </button>
+        </div>
 
-        <div className="home-toolbar">
-          <div className="home-tabs">
+        <label className="home-search">
+          <SearchIcon sx={{ fontSize: 18 }} />
+          <input
+            value={search}
+            onChange={(event) => setSearch(event.target.value)}
+            placeholder="Search"
+            spellCheck={false}
+          />
+        </label>
+
+        <nav className="home-nav">
+          <button
+            type="button"
+            className={nav === 'recents' ? 'is-on' : undefined}
+            onClick={() => setNav('recents')}
+          >
+            <AccessTimeIcon sx={{ fontSize: 18 }} />
+            Recents
+          </button>
+          <button
+            type="button"
+            className={nav === 'community' ? 'is-on' : undefined}
+            onClick={() => setNav('community')}
+          >
+            <PublicOutlinedIcon sx={{ fontSize: 18 }} />
+            Community
+          </button>
+        </nav>
+
+        <div className="home-team">
+          <button type="button" className="home-team-head">
+            <span className="home-team-mark">J</span>
+            <span className="home-team-name">Jesse Bishop</span>
+            <span className="home-pro-badge">Pro</span>
+            <KeyboardArrowDownIcon sx={{ fontSize: 16, color: '#8d8d8d', marginLeft: 'auto' }} />
+          </button>
+          <div className="home-team-links">
             {(
               [
-                { id: 'recent', label: 'Recently viewed' },
-                { id: 'shared-files', label: 'Shared files' },
-                { id: 'shared-folders', label: 'Shared folders' }
+                { id: 'drafts' as const, label: 'Drafts', icon: DescriptionOutlinedIcon },
+                { id: 'folders' as const, label: 'All folders', icon: FolderOutlinedIcon },
+                { id: 'resources' as const, label: 'Resources', icon: Inventory2OutlinedIcon },
+                { id: 'trash' as const, label: 'Trash', icon: DeleteOutlineIcon },
+                { id: 'admin' as const, label: 'Admin', icon: AdminPanelSettingsOutlinedIcon }
               ] as const
-            ).map((item) => (
-              <button
-                key={item.id}
-                type="button"
-                className={tab === item.id ? 'is-on' : ''}
-                onClick={() => setTab(item.id)}
-              >
-                {item.label}
-              </button>
-            ))}
-          </div>
-          <div className="home-filters">
-            <button type="button" className="home-filter-chip">
-              All files
-              <KeyboardArrowDownIcon sx={{ fontSize: 16 }} />
-            </button>
-            <div className="home-layout-toggle">
-              <button type="button" className={layout === 'grid' ? 'is-on' : ''} title="Grid" onClick={() => setLayout('grid')}>
-                <ViewModuleIcon sx={{ fontSize: 18 }} />
-              </button>
-              <button type="button" className={layout === 'list' ? 'is-on' : ''} title="List" onClick={() => setLayout('list')}>
-                <ViewListIcon sx={{ fontSize: 18 }} />
-              </button>
-            </div>
-            <button type="button" className="home-new-file" onClick={onNew}>
-              <AddIcon sx={{ fontSize: 18 }} />
-              New file
-            </button>
+            ).map((item) => {
+              const Icon = item.icon
+              return (
+                <button
+                  key={item.id}
+                  type="button"
+                  className={nav === item.id ? 'is-on' : undefined}
+                  onClick={() => setNav(item.id)}
+                >
+                  <Icon sx={{ fontSize: 18 }} />
+                  {item.label}
+                </button>
+              )
+            })}
           </div>
         </div>
 
-        {tab === 'shared-folders' ? (
-          <div className="home-empty">
-            <FolderOutlinedIcon sx={{ fontSize: 28 }} />
-            <p>No shared folders yet</p>
+        <div className="home-starred">
+          <div className="home-starred-head">
+            <span>Starred</span>
+            <KeyboardArrowDownIcon sx={{ fontSize: 16 }} />
           </div>
-        ) : tab === 'shared-files' && sorted.length === 0 ? (
-          <div className="home-empty">
-            <p>No shared files yet</p>
+          <button type="button">
+            <FolderOutlinedIcon sx={{ fontSize: 18 }} />
+            Coffee X Change
+          </button>
+          <button type="button">
+            <FolderOutlinedIcon sx={{ fontSize: 18 }} />
+            RoomAlign App
+          </button>
+        </div>
+      </aside>
+
+      <div className="home-main">
+        <header className="home-topbar">
+          <div className="home-crumb">
+            <button type="button" className="home-crumb-nav" title="Back" disabled>
+              <ChevronLeftIcon sx={{ fontSize: 18 }} />
+            </button>
+            <button type="button" className="home-crumb-nav" title="Forward" disabled>
+              <ChevronRightIcon sx={{ fontSize: 18 }} />
+            </button>
+            <span>Recents</span>
           </div>
-        ) : (
-          <div className={layout === 'grid' ? 'home-grid' : 'home-list'}>
-            {sorted.map((file) => (
-              <button key={file.id} type="button" className="home-file-card" onClick={() => onOpen(file.id)}>
-                <div className={`home-file-thumb tone-${thumbTone(file.id)}`}>
-                  <FileThumbPreview seed={file.id} name={file.name} />
+          <div className="home-create-pills">
+            <button type="button" className="home-create-pill" onClick={onNew}>
+              <span className="home-create-ico design" />
+              Design
+            </button>
+            <button type="button" className="home-create-pill" onClick={onNew}>
+              <span className="home-create-ico jam" />
+              Board
+            </button>
+            <button type="button" className="home-create-pill" onClick={onNew}>
+              <span className="home-create-ico slides" />
+              Slides
+            </button>
+            <button
+              type="button"
+              className="home-create-pill home-create-make"
+              onClick={() => {
+                setComposerOpen(true)
+                const el = document.querySelector<HTMLInputElement>('.home-composer-box input')
+                el?.focus()
+              }}
+            >
+              <IconSparkle size={14} />
+              Make
+            </button>
+            <button type="button" className="home-create-pill home-create-more">
+              More
+              <KeyboardArrowDownIcon sx={{ fontSize: 16 }} />
+            </button>
+          </div>
+        </header>
+
+        <div className="home-scroll">
+          {composerOpen && (
+            <section className="home-composer">
+              <div className="home-composer-head">
+                <div className="home-composer-title">
+                  <h1>Describe your idea and make it come to life</h1>
+                  <span className="home-ai-badge">AI</span>
                 </div>
-                <div className="home-file-meta">
-                  <span className="home-file-icon" aria-hidden>
-                    <IconNavFile size={14} />
-                  </span>
-                  <div className="home-file-copy">
-                    <strong>{file.name}</strong>
-                    <em>Edited {formatEdited(file.editedAt)}</em>
-                  </div>
-                  <span className="home-file-avatar" title="You">
-                    J
-                  </span>
-                </div>
+                <button type="button" className="home-composer-close" title="Dismiss" onClick={() => setComposerOpen(false)}>
+                  <CloseIcon sx={{ fontSize: 18 }} />
+                </button>
+              </div>
+              <form
+                className="home-composer-box"
+                onSubmit={(event) => {
+                  event.preventDefault()
+                  if (!canMake) return
+                  onCreateFromPrompt(prompt.trim())
+                  setPrompt('')
+                }}
+              >
+                <input
+                  value={prompt}
+                  onChange={(event) => setPrompt(event.target.value)}
+                  placeholder="Create an event management system with guest lists and automated email confirmations."
+                />
+                <button type="submit" className={`home-make-btn${canMake ? ' is-ready' : ''}`} disabled={!canMake}>
+                  Make a file
+                  <ArrowForwardIcon sx={{ fontSize: 16 }} />
+                </button>
+              </form>
+            </section>
+          )}
+
+          <div className="home-toolbar">
+            <div className="home-tabs">
+              {(
+                [
+                  { id: 'recent', label: 'Recently viewed' },
+                  { id: 'shared-files', label: 'Shared files' },
+                  { id: 'shared-folders', label: 'Shared folders' }
+                ] as const
+              ).map((item) => (
+                <button
+                  key={item.id}
+                  type="button"
+                  className={tab === item.id ? 'is-on' : ''}
+                  onClick={() => setTab(item.id)}
+                >
+                  {item.label}
+                </button>
+              ))}
+            </div>
+            <div className="home-filters">
+              <button type="button" className="home-filter-chip">
+                All organizations
+                <KeyboardArrowDownIcon sx={{ fontSize: 16 }} />
               </button>
-            ))}
+              <button type="button" className="home-filter-chip">
+                All files
+                <KeyboardArrowDownIcon sx={{ fontSize: 16 }} />
+              </button>
+              <div className="home-layout-toggle">
+                <button type="button" className={layout === 'grid' ? 'is-on' : ''} title="Grid" onClick={() => setLayout('grid')}>
+                  <ViewModuleIcon sx={{ fontSize: 18 }} />
+                </button>
+                <button type="button" className={layout === 'list' ? 'is-on' : ''} title="List" onClick={() => setLayout('list')}>
+                  <ViewListIcon sx={{ fontSize: 18 }} />
+                </button>
+              </div>
+            </div>
           </div>
-        )}
+
+          {nav === 'trash' ? (
+            <div className="home-empty">
+              <DeleteOutlineIcon sx={{ fontSize: 28 }} />
+              <p>Trash is empty</p>
+            </div>
+          ) : nav === 'community' ? (
+            <div className="home-empty">
+              <PublicOutlinedIcon sx={{ fontSize: 28 }} />
+              <p>Community files will show up here</p>
+            </div>
+          ) : tab === 'shared-folders' ? (
+            <div className="home-empty">
+              <FolderOutlinedIcon sx={{ fontSize: 28 }} />
+              <p>No shared folders yet</p>
+            </div>
+          ) : tab === 'shared-files' && sorted.length === 0 ? (
+            <div className="home-empty">
+              <p>No shared files yet</p>
+            </div>
+          ) : sorted.length === 0 ? (
+            <div className="home-empty">
+              <p>{search.trim() ? 'No files match your search' : 'No files yet — create a Design to start'}</p>
+            </div>
+          ) : (
+            <div className={layout === 'grid' ? 'home-grid' : 'home-list'}>
+              {sorted.map((file) => (
+                <button key={file.id} type="button" className="home-file-card" onClick={() => onOpen(file.id)}>
+                  <div className={`home-file-thumb tone-${thumbTone(file.id)}`}>
+                    <FileThumbPreview seed={file.id} name={file.name} />
+                  </div>
+                  <div className="home-file-meta">
+                    <span className="home-file-icon" aria-hidden>
+                      <IconNavFile size={14} />
+                    </span>
+                    <div className="home-file-copy">
+                      <strong>{file.name}</strong>
+                      <em>Edited {formatEdited(file.editedAt)}</em>
+                    </div>
+                    <span className="home-file-avatar" title="You">
+                      J
+                    </span>
+                  </div>
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
       </div>
     </div>
   )
