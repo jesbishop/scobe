@@ -24,6 +24,7 @@ import {
   type McpStatus,
   type Workspace
 } from '../shared/types'
+import type { SnapshotEvent } from '../shared/snapshot'
 
 app.setName('Vanta')
 
@@ -399,6 +400,9 @@ function registerIpc(): void {
       chromeHost.setMesurer(id, mode)
     }
   )
+  ipcMain.handle('vanta:setSnapshot', (_event, id: string | null) => {
+    chromeHost.setSnapshot(id)
+  })
   ipcMain.handle('vanta:runAgent', async (_event, messages: Array<{ role: 'user' | 'assistant'; text: string }>) => {
     if (agentRunning) throw new Error('Agent is already running')
     agentRunning = true
@@ -453,6 +457,9 @@ app.whenReady().then(async () => {
   })
   chromeHost.onInspect((info: InspectInfo | null) => {
     mainWindow?.webContents.send('vanta:inspect', info)
+  })
+  chromeHost.onSnapshot((event: SnapshotEvent) => {
+    mainWindow?.webContents.send('vanta:snapshot', event)
   })
   onDesignChange((nodes) => {
     mainWindow?.webContents.send('vanta:design', nodes)

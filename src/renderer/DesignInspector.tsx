@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
+import { useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react'
 import type { AutoLayout, AutoLayoutAlign, AutoLayoutJustify, BrowserFrame, DesignNode, DesignPage, DesignTool, ExportFormat, ExportSetting, LayoutSizing } from '../shared/types'
 import { BROWSER_SIZE_PRESETS, FRAME_PRESET_CATEGORIES, type FramePreset } from '../shared/framePresets'
 import {
@@ -22,8 +22,16 @@ import {
   type EffectType,
   type NoiseType
 } from '../shared/effects'
-import { nodeBounds } from './canvasMath'
+import {
+  cornersAreIndependent,
+  resolveCornerRadii,
+  uniformRadii,
+  type CornerRadii
+} from '../shared/corners'
+import { canAlignNodes, type AlignAction } from './alignGuides'
+import { measureSelectionGaps } from './selectionSpace'
 import type { InspectInfo } from '../shared/types'
+import { nodeBounds } from './canvasMath'
 import { FillPicker } from './FillPicker'
 import { FramePresetsPanel } from './FramePresetsPanel'
 import { isTextOnPath } from './textPath'
@@ -36,10 +44,12 @@ import {
 
 import {
   allGoogleFonts,
+  cssFontFamily,
   ensureGoogleFontLoaded,
   familyHasVariableAxes,
   FONT_STYLE_OPTIONS,
   fontStyleId,
+  nearestFontStyle,
   searchGoogleFonts,
   stylesForFamily,
   SYSTEM_FONTS,
@@ -68,6 +78,9 @@ export function DesignInspector({
   page,
   node,
   nodes = [],
+  selectedIds = [],
+  onAlign,
+  onSpace,
   browser,
   inspect,
   inspectOn,
@@ -81,6 +94,9 @@ export function DesignInspector({
   page: DesignPage
   node: DesignNode | null
   nodes?: DesignNode[]
+  selectedIds?: string[]
+  onAlign?: (action: AlignAction) => void
+  onSpace?: (axis: 'x' | 'y', gap: number) => void
   browser: BrowserFrame | null
   inspect: InspectInfo | null
   inspectOn: boolean
@@ -142,55 +158,175 @@ export function DesignInspector({
               : node.type === 'path'
                 ? 'Vector'
                 : node.type[0].toUpperCase() + node.type.slice(1)
+    const parent = node.parentId ? nodes.find((item) => item.id === node.parentId) : null
+    const inAutoLayout =
+      Boolean(parent && parent.type === 'frame' && parent.layout && parent.layout.mode !== 'none')
+    const frameAuto = node.type === 'frame' && node.layout && node.layout.mode !== 'none'
+    // Fill/Relative only apply while flowing in a parent flex (not absolute).
+    const allowFill = inAutoLayout && !node.layoutAbsolute
+    const showDims = !frameAuto
+    const sizingH = node.layoutSizingH || 'fixed'
+    const sizingV = node.layoutSizingV || 'fixed'
+    const textResize = node.textResize || 'auto-width'
+    const parentPad =
+      parent?.layout && parent.layout.mode !== 'none'
+        ? typeof parent.layout.padding === 'number'
+          ? { t: parent.layout.padding, r: parent.layout.padding, b: parent.layout.padding, l: parent.layout.padding }
+          : parent.layout.padding || { t: 0, r: 0, b: 0, l: 0 }
+        : { t: 0, r: 0, b: 0, l: 0 }
+    const parentInnerW = Math.max(1, (parent?.width || 0) - (parentPad.l || 0) - (parentPad.r || 0))
+    const parentInnerH = Math.max(1, (parent?.height || 0) - (parentPad.t || 0) - (parentPad.b || 0))
+    const percentH =
+      node.layoutPercentH ??
+      Math.min(100, Math.max(0, Math.round(((box.width || 0) / parentInnerW) * 100)))
+    const percentV =
+      node.layoutPercentV ??
+      Math.min(100, Math.max(0, Math.round(((box.height || 0) / parentInnerH) * 100)))
+    const alignIds = selectedIds.length ? selectedIds : [node.id]
+    const alignOn = canAlignNodes(nodes, alignIds)
+    const spacing =
+      onSpace && (alignIds.length > 1 || (alignIds.length === 1 && nodes.some((item) => item.id === alignIds[0])))
+        ? measureSelectionGaps(nodes, alignIds)
+        : null
+    const hasSpacing = Boolean(
+      spacing &&
+        (spacing.hGap != null || spacing.vGap != null) &&
+        !(frameAuto && spacing.autoLayoutId === node.id)
+    )
+
     return (
       <>
-        <div className="prop-node-title">{node.name || node.text || typeLabel}</div>
+        <div className="prop-node-head">
+          <div className="prop-node-title">
+            {alignIds.length > 1 ? `${alignIds.length} selected` : node.name || node.text || typeLabel}
+          </div>
+          <div className="prop-node-actions">
+            <button type="button" className="prop-head-ico" title="Create component" disabled>
+              <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden>
+                <path d="M7 1.5 12.5 7 7 12.5 1.5 7 7 1.5Z" stroke="currentColor" strokeWidth="1.2" />
+              </svg>
+            </button>
+            <button type="button" className="prop-head-ico" title="Apply style" disabled>
+              <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden>
+                <rect x="2" y="2" width="4" height="4" rx="0.8" stroke="currentColor" strokeWidth="1.2" />
+                <rect x="8" y="2" width="4" height="4" rx="0.8" stroke="currentColor" strokeWidth="1.2" />
+                <rect x="2" y="8" width="4" height="4" rx="0.8" stroke="currentColor" strokeWidth="1.2" />
+                <rect x="8" y="8" width="4" height="4" rx="0.8" stroke="currentColor" strokeWidth="1.2" />
+              </svg>
+            </button>
+            <button type="button" className="prop-head-ico prop-head-ico-caret" title="More" disabled>
+              <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden>
+                <rect x="2.5" y="2.5" width="9" height="9" rx="1.5" stroke="currentColor" strokeWidth="1.2" />
+                <path d="M5 7h4M7 5v4" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
+              </svg>
+              <svg width="8" height="8" viewBox="0 0 16 16" fill="none" aria-hidden>
+                <path d="M9.768 6.768a.5.5 0 0 1 .707.707l-2.12 2.121a.5.5 0 0 1-.708 0L5.525 7.475a.5.5 0 0 1 .708-.707l1.768 1.767z" fill="currentColor" />
+              </svg>
+            </button>
+            <button type="button" className="prop-head-ico" title="Focus" disabled>
+              <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden>
+                <circle cx="7" cy="7" r="2.2" stroke="currentColor" strokeWidth="1.2" />
+                <path d="M7 1.5v2M7 10.5v2M1.5 7h2M10.5 7h2" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
+              </svg>
+            </button>
+          </div>
+        </div>
         <PositionBlock
           x={box.x}
           y={box.y}
           rotation={node.rotation || 0}
           flipX={Boolean(node.flipX)}
           flipY={Boolean(node.flipY)}
+          canAlign={alignOn}
+          onAlign={onAlign}
           onChange={(patch) => onPatchNode(node.id, patch)}
         />
-        {!(node.type === 'frame' && node.layout && node.layout.mode !== 'none') && (
+        {(showDims || inAutoLayout || frameAuto || isText || hasSpacing) && (
           <LayoutDimsBlock
             width={box.width}
             height={isText ? box.height || node.fontSize || 12 : box.height}
             aspectLocked={Boolean(node.aspectLocked)}
+            showDimensions={showDims || inAutoLayout || frameAuto}
+            showResizing={inAutoLayout || isText || Boolean(frameAuto)}
+            sizingH={
+              isText
+                ? textResize === 'auto-width'
+                  ? 'hug'
+                  : sizingH === 'fill'
+                    ? 'fill'
+                    : 'fixed'
+                : frameAuto
+                  ? sizingH === 'fill' || sizingH === 'relative'
+                    ? sizingH
+                    : node.layout?.sizingH === 'hug'
+                      ? 'hug'
+                      : 'fixed'
+                  : sizingH
+            }
+            sizingV={
+              isText
+                ? textResize === 'auto-height'
+                  ? 'hug'
+                  : sizingV === 'fill'
+                    ? 'fill'
+                    : textResize === 'auto-width'
+                      ? 'hug'
+                      : 'fixed'
+                : frameAuto
+                  ? sizingV === 'fill' || sizingV === 'relative'
+                    ? sizingV
+                    : node.layout?.sizingV === 'hug'
+                      ? 'hug'
+                      : 'fixed'
+                  : sizingV
+            }
+            percentH={percentH}
+            percentV={percentV}
+            parentInnerW={parentInnerW}
+            parentInnerH={parentInnerH}
+            textMode={isText}
+            textResize={textResize}
+            flexFrame={frameAuto ? node.layout : undefined}
+            allowFill={allowFill}
+            showAbsolute={inAutoLayout}
+            absolute={Boolean(node.layoutAbsolute)}
             onChange={(patch) => onPatchNode(node.id, patch)}
+            spacing={
+              hasSpacing && spacing && onSpace
+                ? { hGap: spacing.hGap, vGap: spacing.vGap, onChange: onSpace }
+                : null
+            }
           />
         )}
-        {(() => {
-          const parent = node.parentId ? nodes.find((item) => item.id === node.parentId) : null
-          if (!parent || parent.type !== 'frame' || !parent.layout || parent.layout.mode === 'none') return null
-          return (
-            <ChildLayoutBlock
-              sizingH={node.layoutSizingH || 'fixed'}
-              sizingV={node.layoutSizingV || 'fixed'}
-              absolute={Boolean(node.layoutAbsolute)}
-              onChange={(patch) => onPatchNode(node.id, patch)}
-            />
-          )
-        })()}
         {node.type === 'frame' && (
           <AutoLayoutBlock
             layout={node.layout}
-            width={box.width}
-            height={box.height}
             clipsContent={node.clipsContent !== false}
             onChange={(layout) => onPatchNode(node.id, { layout })}
-            onResize={(patch) => onPatchNode(node.id, patch)}
             onClips={(clipsContent) => onPatchNode(node.id, { clipsContent })}
           />
         )}
         <AppearanceBlock
+          nodeId={node.id}
           opacity={(node.opacity ?? 1) * 100}
           blend={normalizeBlendMode(node.blendMode)}
-          radius={isBox ? node.radius ?? (isSection ? 2 : 0) : undefined}
+          radii={
+            isBox || isText
+              ? resolveCornerRadii(node, isSection ? 2 : 0)
+              : undefined
+          }
           onOpacity={(opacity) => onPatchNode(node.id, { opacity: opacity / 100 })}
           onBlend={(blendMode) => onPatchNode(node.id, { blendMode })}
-          onRadius={isBox ? (radius) => onPatchNode(node.id, { radius: Math.max(0, radius) }) : undefined}
+          onRadii={
+            isBox || isText
+              ? (next, mode) => {
+                  onPatchNode(node.id, {
+                    radius: next.tl,
+                    cornerRadii: mode === 'independent' ? next : undefined
+                  })
+                }
+              : undefined
+          }
         />
         {isText && (
           <TextBlock
@@ -204,7 +340,13 @@ export function DesignInspector({
           fallbackHex={fill}
           onChange={(paints) => {
             const legacy = legacyFromPaints(paints)
-            onPatchNode(node.id, { fills: paints, fill: legacy.fill, fillOpacity: legacy.fillOpacity })
+            const image = paints.find((paint) => paint.type === 'image' && paint.visible !== false)
+            onPatchNode(node.id, {
+              fills: paints,
+              fill: legacy.fill,
+              fillOpacity: legacy.fillOpacity,
+              ...(node.type === 'image' && image?.type === 'image' ? { imageDataUrl: image.imageDataUrl } : {})
+            })
           }}
         />
         <StrokeBlock
@@ -255,6 +397,9 @@ export function DesignInspector({
   if (browser) {
     return (
       <>
+        <div className="prop-node-head">
+          <div className="prop-node-title">Browser</div>
+        </div>
         <PositionBlock
           x={browser.x}
           y={browser.y}
@@ -325,6 +470,43 @@ export function DesignInspector({
   )
 }
 
+function GapInput({
+  axis,
+  value,
+  onChange
+}: {
+  axis: 'x' | 'y'
+  value: number | 'mixed'
+  onChange: (gap: number) => void
+}) {
+  const shown = value === 'mixed' ? 'Mixed' : String(Math.round(value))
+  return (
+    <label className="prop-num" title={axis === 'x' ? 'Horizontal spacing' : 'Vertical spacing'}>
+      <span>
+        {axis === 'x' ? (
+          <svg width="12" height="12" viewBox="0 0 12 12" fill="none" aria-hidden>
+            <path d="M2 1.6v8.8M6 1.6v8.8M10 1.6v8.8" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
+            <path d="M2.6 6h6.8" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
+          </svg>
+        ) : (
+          <svg width="12" height="12" viewBox="0 0 12 12" fill="none" aria-hidden>
+            <path d="M1.6 2h8.8M1.6 6h8.8M1.6 10h8.8" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
+            <path d="M6 2.6v6.8" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
+          </svg>
+        )}
+      </span>
+      <input
+        value={shown}
+        onFocus={(event) => event.currentTarget.select()}
+        onChange={(event) => {
+          const next = Number(event.target.value)
+          if (Number.isFinite(next)) onChange(Math.max(0, next))
+        }}
+      />
+    </label>
+  )
+}
+
 function PositionBlock({
   x,
   y,
@@ -332,6 +514,8 @@ function PositionBlock({
   flipX,
   flipY,
   hideRotation,
+  canAlign = false,
+  onAlign,
   onChange
 }: {
   x: number
@@ -340,6 +524,8 @@ function PositionBlock({
   flipX?: boolean
   flipY?: boolean
   hideRotation?: boolean
+  canAlign?: boolean
+  onAlign?: (action: AlignAction) => void
   onChange: (patch: {
     x?: number
     y?: number
@@ -350,54 +536,199 @@ function PositionBlock({
 }) {
   return (
     <section className="prop-section prop-section-position">
-      <div className="prop-align-row" aria-label="Align">
-        {(
-          [
-            ['left', 'Align left'],
-            ['hcenter', 'Align horizontal centers'],
-            ['right', 'Align right'],
-            ['top', 'Align top'],
-            ['vcenter', 'Align vertical centers'],
-            ['bottom', 'Align bottom']
-          ] as const
-        ).map(([id, title]) => (
-          <button key={id} type="button" className="prop-align-ico" title={title} disabled>
-            <AlignIcon kind={id} />
-          </button>
-        ))}
-      </div>
-      <div className="prop-flex-layout">
-        <div className="prop-grid">
-          <NumField prefix="X" value={x} onChange={(next) => onChange({ x: next })} />
-          <NumField prefix="Y" value={y} onChange={(next) => onChange({ y: next })} />
+      <div className="prop-section-head">Position</div>
+      <div className="prop-field-row prop-align-labeled">
+        <span className="prop-field-label" />
+        <div className="prop-align-row" aria-label="Align">
+          {(
+            [
+              ['left', 'Align left'],
+              ['hcenter', 'Align horizontal centers'],
+              ['right', 'Align right']
+            ] as const
+          ).map(([id, title]) => (
+            <button
+              key={id}
+              type="button"
+              className="prop-align-ico"
+              title={canAlign ? title : 'Select two objects, or one object inside a frame'}
+              disabled={!canAlign || !onAlign}
+              onClick={() => onAlign?.(id)}
+            >
+              <AlignIcon kind={id} />
+            </button>
+          ))}
         </div>
-        {!hideRotation && (
-          <div className="prop-rotation-row">
-            <NumField prefix="°" value={rotation} onChange={(next) => onChange({ rotation: next })} />
-            <div className="prop-flip-btns">
-              <button
-                type="button"
-                className={flipX ? 'is-on' : undefined}
-                title="Flip horizontal"
-                aria-pressed={Boolean(flipX)}
-                onClick={() => onChange({ flipX: !flipX })}
-              >
-                <FlipIcon axis="x" />
-              </button>
-              <button
-                type="button"
-                className={flipY ? 'is-on' : undefined}
-                title="Flip vertical"
-                aria-pressed={Boolean(flipY)}
-                onClick={() => onChange({ flipY: !flipY })}
-              >
-                <FlipIcon axis="y" />
-              </button>
-            </div>
-          </div>
-        )}
+        <div className="prop-align-row" aria-label="Align vertical">
+          {(
+            [
+              ['top', 'Align top'],
+              ['vcenter', 'Align vertical centers'],
+              ['bottom', 'Align bottom']
+            ] as const
+          ).map(([id, title]) => (
+            <button
+              key={id}
+              type="button"
+              className="prop-align-ico"
+              title={canAlign ? title : 'Select two objects, or one object inside a frame'}
+              disabled={!canAlign || !onAlign}
+              onClick={() => onAlign?.(id)}
+            >
+              <AlignIcon kind={id} />
+            </button>
+          ))}
+        </div>
       </div>
+      <div className="prop-field-row">
+        <span className="prop-field-label">Position</span>
+        <NumField prefix="X" value={x} onChange={(next) => onChange({ x: next })} />
+        <NumField prefix="Y" value={y} onChange={(next) => onChange({ y: next })} />
+      </div>
+      {!hideRotation && (
+        <div className="prop-field-row">
+          <span className="prop-field-label">Rotation</span>
+          <NumField prefix="°" value={rotation} onChange={(next) => onChange({ rotation: next })} />
+          <div className="prop-flip-btns">
+            <button
+              type="button"
+              className={flipX ? 'is-on' : undefined}
+              title="Flip horizontal"
+              aria-pressed={Boolean(flipX)}
+              onClick={() => onChange({ flipX: !flipX })}
+            >
+              <FlipIcon axis="x" />
+            </button>
+            <button
+              type="button"
+              className={flipY ? 'is-on' : undefined}
+              title="Flip vertical"
+              aria-pressed={Boolean(flipY)}
+              onClick={() => onChange({ flipY: !flipY })}
+            >
+              <FlipIcon axis="y" />
+            </button>
+            <button type="button" title="Rotate 90°" disabled>
+              <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden>
+                <path
+                  d="M3 7a4 4 0 1 1 4 4"
+                  stroke="currentColor"
+                  strokeWidth="1.3"
+                  strokeLinecap="round"
+                />
+                <path d="M3 7V4.5M3 7H5.5" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
+              </svg>
+            </button>
+          </div>
+        </div>
+      )}
     </section>
+  )
+}
+
+function sizingLabel(mode: LayoutSizing): string {
+  if (mode === 'hug') return 'Fit'
+  if (mode === 'fill') return 'Fill'
+  if (mode === 'relative') return 'Relative'
+  return 'Fixed'
+}
+
+function SizeModeField({
+  axis,
+  mode,
+  value,
+  modes,
+  onMode,
+  onValue
+}: {
+  axis: 'W' | 'H'
+  mode: LayoutSizing
+  value: number
+  modes: LayoutSizing[]
+  onMode: (mode: LayoutSizing) => void
+  onValue: (value: number) => void
+}) {
+  const [open, setOpen] = useState(false)
+  const rootRef = useRef<HTMLDivElement>(null)
+  const showNumber = mode === 'fixed' || mode === 'relative'
+
+  useEffect(() => {
+    if (!open) return
+    const onDoc = (event: MouseEvent) => {
+      if (!rootRef.current?.contains(event.target as Node)) setOpen(false)
+    }
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setOpen(false)
+    }
+    document.addEventListener('mousedown', onDoc)
+    window.addEventListener('keydown', onKey)
+    return () => {
+      document.removeEventListener('mousedown', onDoc)
+      window.removeEventListener('keydown', onKey)
+    }
+  }, [open])
+
+  return (
+    <div className={`prop-size-mode${open ? ' is-open' : ''}`} ref={rootRef}>
+      {showNumber ? (
+        <label className="prop-num prop-size-mode-num">
+          <button type="button" className="prop-size-mode-axis" onClick={() => setOpen((v) => !v)}>
+            {axis}
+          </button>
+          <input
+            value={Number.isFinite(value) ? String(Math.round(value * 100) / 100) : '0'}
+            onFocus={(event) => event.currentTarget.select()}
+            onChange={(event) => {
+              const next = Number(event.target.value)
+              if (Number.isFinite(next)) onValue(next)
+            }}
+          />
+          {mode === 'relative' && <em>%</em>}
+          <button
+            type="button"
+            className="prop-size-mode-caret"
+            aria-label={`${axis} sizing`}
+            onClick={() => setOpen((v) => !v)}
+          >
+            <svg width="8" height="8" viewBox="0 0 16 16" fill="none" aria-hidden>
+              <path d="M4 6.5 8 10.5 12 6.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+            </svg>
+          </button>
+        </label>
+      ) : (
+        <button type="button" className="prop-size-mode-trigger" onClick={() => setOpen((v) => !v)}>
+          <span>{axis}</span>
+          <em>{sizingLabel(mode)}</em>
+          <svg width="8" height="8" viewBox="0 0 16 16" fill="none" aria-hidden>
+            <path d="M4 6.5 8 10.5 12 6.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+          </svg>
+        </button>
+      )}
+      {open && (
+        <div className="prop-size-mode-menu" role="listbox" aria-label={`${axis} sizing`}>
+          {modes.map((item) => (
+            <button
+              key={item}
+              type="button"
+              role="option"
+              aria-selected={mode === item}
+              className={mode === item ? 'is-on' : undefined}
+              onClick={() => {
+                onMode(item)
+                setOpen(false)
+              }}
+            >
+              <span>{sizingLabel(item)}</span>
+              {mode === item && (
+                <svg width="12" height="12" viewBox="0 0 12 12" fill="none" aria-hidden>
+                  <path d="M2.5 6.2 4.8 8.5 9.5 3.5" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
+                </svg>
+              )}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
   )
 }
 
@@ -405,57 +736,333 @@ function LayoutDimsBlock({
   width,
   height,
   aspectLocked,
+  showDimensions = true,
+  showResizing = false,
+  sizingH = 'fixed',
+  sizingV = 'fixed',
+  percentH = 100,
+  percentV = 100,
+  parentInnerW = 1,
+  parentInnerH = 1,
+  absolute = false,
+  textMode = false,
+  textResize = 'auto-width',
+  flexFrame,
+  allowFill = false,
+  showAbsolute = false,
+  spacing = null,
   onChange
 }: {
   width: number
   height: number
   aspectLocked?: boolean
-  onChange: (patch: { width?: number; height?: number; aspectLocked?: boolean }) => void
+  showDimensions?: boolean
+  showResizing?: boolean
+  sizingH?: LayoutSizing
+  sizingV?: LayoutSizing
+  percentH?: number
+  percentV?: number
+  parentInnerW?: number
+  parentInnerH?: number
+  absolute?: boolean
+  textMode?: boolean
+  textResize?: 'auto-width' | 'auto-height' | 'fixed'
+  flexFrame?: AutoLayout
+  allowFill?: boolean
+  showAbsolute?: boolean
+  spacing?: {
+    hGap: number | 'mixed' | null
+    vGap: number | 'mixed' | null
+    onChange: (axis: 'x' | 'y', gap: number) => void
+  } | null
+  onChange: (patch: {
+    width?: number
+    height?: number
+    aspectLocked?: boolean
+    layout?: AutoLayout
+    layoutSizingH?: LayoutSizing
+    layoutSizingV?: LayoutSizing
+    layoutPercentH?: number
+    layoutPercentV?: number
+    layoutAbsolute?: boolean
+    textResize?: 'auto-width' | 'auto-height' | 'fixed'
+  }) => void
 }) {
   const ratio = width / Math.max(1, height)
+  const modes: LayoutSizing[] = (() => {
+    if (!showResizing) return ['fixed']
+    if (textMode) return allowFill ? ['fixed', 'hug', 'fill'] : ['fixed', 'hug']
+    if (flexFrame) {
+      return allowFill || sizingH === 'fill' || sizingV === 'fill' || sizingH === 'relative' || sizingV === 'relative'
+        ? ['fixed', 'hug', 'fill', 'relative']
+        : ['fixed', 'hug']
+    }
+    return allowFill ? ['fixed', 'hug', 'fill', 'relative'] : ['fixed']
+  })()
+
+  const applyFrameSizing = (axis: 'h' | 'v', mode: LayoutSizing) => {
+    const base = { ...defaultFrameLayout(), ...flexFrame! }
+    if (mode === 'relative') {
+      if (axis === 'h') {
+        const pct = Math.min(100, Math.max(0, Math.round((width / Math.max(1, parentInnerW)) * 100)))
+        onChange({
+          layout: { ...base, sizingH: 'fixed' },
+          layoutSizingH: 'relative',
+          layoutPercentH: pct,
+          width: Math.max(1, (parentInnerW * pct) / 100)
+        })
+        return
+      }
+      const pct = Math.min(100, Math.max(0, Math.round((height / Math.max(1, parentInnerH)) * 100)))
+      onChange({
+        layout: { ...base, sizingV: 'fixed' },
+        layoutSizingV: 'relative',
+        layoutPercentV: pct,
+        height: Math.max(1, (parentInnerH * pct) / 100)
+      })
+      return
+    }
+    if (mode === 'fill') {
+      if (axis === 'h') {
+        onChange({ layout: { ...base, sizingH: 'fixed' }, layoutSizingH: 'fill' })
+        return
+      }
+      onChange({ layout: { ...base, sizingV: 'fixed' }, layoutSizingV: 'fill' })
+      return
+    }
+    if (mode === 'hug') {
+      if (axis === 'h') {
+        onChange({
+          layout: { ...base, sizingH: 'hug' },
+          layoutSizingH: 'fixed'
+        })
+        return
+      }
+      onChange({
+        layout: { ...base, sizingV: 'hug' },
+        layoutSizingV: 'fixed'
+      })
+      return
+    }
+    if (axis === 'h') {
+      onChange({
+        layout: { ...base, sizingH: 'fixed' },
+        layoutSizingH: 'fixed',
+        width
+      })
+      return
+    }
+    onChange({
+      layout: { ...base, sizingV: 'fixed' },
+      layoutSizingV: 'fixed',
+      height
+    })
+  }
+
+  const setSizingH = (mode: LayoutSizing) => {
+    if (textMode) {
+      if (mode === 'hug') onChange({ textResize: 'auto-width', layoutSizingH: 'fixed' })
+      else if (mode === 'fill') onChange({ textResize: 'fixed', layoutSizingH: 'fill' })
+      else onChange({ textResize: 'fixed', layoutSizingH: 'fixed' })
+      return
+    }
+    if (flexFrame) {
+      applyFrameSizing('h', mode)
+      return
+    }
+    if (mode === 'relative') {
+      const pct = Math.min(100, Math.max(0, Math.round((width / Math.max(1, parentInnerW)) * 100)))
+      onChange({
+        layoutSizingH: 'relative',
+        layoutPercentH: pct,
+        width: Math.max(1, (parentInnerW * pct) / 100)
+      })
+      return
+    }
+    if (mode === 'hug') {
+      onChange({ layoutSizingH: 'hug' })
+      return
+    }
+    onChange({ layoutSizingH: mode })
+  }
+  const setSizingV = (mode: LayoutSizing) => {
+    if (textMode) {
+      if (mode === 'hug') onChange({ textResize: 'auto-height', layoutSizingV: 'fixed' })
+      else if (mode === 'fill') onChange({ textResize: 'fixed', layoutSizingV: 'fill' })
+      else onChange({ textResize: 'fixed', layoutSizingV: 'fixed' })
+      return
+    }
+    if (flexFrame) {
+      applyFrameSizing('v', mode)
+      return
+    }
+    if (mode === 'relative') {
+      const pct = Math.min(100, Math.max(0, Math.round((height / Math.max(1, parentInnerH)) * 100)))
+      onChange({
+        layoutSizingV: 'relative',
+        layoutPercentV: pct,
+        height: Math.max(1, (parentInnerH * pct) / 100)
+      })
+      return
+    }
+    if (mode === 'hug') {
+      onChange({ layoutSizingV: 'hug' })
+      return
+    }
+    onChange({ layoutSizingV: mode })
+  }
+
   const setWidth = (next: number) => {
+    if (sizingH === 'relative') {
+      const pct = Math.min(100, Math.max(0, next))
+      onChange({
+        layoutSizingH: 'relative',
+        layoutPercentH: pct,
+        width: Math.max(1, (parentInnerW * pct) / 100),
+        ...(flexFrame ? { layout: { ...defaultFrameLayout(), ...flexFrame, sizingH: 'fixed' } } : {})
+      })
+      return
+    }
     const w = Math.max(1, next)
-    if (aspectLocked) onChange({ width: w, height: Math.max(1, w / ratio) })
-    else onChange({ width: w })
+    if (flexFrame) {
+      const base = { ...defaultFrameLayout(), ...flexFrame, sizingH: 'fixed' as const }
+      if (aspectLocked) {
+        onChange({
+          width: w,
+          height: Math.max(1, w / ratio),
+          layout: { ...base, sizingV: 'fixed' },
+          layoutSizingH: 'fixed',
+          layoutSizingV: 'fixed'
+        })
+      } else {
+        onChange({ width: w, layout: base, layoutSizingH: 'fixed' })
+      }
+      return
+    }
+    if (aspectLocked) onChange({ width: w, height: Math.max(1, w / ratio), layoutSizingH: 'fixed' })
+    else onChange({ width: w, layoutSizingH: 'fixed' })
   }
   const setHeight = (next: number) => {
+    if (sizingV === 'relative') {
+      const pct = Math.min(100, Math.max(0, next))
+      onChange({
+        layoutSizingV: 'relative',
+        layoutPercentV: pct,
+        height: Math.max(1, (parentInnerH * pct) / 100),
+        ...(flexFrame ? { layout: { ...defaultFrameLayout(), ...flexFrame, sizingV: 'fixed' } } : {})
+      })
+      return
+    }
     const h = Math.max(1, next)
-    if (aspectLocked) onChange({ height: h, width: Math.max(1, h * ratio) })
-    else onChange({ height: h })
+    if (flexFrame) {
+      const base = { ...defaultFrameLayout(), ...flexFrame, sizingV: 'fixed' as const }
+      if (aspectLocked) {
+        onChange({
+          height: h,
+          width: Math.max(1, h * ratio),
+          layout: { ...base, sizingH: 'fixed' },
+          layoutSizingH: 'fixed',
+          layoutSizingV: 'fixed'
+        })
+      } else {
+        onChange({ height: h, layout: base, layoutSizingV: 'fixed' })
+      }
+      return
+    }
+    if (aspectLocked) onChange({ height: h, width: Math.max(1, h * ratio), layoutSizingV: 'fixed' })
+    else onChange({ height: h, layoutSizingV: 'fixed' })
   }
+
+  const modeH: LayoutSizing = textMode
+    ? textResize === 'auto-width'
+      ? 'hug'
+      : sizingH === 'fill'
+        ? 'fill'
+        : 'fixed'
+    : sizingH
+  const modeV: LayoutSizing = textMode
+    ? textResize === 'auto-height'
+      ? 'hug'
+      : textResize === 'auto-width'
+        ? 'hug'
+        : sizingV === 'fill'
+          ? 'fill'
+          : 'fixed'
+    : sizingV
+
   return (
     <section className="prop-section prop-section-layout">
-      <div className="prop-wh-row">
-        <NumField prefix="W" value={width} onChange={setWidth} />
-        <button
-          type="button"
-          className={`prop-aspect-lock${aspectLocked ? ' is-on' : ''}`}
-          title={aspectLocked ? 'Unlock aspect ratio' : 'Lock aspect ratio'}
-          aria-pressed={Boolean(aspectLocked)}
-          onClick={() => onChange({ aspectLocked: !aspectLocked })}
-        >
-          {aspectLocked ? (
-            <svg width="12" height="12" viewBox="0 0 12 12" fill="none" aria-hidden>
-              <path
-                d="M4 5V3.8A1.8 1.8 0 0 1 5.8 2h.4A1.8 1.8 0 0 1 8 3.8V5M3.5 5h5c.55 0 1 .45 1 1v3.5c0 .55-.45 1-1 1h-5c-.55 0-1-.45-1-1V6c0-.55.45-1 1-1Z"
-                stroke="currentColor"
-                strokeWidth="1.2"
-                strokeLinejoin="round"
-              />
-            </svg>
-          ) : (
-            <svg width="12" height="12" viewBox="0 0 12 12" fill="none" aria-hidden>
-              <path
-                d="M4 5V3.8A1.8 1.8 0 0 1 5.8 2h.4A1.8 1.8 0 0 1 8 3.8M3.5 5h5c.55 0 1 .45 1 1v3.5c0 .55-.45 1-1 1h-5c-.55 0-1-.45-1-1V6c0-.55.45-1 1-1Z"
-                stroke="currentColor"
-                strokeWidth="1.2"
-                strokeLinejoin="round"
-              />
-            </svg>
+      <div className="prop-section-head">Layout</div>
+      {showAbsolute && !textMode && (
+        <label className="al-clip prop-layout-absolute">
+          <input
+            type="checkbox"
+            checked={absolute}
+            onChange={(event) => onChange({ layoutAbsolute: event.target.checked })}
+          />
+          Absolute position
+        </label>
+      )}
+      {showDimensions && !absolute && (
+        <div className="prop-field-row prop-field-row-size-modes">
+          <SizeModeField
+            axis="W"
+            mode={modeH}
+            value={modeH === 'relative' ? percentH : width}
+            modes={modes}
+            onMode={setSizingH}
+            onValue={setWidth}
+          />
+          <div className="prop-dim-trail">
+            <SizeModeField
+              axis="H"
+              mode={modeV}
+              value={modeV === 'relative' ? percentV : height}
+              modes={modes}
+              onMode={setSizingV}
+              onValue={setHeight}
+            />
+            <button
+              type="button"
+              className={`prop-aspect-lock${aspectLocked ? ' is-on' : ''}`}
+              title={aspectLocked ? 'Unlock aspect ratio' : 'Lock aspect ratio'}
+              aria-pressed={Boolean(aspectLocked)}
+              onClick={() => onChange({ aspectLocked: !aspectLocked })}
+            >
+              {aspectLocked ? (
+                <svg width="12" height="12" viewBox="0 0 12 12" fill="none" aria-hidden>
+                  <path
+                    d="M4 5V3.8A1.8 1.8 0 0 1 5.8 2h.4A1.8 1.8 0 0 1 8 3.8V5M3.5 5h5c.55 0 1 .45 1 1v3.5c0 .55-.45 1-1 1h-5c-.55 0-1-.45-1-1V6c0-.55.45-1 1-1Z"
+                    stroke="currentColor"
+                    strokeWidth="1.2"
+                    strokeLinejoin="round"
+                  />
+                </svg>
+              ) : (
+                <svg width="12" height="12" viewBox="0 0 12 12" fill="none" aria-hidden>
+                  <path
+                    d="M4 5V3.8A1.8 1.8 0 0 1 5.8 2h.4A1.8 1.8 0 0 1 8 3.8M3.5 5h5c.55 0 1 .45 1 1v3.5c0 .55-.45 1-1 1h-5c-.55 0-1-.45-1-1V6c0-.55.45-1 1-1Z"
+                    stroke="currentColor"
+                    strokeWidth="1.2"
+                    strokeLinejoin="round"
+                  />
+                </svg>
+              )}
+            </button>
+          </div>
+        </div>
+      )}
+      {spacing && (spacing.hGap != null || spacing.vGap != null) && (
+        <div className="prop-field-row">
+          <span className="prop-field-label">Spacing</span>
+          {spacing.hGap != null && (
+            <GapInput axis="x" value={spacing.hGap} onChange={(gap) => spacing.onChange('x', gap)} />
           )}
-        </button>
-        <NumField prefix="H" value={height} onChange={setHeight} />
-      </div>
+          {spacing.vGap != null && (
+            <GapInput axis="y" value={spacing.vGap} onChange={(gap) => spacing.onChange('y', gap)} />
+          )}
+        </div>
+      )}
     </section>
   )
 }
@@ -520,19 +1127,13 @@ function FlipIcon({ axis }: { axis: 'x' | 'y' }) {
 
 function AutoLayoutBlock({
   layout,
-  width,
-  height,
   clipsContent,
   onChange,
-  onResize,
   onClips
 }: {
   layout?: AutoLayout
-  width: number
-  height: number
   clipsContent: boolean
   onChange: (layout: AutoLayout) => void
-  onResize: (patch: { width?: number; height?: number; layout?: AutoLayout }) => void
   onClips: (clips: boolean) => void
 }) {
   const [padIndependent, setPadIndependent] = useState(false)
@@ -543,8 +1144,6 @@ function AutoLayoutBlock({
   const gap = typeof layout?.gap === 'number' ? layout.gap : 0
   const align = layout?.alignItems || 'start'
   const justify = gapAuto ? 'space-between' : layout?.justifyContent || 'start'
-  const sizingH = layout?.sizingH || 'fixed'
-  const sizingV = layout?.sizingV || 'fixed'
   const pad = typeof layout?.padding === 'number'
     ? { t: layout.padding, r: layout.padding, b: layout.padding, l: layout.padding }
     : layout?.padding || { t: 0, r: 0, b: 0, l: 0 }
@@ -593,7 +1192,7 @@ function AutoLayoutBlock({
     return (
       <section className="prop-section">
         <div className="prop-section-head prop-add-head">
-          <span>Auto layout</span>
+          <span>Flex</span>
           <button type="button" onClick={() => onChange(defaultFrameLayout())}>
             +
           </button>
@@ -605,8 +1204,8 @@ function AutoLayoutBlock({
   return (
     <section className="prop-section al-section">
       <div className="prop-section-head prop-add-head">
-        <span>Auto layout</span>
-        <button type="button" title="Remove auto layout" onClick={() => onChange({ mode: 'none' })}>
+        <span>Flex</span>
+        <button type="button" title="Remove flex" onClick={() => onChange({ mode: 'none' })}>
           –
         </button>
       </div>
@@ -646,58 +1245,6 @@ function AutoLayoutBlock({
               <rect x="2" y="8" width="4" height="4" rx="0.8" stroke="currentColor" strokeWidth="1.3" />
             </svg>
           </button>
-        </div>
-      </div>
-
-      <div className="al-row">
-        <span className="al-label">Resizing</span>
-        <div className="al-resize">
-          <label className="al-size-field">
-            <span>W</span>
-            <input
-              value={Math.round(width)}
-              onChange={(event) => {
-                const next = Number(event.target.value)
-                if (!Number.isFinite(next)) return
-                onResize({
-                  width: Math.max(1, next),
-                  layout: { ...defaultFrameLayout(), ...layout!, sizingH: 'fixed' }
-                })
-              }}
-            />
-            <select
-              value={sizingH}
-              onChange={(event) => enable({ sizingH: event.target.value as LayoutSizing })}
-              title="Horizontal resizing"
-            >
-              <option value="fixed">Fixed</option>
-              <option value="hug">Hug</option>
-              <option value="fill">Fill</option>
-            </select>
-          </label>
-          <label className="al-size-field">
-            <span>H</span>
-            <input
-              value={Math.round(height)}
-              onChange={(event) => {
-                const next = Number(event.target.value)
-                if (!Number.isFinite(next)) return
-                onResize({
-                  height: Math.max(1, next),
-                  layout: { ...defaultFrameLayout(), ...layout!, sizingV: 'fixed' }
-                })
-              }}
-            />
-            <select
-              value={sizingV}
-              onChange={(event) => enable({ sizingV: event.target.value as LayoutSizing })}
-              title="Vertical resizing"
-            >
-              <option value="fixed">Fixed</option>
-              <option value="hug">Hug</option>
-              <option value="fill">Fill</option>
-            </select>
-          </label>
         </div>
       </div>
 
@@ -800,76 +1347,48 @@ function AutoLayoutBlock({
   )
 }
 
-function ChildLayoutBlock({
-  sizingH,
-  sizingV,
-  absolute,
-  onChange
-}: {
-  sizingH: LayoutSizing
-  sizingV: LayoutSizing
-  absolute: boolean
-  onChange: (patch: Partial<DesignNode>) => void
-}) {
+function CornerIcon({ corner }: { corner: keyof CornerRadii }) {
+  const paths: Record<keyof CornerRadii, string> = {
+    tl: 'M3 9V5.5A2.5 2.5 0 0 1 5.5 3H9',
+    tr: 'M3 3h3.5A2.5 2.5 0 0 1 9 5.5V9',
+    br: 'M9 3v3.5A2.5 2.5 0 0 1 6.5 9H3',
+    bl: 'M9 9H5.5A2.5 2.5 0 0 1 3 6.5V3'
+  }
   return (
-    <section className="prop-section">
-      <div className="prop-section-head">Layout</div>
-      <label className="al-clip">
-        <input
-          type="checkbox"
-          checked={absolute}
-          onChange={(event) => onChange({ layoutAbsolute: event.target.checked })}
-        />
-        Absolute position
-      </label>
-      {!absolute && (
-        <div className="al-resize" style={{ marginTop: 8 }}>
-          <label className="al-size-field">
-            <span>W</span>
-            <select
-              value={sizingH}
-              onChange={(event) => onChange({ layoutSizingH: event.target.value as LayoutSizing })}
-            >
-              <option value="fixed">Fixed</option>
-              <option value="hug">Hug</option>
-              <option value="fill">Fill</option>
-            </select>
-          </label>
-          <label className="al-size-field">
-            <span>H</span>
-            <select
-              value={sizingV}
-              onChange={(event) => onChange({ layoutSizingV: event.target.value as LayoutSizing })}
-            >
-              <option value="fixed">Fixed</option>
-              <option value="hug">Hug</option>
-              <option value="fill">Fill</option>
-            </select>
-          </label>
-        </div>
-      )}
-    </section>
+    <span className="prop-radius-ico" aria-hidden>
+      <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
+        <path d={paths[corner]} stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
+      </svg>
+    </span>
   )
 }
 
 function AppearanceBlock({
+  nodeId,
   opacity,
   blend,
-  radius,
+  radii,
   onOpacity,
   onBlend,
-  onRadius
+  onRadii
 }: {
+  nodeId?: string
   opacity: number
   blend: string
-  radius?: number
+  radii?: CornerRadii
   onOpacity: (value: number) => void
   onBlend: (value: string) => void
-  onRadius?: (value: number) => void
+  onRadii?: (value: CornerRadii, mode: 'uniform' | 'independent') => void
 }) {
   const [open, setOpen] = useState(false)
+  const [independent, setIndependent] = useState(false)
   const root = useRef<HTMLDivElement>(null)
   const current = normalizeBlendMode(blend)
+  const showIndependent = Boolean(radii && (independent || cornersAreIndependent(radii)))
+
+  useEffect(() => {
+    setIndependent(Boolean(radii && cornersAreIndependent(radii)))
+  }, [nodeId])
 
   useEffect(() => {
     if (!open) return
@@ -887,11 +1406,41 @@ function AppearanceBlock({
     }
   }, [open])
 
+  const setUniform = (value: number) => {
+    onRadii?.(uniformRadii(Math.max(0, value)), 'uniform')
+  }
+
+  const setCorner = (key: keyof CornerRadii, value: number) => {
+    if (!radii) return
+    onRadii?.({ ...radii, [key]: Math.max(0, value) }, 'independent')
+  }
+
+  const toggleIndependent = () => {
+    if (!radii || !onRadii) return
+    if (showIndependent) {
+      setIndependent(false)
+      onRadii(uniformRadii(radii.tl), 'uniform')
+    } else {
+      setIndependent(true)
+      onRadii({ ...radii }, 'independent')
+    }
+  }
+
   return (
     <section className="prop-section">
       <div className="prop-section-head prop-add-head">
         <span>Appearance</span>
         <div className="prop-section-actions" ref={root}>
+          <button type="button" className="prop-head-ico" title="Visibility" disabled>
+            <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden>
+              <path
+                d="M1.5 7s2.2-3.5 5.5-3.5S12.5 7 12.5 7s-2.2 3.5-5.5 3.5S1.5 7 1.5 7Z"
+                stroke="currentColor"
+                strokeWidth="1.2"
+              />
+              <circle cx="7" cy="7" r="1.6" stroke="currentColor" strokeWidth="1.2" />
+            </svg>
+          </button>
           <button
             type="button"
             className={`prop-head-ico${open ? ' is-on' : ''}`}
@@ -934,9 +1483,63 @@ function AppearanceBlock({
           )}
         </div>
       </div>
-      <div className="prop-appearance">
-        <NumField suffix="%" value={Math.round(opacity)} onChange={onOpacity} />
-        {onRadius && <NumField prefix="R" value={radius ?? 0} onChange={onRadius} />}
+      <div
+        className={`prop-appearance${onRadii != null ? '' : ' is-opacity-only'}${
+          showIndependent ? ' is-corners-independent' : ''
+        }`}
+      >
+        <span className="prop-field-label prop-appear-label-op">Opacity</span>
+        <div className="prop-appear-field-op">
+          <NumField
+            prefix={
+              <span className="prop-opacity-ico" aria-hidden>
+                <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
+                  <rect x="1.5" y="1.5" width="9" height="9" rx="1" stroke="currentColor" strokeWidth="1.1" />
+                  <path d="M1.5 7.5h9M4.5 1.5v9" stroke="currentColor" strokeWidth="1.1" opacity="0.45" />
+                </svg>
+              </span>
+            }
+            suffix="%"
+            value={Math.round(opacity)}
+            onChange={onOpacity}
+          />
+        </div>
+        {onRadii != null && radii && (
+          <>
+            <span className="prop-field-label prop-appear-label-rad">Corner radius</span>
+            <div className="prop-appear-field-rad prop-radius-pair">
+              {showIndependent ? (
+                <div className="prop-radius-grid">
+                  <NumField prefix={<CornerIcon corner="tl" />} value={radii.tl} onChange={(v) => setCorner('tl', v)} />
+                  <NumField prefix={<CornerIcon corner="tr" />} value={radii.tr} onChange={(v) => setCorner('tr', v)} />
+                  <NumField prefix={<CornerIcon corner="bl" />} value={radii.bl} onChange={(v) => setCorner('bl', v)} />
+                  <NumField prefix={<CornerIcon corner="br" />} value={radii.br} onChange={(v) => setCorner('br', v)} />
+                </div>
+              ) : (
+                <NumField
+                  prefix={<CornerIcon corner="tl" />}
+                  value={radii.tl}
+                  onChange={setUniform}
+                />
+              )}
+              <button
+                type="button"
+                className={`prop-head-ico${showIndependent ? ' is-on' : ''}`}
+                title="Independent corners"
+                onClick={toggleIndependent}
+              >
+                <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden>
+                  <path
+                    d="M3 5.5V4a1 1 0 0 1 1-1h1.5M9.5 3H11a1 1 0 0 1 1 1v1.5M12 9.5V11a1 1 0 0 1-1 1H9.5M5.5 12H4a1 1 0 0 1-1-1V9.5"
+                    stroke="currentColor"
+                    strokeWidth="1.2"
+                    strokeLinecap="round"
+                  />
+                </svg>
+              </button>
+            </div>
+          </>
+        )}
       </div>
     </section>
   )
@@ -974,9 +1577,19 @@ function FillBlock({
     <section className="prop-section">
       <div className="prop-section-head prop-add-head">
         <span>Fill</span>
-        <button type="button" onClick={addFill} title="Add fill">
-          +
-        </button>
+        <div className="prop-section-actions">
+          <button type="button" className="prop-head-ico" title="Fill styles" disabled>
+            <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden>
+              <rect x="2" y="2" width="4" height="4" rx="0.8" stroke="currentColor" strokeWidth="1.2" />
+              <rect x="8" y="2" width="4" height="4" rx="0.8" stroke="currentColor" strokeWidth="1.2" />
+              <rect x="2" y="8" width="4" height="4" rx="0.8" stroke="currentColor" strokeWidth="1.2" />
+              <rect x="8" y="8" width="4" height="4" rx="0.8" stroke="currentColor" strokeWidth="1.2" />
+            </svg>
+          </button>
+          <button type="button" onClick={addFill} title="Add fill">
+            +
+          </button>
+        </div>
       </div>
       {list.length > 0 && (
       <div className="prop-fill-stack">
@@ -1726,22 +2339,30 @@ function TextBlock({
         <FontFamilyPicker
           value={family}
           onChange={(fontFamily) => {
-            ensureGoogleFontLoaded(fontFamily, node.fontWeight || 400, italic)
-            onPatch({ fontFamily })
+            const next = nearestFontStyle(fontFamily, node.fontWeight, italic)
+            onPatch({
+              fontFamily,
+              fontWeight: next.weight,
+              fontStyle: next.italic ? 'italic' : 'normal'
+            })
+            void ensureGoogleFontLoaded(fontFamily, next.weight, next.italic)
           }}
         />
-        <div className="prop-type-row">
-          <div className="prop-type-style">
-            <FontStylePicker
-              family={family}
-              value={styleId}
-              onChange={(option) => {
-                ensureGoogleFontLoaded(family, option.weight, option.italic)
-                onPatch({ fontWeight: option.weight, fontStyle: option.italic ? 'italic' : 'normal' })
-              }}
-            />
-          </div>
-          <div className="prop-type-size" ref={sizeRoot}>
+        <FontStylePicker
+          family={family}
+          value={styleId}
+          onChange={(option) => {
+            onPatch({ fontWeight: option.weight, fontStyle: option.italic ? 'italic' : 'normal' })
+            void ensureGoogleFontLoaded(family, option.weight, option.italic)
+          }}
+        />
+        <div className="prop-type-metrics-3" ref={sizeRoot}>
+          <label className="prop-type-metric" title="Font size">
+            <span className="prop-type-metric-ico" aria-hidden>
+              <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
+                <path d="M2.5 9.5 5 2.5h2L9.5 9.5M3.5 7h5" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" />
+              </svg>
+            </span>
             <input
               value={size}
               onFocus={(event) => event.currentTarget.select()}
@@ -1751,29 +2372,7 @@ function TextBlock({
               }}
               onClick={() => setSizeOpen(true)}
             />
-            {sizeOpen && (
-              <div className="prop-type-size-menu" role="listbox" aria-label="Font size">
-                {FONT_SIZE_PRESETS.map((preset) => (
-                  <button
-                    key={preset}
-                    type="button"
-                    role="option"
-                    aria-selected={size === preset}
-                    className={size === preset ? 'is-on' : undefined}
-                    onClick={() => {
-                      onPatch({ fontSize: preset })
-                      setSizeOpen(false)
-                    }}
-                  >
-                    <span className="prop-blend-check">{size === preset ? '✓' : ''}</span>
-                    <span>{preset}</span>
-                  </button>
-                ))}
-              </div>
-            )}
-          </div>
-        </div>
-        <div className="prop-type-row">
+          </label>
           <label className="prop-type-metric" title="Line height">
             <span className="prop-type-metric-ico" aria-hidden>
               <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
@@ -1813,6 +2412,26 @@ function TextBlock({
               }}
             />
           </label>
+          {sizeOpen && (
+            <div className="prop-type-size-menu prop-type-size-menu-metrics" role="listbox" aria-label="Font size">
+              {FONT_SIZE_PRESETS.map((preset) => (
+                <button
+                  key={preset}
+                  type="button"
+                  role="option"
+                  aria-selected={size === preset}
+                  className={size === preset ? 'is-on' : undefined}
+                  onClick={() => {
+                    onPatch({ fontSize: preset })
+                    setSizeOpen(false)
+                  }}
+                >
+                  <span className="prop-blend-check">{size === preset ? '✓' : ''}</span>
+                  <span>{preset}</span>
+                </button>
+              ))}
+            </div>
+          )}
         </div>
         <div className="prop-type-row">
           <label className="prop-type-metric" title="Paragraph spacing">
@@ -1907,11 +2526,72 @@ function TextBlock({
               </button>
             ))}
           </div>
+        </div>
+        <div className="prop-type-align-row">
+          <div className="prop-type-align-group" role="group" aria-label="Decoration">
+            {(
+              [
+                ['none', 'None'],
+                ['underline', 'Underline'],
+                ['line-through', 'Strikethrough']
+              ] as const
+            ).map(([value, title]) => (
+              <button
+                key={value}
+                type="button"
+                className={(node.textDecoration || 'none') === value ? 'is-on' : undefined}
+                title={title}
+                onClick={() => onPatch({ textDecoration: value })}
+              >
+                {value === 'none' ? '—' : value === 'underline' ? 'U' : 'S'}
+              </button>
+            ))}
+          </div>
+          <div className="prop-type-case" role="group" aria-label="Letter case">
+            {(
+              [
+                ['none', 'As typed'],
+                ['upper', 'Uppercase'],
+                ['lower', 'Lowercase'],
+                ['title', 'Capitalize'],
+                ['small-caps', 'Small caps']
+              ] as const
+            ).map(([value, title]) => (
+              <button
+                key={value}
+                type="button"
+                className={(node.textCase || 'none') === value ? 'is-on' : undefined}
+                title={title}
+                onClick={() => onPatch({ textCase: value })}
+              >
+                {value === 'none' ? 'Aa' : value === 'upper' ? 'AA' : value === 'lower' ? 'aa' : value === 'title' ? 'Tt' : 'SC'}
+              </button>
+            ))}
+          </div>
+          <div className="prop-type-align-group" role="group" aria-label="List">
+            {(
+              [
+                ['none', 'None'],
+                ['unordered', 'Bulleted list'],
+                ['ordered', 'Numbered list']
+              ] as const
+            ).map(([value, title]) => (
+              <button
+                key={value}
+                type="button"
+                className={(node.listStyle || 'none') === value ? 'is-on' : undefined}
+                title={title}
+                onClick={() => onPatch({ listStyle: value })}
+              >
+                {value === 'none' ? '—' : value === 'unordered' ? '•' : '1.'}
+              </button>
+            ))}
+          </div>
           <div className="prop-type-settings-wrap" ref={typeRoot}>
             <button
               type="button"
-              className={`prop-type-settings-btn${typeOpen ? ' is-on' : ''}`}
-              title="Type settings"
+              className={'prop-type-settings-btn' + (typeOpen ? ' is-on' : '')}
+              title="More type settings"
               onClick={() => setTypeOpen((value) => !value)}
             >
               <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden>
@@ -1922,68 +2602,6 @@ function TextBlock({
             </button>
             {typeOpen && (
               <div className="prop-type-settings">
-                <div className="prop-type-settings-label">Decoration</div>
-                <div className="prop-type-align-group">
-                  {(
-                    [
-                      ['none', 'None'],
-                      ['underline', 'Underline'],
-                      ['line-through', 'Strikethrough']
-                    ] as const
-                  ).map(([value, title]) => (
-                    <button
-                      key={value}
-                      type="button"
-                      className={(node.textDecoration || 'none') === value ? 'is-on' : undefined}
-                      title={title}
-                      onClick={() => onPatch({ textDecoration: value })}
-                    >
-                      {value === 'none' ? '—' : value === 'underline' ? 'U̲' : 'S̶'}
-                    </button>
-                  ))}
-                </div>
-                <div className="prop-type-settings-label">Letter case</div>
-                <div className="prop-type-case">
-                  {(
-                    [
-                      ['none', 'As typed'],
-                      ['upper', 'Uppercase'],
-                      ['lower', 'Lowercase'],
-                      ['title', 'Capitalize'],
-                      ['small-caps', 'Small caps']
-                    ] as const
-                  ).map(([value, title]) => (
-                    <button
-                      key={value}
-                      type="button"
-                      className={(node.textCase || 'none') === value ? 'is-on' : undefined}
-                      title={title}
-                      onClick={() => onPatch({ textCase: value })}
-                    >
-                      {value === 'none' ? 'Aa' : value === 'upper' ? 'AA' : value === 'lower' ? 'aa' : value === 'title' ? 'Aa' : 'ᴀᴀ'}
-                    </button>
-                  ))}
-                </div>
-                <div className="prop-type-settings-label">List</div>
-                <div className="prop-type-align-group">
-                  {(
-                    [
-                      ['none', 'None'],
-                      ['unordered', 'Bulleted list'],
-                      ['ordered', 'Numbered list']
-                    ] as const
-                  ).map(([value, title]) => (
-                    <button
-                      key={value}
-                      type="button"
-                      className={(node.listStyle || 'none') === value ? 'is-on' : undefined}
-                      title={title}
-                      onClick={() => onPatch({ listStyle: value })}
-                    >
-                      {value === 'none' ? '—' : value === 'unordered' ? '•' : '1.'}
-                    </button>
-                  ))}
-                </div>
                 <label className="al-clip">
                   <input
                     type="checkbox"
@@ -2111,7 +2729,7 @@ function FontFamilyPicker({ value, onChange }: { value: string; onChange: (famil
   const root = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLInputElement>(null)
   const results = useMemo(() => {
-    const google = searchGoogleFonts(query, 100)
+    const google = searchGoogleFonts(query, query.trim() ? 200 : allGoogleFonts().length)
     const system = SYSTEM_FONTS.filter((name) => !query.trim() || name.toLowerCase().includes(query.trim().toLowerCase()))
     return { google, system }
   }, [query])
@@ -2136,6 +2754,10 @@ function FontFamilyPicker({ value, onChange }: { value: string; onChange: (famil
     if (open) {
       setQuery('')
       requestAnimationFrame(() => inputRef.current?.focus())
+      // Warm the first page of previews so the list paints in each face.
+      for (const font of searchGoogleFonts('', 40)) {
+        void ensureGoogleFontLoaded(font.family, 400, false)
+      }
     }
   }, [open])
 
@@ -2147,7 +2769,7 @@ function FontFamilyPicker({ value, onChange }: { value: string; onChange: (famil
         onClick={() => setOpen((next) => !next)}
         aria-haspopup="listbox"
         aria-expanded={open}
-        style={{ fontFamily: value }}
+        style={{ fontFamily: cssFontFamily(value) }}
       >
         <span>{value}</span>
         <em>▾</em>
@@ -2174,7 +2796,7 @@ function FontFamilyPicker({ value, onChange }: { value: string; onChange: (famil
                     role="option"
                     aria-selected={value === name}
                     className={value === name ? 'is-on' : undefined}
-                    style={{ fontFamily: name }}
+                    style={{ fontFamily: cssFontFamily(name) }}
                     onClick={() => {
                       onChange(name)
                       setOpen(false)
@@ -2195,10 +2817,12 @@ function FontFamilyPicker({ value, onChange }: { value: string; onChange: (famil
                   role="option"
                   aria-selected={value === font.family}
                   className={value === font.family ? 'is-on' : undefined}
-                  onMouseEnter={() => ensureGoogleFontLoaded(font.family, 400, false)}
-                  style={{ fontFamily: `'${font.family}', sans-serif` }}
+                  onMouseEnter={() => {
+                    void ensureGoogleFontLoaded(font.family, 400, false)
+                  }}
+                  style={{ fontFamily: cssFontFamily(font.family) }}
                   onClick={() => {
-                    ensureGoogleFontLoaded(font.family, 400, false)
+                    void ensureGoogleFontLoaded(font.family, 400, false)
                     onChange(font.family)
                     setOpen(false)
                   }}
@@ -2228,13 +2852,23 @@ function FontStylePicker({
   const [open, setOpen] = useState(false)
   const root = useRef<HTMLDivElement>(null)
   const options = stylesForFamily(family)
-  const current = FONT_STYLE_OPTIONS.find((item) => item.id === value) || options[0] || FONT_STYLE_OPTIONS[3]
+  const current =
+    options.find((item) => item.id === value) ||
+    nearestFontStyle(family, Number.parseInt(value, 10) || 400, value.endsWith('i'))
   const upright = options.filter((item) => !item.italic)
   const italics = options.filter((item) => item.italic)
   const variable = familyHasVariableAxes(family)
+  const limited = options.length <= 2
+
+  useEffect(() => {
+    void ensureGoogleFontLoaded(family, current.weight, current.italic)
+  }, [family, current.weight, current.italic])
 
   useEffect(() => {
     if (!open) return
+    for (const option of stylesForFamily(family).slice(0, 16)) {
+      void ensureGoogleFontLoaded(family, option.weight, option.italic)
+    }
     const onDown = (event: MouseEvent) => {
       if (!root.current?.contains(event.target as Node)) setOpen(false)
     }
@@ -2247,7 +2881,7 @@ function FontStylePicker({
       window.removeEventListener('mousedown', onDown, true)
       window.removeEventListener('keydown', onKey)
     }
-  }, [open])
+  }, [open, family])
 
   return (
     <div className="prop-font-picker" ref={root}>
@@ -2257,13 +2891,22 @@ function FontStylePicker({
         onClick={() => setOpen((next) => !next)}
         aria-haspopup="listbox"
         aria-expanded={open}
-        style={{ fontWeight: current.weight, fontStyle: current.italic ? 'italic' : 'normal' }}
+        style={{
+          fontFamily: cssFontFamily(family),
+          fontWeight: current.weight,
+          fontStyle: current.italic ? 'italic' : 'normal'
+        }}
       >
         <span>{current.label}</span>
         <em>▾</em>
       </button>
       {open && (
         <div className="prop-font-style-menu" role="listbox" aria-label="Font style">
+          {limited && (
+            <div className="prop-font-empty">
+              This font only includes {options.map((option) => option.label).join(', ')}
+            </div>
+          )}
           <div className="prop-font-style-group">
             {upright.map((option) => (
               <button
@@ -2272,7 +2915,7 @@ function FontStylePicker({
                 role="option"
                 aria-selected={value === option.id}
                 className={value === option.id ? 'is-on' : undefined}
-                style={{ fontWeight: option.weight }}
+                style={{ fontFamily: cssFontFamily(family), fontWeight: option.weight }}
                 onClick={() => {
                   onChange(option)
                   setOpen(false)
@@ -2292,7 +2935,11 @@ function FontStylePicker({
                   role="option"
                   aria-selected={value === option.id}
                   className={value === option.id ? 'is-on' : undefined}
-                  style={{ fontWeight: option.weight, fontStyle: 'italic' }}
+                  style={{
+                    fontFamily: cssFontFamily(family),
+                    fontWeight: option.weight,
+                    fontStyle: 'italic'
+                  }}
                   onClick={() => {
                     onChange(option)
                     setOpen(false)
@@ -2379,14 +3026,14 @@ function NumField({
   value,
   onChange
 }: {
-  prefix?: string
+  prefix?: ReactNode
   suffix?: string
   value: number
   onChange: (value: number) => void
 }) {
   return (
     <label className="prop-num">
-      {prefix && <span>{prefix}</span>}
+      {prefix != null && prefix !== '' && <span>{prefix}</span>}
       <input
         value={Number.isFinite(value) ? String(Math.round(value * 100) / 100) : '0'}
         onFocus={(event) => event.currentTarget.select()}

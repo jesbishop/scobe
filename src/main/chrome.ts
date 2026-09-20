@@ -2,6 +2,8 @@ import { BrowserWindow, WebContentsView, type WebContents } from 'electron'
 import { BROWSER_PARTITION, DEFAULT_URL, type ChromeStatus, type InspectInfo, type PageState } from '../shared/types'
 import { normalizeUrl } from '../shared/url'
 import { MESURER_SCRIPT } from './mesurerScript'
+import { SNAPSHOT_SCRIPT } from './snapshotScript'
+import type { SnapshotEvent, SnapshotNode } from '../shared/snapshot'
 
 type MouseInput = {
   type: 'mouseMove' | 'mouseDown' | 'mouseUp'
@@ -56,12 +58,15 @@ export class BrowserHost {
   private pages = new Map<string, Page>()
   private inspectId: string | null = null
   private inspectTimer: NodeJS.Timeout | null = null
+  private snapshotId: string | null = null
+  private snapshotTimer: NodeJS.Timeout | null = null
   private mesurerMode: { inspect: boolean; xray: boolean } = { inspect: true, xray: false }
   private ignoreMouse = false
   private attachedOrder: string[] = []
   private theme: 'light' | 'dark' = 'light'
   private listeners = new Set<() => void>()
   private inspectListeners = new Set<(info: InspectInfo | null) => void>()
+  private snapshotListeners = new Set<(event: SnapshotEvent) => void>()
   private status: ChromeStatus = { state: 'starting' }
 
   attach(win: BrowserWindow): void {
@@ -85,6 +90,11 @@ export class BrowserHost {
   onInspect(listener: (info: InspectInfo | null) => void): () => void {
     this.inspectListeners.add(listener)
     return () => this.inspectListeners.delete(listener)
+  }
+
+  onSnapshot(listener: (event: SnapshotEvent) => void): () => void {
+    this.snapshotListeners.add(listener)
+    return () => this.snapshotListeners.delete(listener)
   }
 
   list(): PageState[] {
@@ -184,6 +194,7 @@ export class BrowserHost {
     const page = this.pages.get(id)
     if (!page || !this.win) return
     if (this.inspectId === id) this.setInspect(null)
+    if (this.snapshotId === id) this.setSnapshot(null)
     this.detach(page)
     try {
       page.view.webContents.close()
@@ -367,6 +378,30 @@ export class BrowserHost {
     }, 120)
   }
 
+  setSnapshot(id: string | null): void {
+    if (this.snapshotTimer) {
+      clearInterval(this.snapshotTimer)
+      this.snapshotTimer = null
+    }
+    const previous = this.snapshotId
+    if (previous && previous !== id) {
+      const page = this.pages.get(previous)
+      void page?.view.webContents
+        .executeJavaScript('window.__vantaSnapshot && window.__vantaSnapshot.disable()', true)
+        .catch(() => undefined)
+    }
+    this.snapshotId = id
+    if (!id) return
+    const page = this.pages.get(id)
+    if (!page) return
+    void page.view.webContents
+      .executeJavaScript(`${SNAPSHOT_SCRIPT}; window.__vantaSnapshot && window.__vantaSnapshot.enable();`, true)
+      .catch(() => undefined)
+    this.snapshotTimer = setInterval(() => {
+      void this.pollSnapshot()
+    }, 140)
+  }
+
   async screenshot(id: string, opts?: { skipIdle?: boolean }): Promise<{ width: number; height: number; dataUrl: string }> {
     const page = this.require(id)
     if (!opts?.skipIdle) await this.waitIdle(page)
@@ -429,6 +464,7 @@ export class BrowserHost {
 
   async shutdown(): Promise<void> {
     this.setInspect(null)
+    this.setSnapshot(null)
     for (const id of [...this.pages.keys()]) await this.closeBrowser(id)
   }
 
@@ -472,7 +508,11 @@ export class BrowserHost {
       const y = Number.isFinite(page.lastClipY) ? page.lastClipY : 0
       page.lastClipX = Number.NaN
       this.applyClipOffset(page, x, y)
-      if (this.inspectId === page.id) {
+      if (this.snapshotId === page.id) {
+        void wc
+          .executeJavaScript(`${SNAPSHOT_SCRIPT}; window.__vantaSnapshot && window.__vantaSnapshot.enable();`, true)
+          .catch(() => undefined)
+      } else if (this.inspectId === page.id) {
         const payload = JSON.stringify(this.mesurerMode)
         void wc
           .executeJavaScript(`${MESURER_SCRIPT}; window.__vantaMesurer && window.__vantaMesurer.enable(${payload});`, true)
@@ -579,6 +619,98 @@ export class BrowserHost {
     for (const listener of this.inspectListeners) listener(info)
   }
 
+  private emitSnapshot(event: SnapshotEvent): void {
+    for (const listener of this.snapshotListeners) listener(event)
+  }
+
+  /** When an <img>/svg can't be read (CORS), crop it out of a page screenshot. */
+  private async backfillSnapshotImages(
+    page: Page,
+    tree: SnapshotNode,
+    cssWidth: number,
+    cssHeight: number
+  ): Promise<SnapshotNode> {
+    const shots: Array<SnapshotNode & { shot?: { x: number; y: number; width: number; height: number } }> = []
+    const visit = (node: SnapshotNode & { shot?: { x: number; y: number; width: number; height: number } }) => {
+      if (node.shot && node.kind === 'image' && !(node.fill?.type === 'image' && node.fill.dataUrl)) shots.push(node)
+      for (const child of node.children || []) visit(child)
+    }
+    visit(tree)
+    if (!shots.length || cssWidth < 1 || cssHeight < 1) {
+      stripShots(tree)
+      return tree
+    }
+    try {
+      const image = await page.view.webContents.capturePage()
+      const size = image.getSize()
+      const scaleX = size.width / cssWidth
+      const scaleY = size.height / cssHeight
+      for (const node of shots) {
+        const shot = node.shot
+        if (!shot) continue
+        let x = Math.round(shot.x * scaleX)
+        let y = Math.round(shot.y * scaleY)
+        let width = Math.round(shot.width * scaleX)
+        let height = Math.round(shot.height * scaleY)
+        if (x < 0) {
+          width += x
+          x = 0
+        }
+        if (y < 0) {
+          height += y
+          y = 0
+        }
+        if (x + width > size.width) width = size.width - x
+        if (y + height > size.height) height = size.height - y
+        if (width < 1 || height < 1) continue
+        const cropped = image.crop({ x, y, width, height })
+        node.kind = 'image'
+        node.fill = { type: 'image', dataUrl: cropped.toDataURL() }
+      }
+    } catch {
+      /* screenshot unavailable; layers still paste */
+    }
+    stripShots(tree)
+    return tree
+  }
+
+  private async pollSnapshot(): Promise<void> {
+    const id = this.snapshotId
+    if (!id) return
+    const page = this.pages.get(id)
+    if (!page) return
+    try {
+      const result = (await page.view.webContents.executeJavaScript(
+        'window.__vantaSnapshot ? window.__vantaSnapshot.consume() : null',
+        true
+      )) as {
+        status?: string
+        tree?: SnapshotNode
+        cssWidth?: number
+        cssHeight?: number
+        message?: string
+      } | null
+      if (!result?.status || result.status === 'pending') return
+      if (result.status === 'ready' && result.tree) {
+        const tree = await this.backfillSnapshotImages(page, result.tree, result.cssWidth || 0, result.cssHeight || 0)
+        this.emitSnapshot({ tabId: id, tree })
+        this.setSnapshot(null)
+        return
+      }
+      if (result.status === 'cancel') {
+        this.emitSnapshot({ tabId: id, cancelled: true })
+        this.setSnapshot(null)
+        return
+      }
+      if (result.status === 'error') {
+        this.emitSnapshot({ tabId: id, error: result.message || 'Snapshot failed' })
+        this.setSnapshot(null)
+      }
+    } catch {
+      /* page navigating */
+    }
+  }
+
   private toViewPoint(page: Page, x: number, y: number): { x: number; y: number } {
     const bounds = page.view.getBounds()
     const shot = page.lastShot
@@ -602,6 +734,11 @@ export class BrowserHost {
     }
     await new Promise((resolve) => setTimeout(resolve, 160))
   }
+}
+
+function stripShots(node: SnapshotNode & { shot?: unknown }): void {
+  delete (node as { shot?: unknown }).shot
+  for (const child of node.children || []) stripShots(child)
 }
 
 function keyCodeFor(key: string): string {

@@ -156,7 +156,15 @@ export type DesignNode = {
   /** Figma-style paint stack (solid / gradient / image / video / shader). */
   fills?: import('./paint').Paint[]
   opacity?: number
+  /** Uniform corner radius. When `cornerRadii` is set, prefer those. */
   radius?: number
+  /** Independent corner radii (TL / TR / BR / BL), Figma-style. */
+  cornerRadii?: {
+    tl: number
+    tr: number
+    br: number
+    bl: number
+  }
   rotation?: number
   /** Mirror horizontally / vertically (Figma flip). */
   flipX?: boolean
@@ -215,11 +223,15 @@ export type DesignNode = {
   clipsContent?: boolean
   /** Auto-layout / flex container settings (frames only). */
   layout?: AutoLayout
-  /** Child horizontal sizing inside an auto-layout parent (Fixed / Hug / Fill). */
+  /** Child horizontal sizing inside a flex parent (Fixed / Fill / Relative). */
   layoutSizingH?: LayoutSizing
-  /** Child vertical sizing inside an auto-layout parent (Fixed / Hug / Fill). */
+  /** Child vertical sizing inside a flex parent (Fixed / Fill / Relative). */
   layoutSizingV?: LayoutSizing
-  /** When true, child ignores auto-layout flow (Figma Absolute position). */
+  /** Width as % of parent inner size when layoutSizingH === 'relative' (0–100). */
+  layoutPercentH?: number
+  /** Height as % of parent inner size when layoutSizingV === 'relative' (0–100). */
+  layoutPercentV?: number
+  /** When true, child ignores flex flow (Absolute position). */
   layoutAbsolute?: boolean
   /** PNG/JPEG data URL for type === 'image'. */
   imageDataUrl?: string
@@ -233,21 +245,22 @@ export type DesignNode = {
 
 export type AutoLayoutAlign = 'start' | 'center' | 'end' | 'stretch'
 export type AutoLayoutJustify = 'start' | 'center' | 'end' | 'space-between'
-export type LayoutSizing = 'fixed' | 'hug' | 'fill'
+/** Frame Fit maps to `'hug'`. Child Relative is `'relative'` (% of parent). */
+export type LayoutSizing = 'fixed' | 'hug' | 'fill' | 'relative'
 
 export type AutoLayout = {
   mode: 'none' | 'horizontal' | 'vertical'
-  /** Fixed gap in px, or `'auto'` (Figma Gap → Auto / space-between). */
+  /** Fixed gap in px, or `'auto'` (Gap → Auto / space-between). */
   gap?: number | 'auto'
-  /** Gap between wrapped rows/columns (Figma counter-axis spacing). */
+  /** Gap between wrapped rows/columns (counter-axis spacing). */
   counterGap?: number
   padding?: number | { t: number; r: number; b: number; l: number }
   alignItems?: AutoLayoutAlign
   justifyContent?: AutoLayoutJustify
   wrap?: boolean
-  /** Frame width behavior (Figma: Fixed / Hug / Fill). */
+  /** Flex frame width: Fixed or Fit (`hug`). Fill only when nested in another flex. */
   sizingH?: LayoutSizing
-  /** Frame height behavior (Figma: Fixed / Hug / Fill). */
+  /** Flex frame height: Fixed or Fit (`hug`). Fill only when nested in another flex. */
   sizingV?: LayoutSizing
 }
 

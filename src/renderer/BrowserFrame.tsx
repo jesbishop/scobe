@@ -1,7 +1,4 @@
 import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react'
-import StraightenIcon from '@mui/icons-material/Straighten'
-import CenterFocusStrongIcon from '@mui/icons-material/CenterFocusStrong'
-import GridOnIcon from '@mui/icons-material/GridOn'
 import { FRAME_CHROME_HEIGHT, MIN_VIEWPORT, type BrowserFrame as Frame, type BrowserTab } from '../shared/types'
 import { normalizeUrl } from '../shared/url'
 import { TabFavicon } from './tabFavicon'
@@ -23,12 +20,6 @@ type Props = {
   onCloseTab: (tabId: string) => void
   onHole: (el: HTMLDivElement | null) => void
   onInteractEnd: () => void
-  measureActive?: boolean
-  measureInspect?: boolean
-  measureXray?: boolean
-  onToggleMeasure?: () => void
-  onMeasureInspect?: () => void
-  onMeasureXray?: () => void
 }
 
 function nextRect(frame: Frame, handle: Handle, dx: number, dy: number): Partial<Frame> {
@@ -78,13 +69,7 @@ export function BrowserFrame({
   onActivateTab,
   onCloseTab,
   onHole,
-  onInteractEnd,
-  measureActive = false,
-  measureInspect = true,
-  measureXray = false,
-  onToggleMeasure,
-  onMeasureInspect,
-  onMeasureXray
+  onInteractEnd
 }: Props) {
   const active = frame.tabs.find((tab) => tab.id === frame.activeTabId) || frame.tabs[0]
   const [draft, setDraft] = useState(active?.url || '')
@@ -134,7 +119,7 @@ export function BrowserFrame({
         left: frame.x,
         top: frame.y,
         width: frame.width,
-        height: frame.height + FRAME_CHROME_HEIGHT + (measureActive ? 34 : 0)
+        height: frame.height + FRAME_CHROME_HEIGHT
       }}
       onPointerDown={(event) => {
         if (event.button === 0) onSelect()
@@ -224,42 +209,7 @@ export function BrowserFrame({
         <button type="button" title="Close window" onPointerDown={(event) => event.stopPropagation()} onClick={onCloseWindow}>
           ×
         </button>
-        <button
-          type="button"
-          className={`frame-measure-btn${measureActive ? ' is-on' : ''}`}
-          title="Measure (Mesurer)"
-          onPointerDown={(event) => event.stopPropagation()}
-          onClick={(event) => {
-            event.stopPropagation()
-            onToggleMeasure?.()
-          }}
-        >
-          <StraightenIcon sx={{ fontSize: 16 }} />
-        </button>
       </div>
-      {measureActive && (
-        <div className="frame-mesurer-bar" onPointerDown={(event) => event.stopPropagation()}>
-          <button
-            type="button"
-            className={measureInspect ? 'is-on' : ''}
-            title="Inspect (I)"
-            onClick={() => onMeasureInspect?.()}
-          >
-            <CenterFocusStrongIcon sx={{ fontSize: 16 }} />
-            <span>Inspect</span>
-          </button>
-          <button
-            type="button"
-            className={measureXray ? 'is-on' : ''}
-            title="X-ray (X)"
-            onClick={() => onMeasureXray?.()}
-          >
-            <GridOnIcon sx={{ fontSize: 16 }} />
-            <span>X-ray</span>
-          </button>
-          <em>Hold Alt for spacing</em>
-        </div>
-      )}
       <div className="frame-hole" ref={onHole} />
       {(['n', 's', 'e', 'w', 'ne', 'nw', 'se', 'sw'] as Handle[]).map((handle) => (
         <div

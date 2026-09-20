@@ -1,12 +1,15 @@
-import { useCallback, useEffect, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent } from 'react'
 import { BrowserFrame } from './BrowserFrame'
 import { CanvasToolbar } from './CanvasToolbar'
 import { DesignLayer } from './DesignLayer'
 import { CommentCursor, CommentResolveToast, CommentThreadCard, CURRENT_USER } from './CommentOverlays'
 import { CommentsPanel } from './CommentsPanel'
 import { MeasureOverlay } from './MeasureOverlay'
+import { AlignGuidesOverlay } from './AlignGuidesOverlay'
+import { alignNodes, snapMove, snapTargets, type AlignAction, type AlignGuide } from './alignGuides'
+import { applyFramePadding, applyLayoutAlignment, applySelectionGap } from './selectionSpace'
 import { distanceMeasurements, hitTestRect, sizeMeasurements } from './measureMath'
-import { clampZoom, fitFrames, intersectRects, nodeBounds, rectContains, rectsOverlap, scaleNodeAround, screenToWorld, wheelPan, wheelZoomFactor, worldRectToScreen, worldToScreen, zoomAt } from './canvasMath'
+import { clampZoom, fitFrames, intersectRects, nodeBounds, rectContains, rectsOverlap, scaleNodeAround, screenToWorld, wheelPan, wheelZoomFactor, worldToScreen, zoomAt } from './canvasMath'
 import { ChatBrowserPanel, ChatWorkspace, createChatSession, type ChatSession } from './ChatView'
 import { FileTabs, HomeScreen, LeftSidebar, RightSidebar, type LayerItem, type ProjectFile, type RailTab } from './shell'
 import { FrameActionBar } from './FrameBar'
@@ -38,6 +41,7 @@ import {
   type SwitchMode
 } from '../shared/types'
 import { CHAT_BROWSER_HOME, CHAT_BROWSER_ID, getCodingAgentMeta, SIDEBAR_BROWSER_ID, type CodingAgentId } from '../shared/codingAgents'
+import { importSnapshot, type SnapshotNode } from '../shared/snapshot'
 import { nextCommentNumber } from '../shared/comments'
 import type { FramePreset } from '../shared/framePresets'
 import { CanvasContextMenu, type ContextMenuState } from './CanvasContextMenu'
@@ -51,8 +55,12 @@ import {
   findContainingParent,
   isAutoLayout,
   layersAtPoint,
+  pickDeepAtPoint,
   reflowAutoLayout,
   removeFlexFromSelection,
+  reorderFlexByDelta,
+  resolveClickTarget,
+  resolveDrillIn,
   resolveWorldRect,
   toRelative,
   wrapSelectionInFrame
@@ -96,13 +104,17 @@ function reorderAutoLayoutChildren(nodes: DesignNode[], parentId: string): Desig
     const bc = vertical ? bw.y + bw.height / 2 : bw.x + bw.width / 2
     return ac - bc
   })
-  const kidIds = new Set(kids.map((node) => node.id))
+  return spliceChildren(nodes, parentId, sorted)
+}
+
+function spliceChildren(nodes: DesignNode[], parentId: string, orderedKids: DesignNode[]): DesignNode[] {
+  const kidIds = new Set(orderedKids.map((node) => node.id))
   const result: DesignNode[] = []
   let inserted = false
   for (const node of nodes) {
     if (kidIds.has(node.id)) {
       if (!inserted) {
-        result.push(...sorted)
+        result.push(...orderedKids)
         inserted = true
       }
       continue
@@ -110,6 +122,138 @@ function reorderAutoLayoutChildren(nodes: DesignNode[], parentId: string): Desig
     result.push(node)
   }
   return result
+}
+
+/** Drop a dragged flex child into a sibling index (CSS flex order by document order). */
+function placeFlexChildren(
+  nodes: DesignNode[],
+  parentId: string,
+  movingIds: string[],
+  index: number
+): DesignNode[] {
+  const kids = childrenOf(nodes, parentId)
+  const moving = kids.filter((node) => movingIds.includes(node.id))
+  const rest = kids.filter((node) => !movingIds.includes(node.id))
+  if (!moving.length) return nodes
+  const at = Math.max(0, Math.min(index, rest.length))
+  const ordered = [
+    ...rest.slice(0, at),
+    ...moving.map((node) => ({ ...node, layoutAbsolute: false })),
+    ...rest.slice(at)
+  ]
+  return spliceChildren(nodes, parentId, ordered)
+}
+
+type FlexDropGuide = {
+  parentId: string
+  index: number
+  axis: 'x' | 'y'
+  line: { x: number; y: number; width: number; height: number }
+  slot: { x: number; y: number; width: number; height: number }
+}
+
+function measureFlexDrop(
+  nodes: DesignNode[],
+  parentId: string,
+  movingIds: string[],
+  pointer: { x: number; y: number },
+  dragSize: { width: number; height: number }
+): FlexDropGuide | null {
+  const parent = nodes.find((node) => node.id === parentId)
+  if (!parent || !isAutoLayout(parent)) return null
+  const vertical = parent.layout?.mode === 'vertical'
+  const siblings = childrenOf(nodes, parentId).filter(
+    (node) => !movingIds.includes(node.id) && !node.layoutAbsolute
+  )
+  const sorted = [...siblings].sort((a, b) => {
+    const aw = resolveWorldRect(a, nodes)
+    const bw = resolveWorldRect(b, nodes)
+    return vertical ? aw.y - bw.y : aw.x - bw.x
+  })
+  let index = sorted.length
+  for (let i = 0; i < sorted.length; i++) {
+    const box = resolveWorldRect(sorted[i], nodes)
+    const mid = vertical ? box.y + box.height / 2 : box.x + box.width / 2
+    if ((vertical ? pointer.y : pointer.x) < mid) {
+      index = i
+      break
+    }
+  }
+  const parentWorld = resolveWorldRect(parent, nodes)
+  const pad =
+    typeof parent.layout?.padding === 'number'
+      ? { t: parent.layout.padding, r: parent.layout.padding, b: parent.layout.padding, l: parent.layout.padding }
+      : parent.layout?.padding || { t: 0, r: 0, b: 0, l: 0 }
+  const gap = typeof parent.layout?.gap === 'number' ? parent.layout.gap : 0
+  let slotX = parentWorld.x + (pad.l || 0)
+  let slotY = parentWorld.y + (pad.t || 0)
+  if (index < sorted.length) {
+    const at = resolveWorldRect(sorted[index], nodes)
+    if (vertical) {
+      slotX = at.x
+      slotY = at.y
+    } else {
+      slotX = at.x
+      slotY = at.y
+    }
+  } else if (sorted.length) {
+    const last = resolveWorldRect(sorted[sorted.length - 1], nodes)
+    if (vertical) {
+      slotX = last.x
+      slotY = last.y + last.height + gap
+    } else {
+      slotX = last.x + last.width + gap
+      slotY = last.y
+    }
+  }
+  const slot = {
+    x: slotX,
+    y: slotY,
+    width: Math.max(8, dragSize.width),
+    height: Math.max(8, dragSize.height)
+  }
+  const line = vertical
+    ? {
+        x: parentWorld.x + (pad.l || 0),
+        y: slot.y,
+        width: Math.max(8, parentWorld.width - (pad.l || 0) - (pad.r || 0)),
+        height: 2
+      }
+    : {
+        x: slot.x,
+        y: parentWorld.y + (pad.t || 0),
+        width: 2,
+        height: Math.max(8, parentWorld.height - (pad.t || 0) - (pad.b || 0))
+      }
+  return { parentId, index, axis: vertical ? 'y' : 'x', line, slot }
+}
+
+type ScreenRect = { x: number; y: number; width: number; height: number }
+
+/** Largest axis-aligned piece of `source` that does not overlap `block`. */
+function largestRectOutside(source: ScreenRect, block: ScreenRect): ScreenRect {
+  const ix = Math.max(source.x, block.x)
+  const iy = Math.max(source.y, block.y)
+  const ir = Math.min(source.x + source.width, block.x + block.width)
+  const ib = Math.min(source.y + source.height, block.y + block.height)
+  if (ir - ix <= 0 || ib - iy <= 0) return source
+  const candidates: ScreenRect[] = [
+    { x: source.x, y: source.y, width: source.width, height: iy - source.y },
+    { x: source.x, y: ib, width: source.width, height: source.y + source.height - ib },
+    { x: source.x, y: source.y, width: ix - source.x, height: source.height },
+    { x: ir, y: source.y, width: source.x + source.width - ir, height: source.height }
+  ]
+  let best = candidates[0]
+  let bestArea = Math.max(0, best.width) * Math.max(0, best.height)
+  for (const candidate of candidates.slice(1)) {
+    const area = Math.max(0, candidate.width) * Math.max(0, candidate.height)
+    if (area > bestArea) {
+      best = candidate
+      bestArea = area
+    }
+  }
+  if (bestArea < 4) return { x: 0, y: 0, width: 0, height: 0 }
+  return best
 }
 
 export function App() {
@@ -120,13 +264,24 @@ export function App() {
   const [panning, setPanning] = useState(false)
   const [handMode, setHandMode] = useState(false)
   const [spaceHeld, setSpaceHeld] = useState(false)
+  const [deepSelectHeld, setDeepSelectHeld] = useState(false)
+  const [deepHoverId, setDeepHoverId] = useState<string | null>(null)
+  const deepSelectHeldRef = useRef(false)
+  const deepHoverIdRef = useRef<string | null>(null)
   const [inspectOn, setInspectOn] = useState(false)
   const [inspect, setInspect] = useState<InspectInfo | null>(null)
   const [measureHoverId, setMeasureHoverId] = useState<string | null>(null)
   const [altHeld, setAltHeld] = useState(false)
+  const [alignGuides, setAlignGuides] = useState<AlignGuide[]>([])
+  const [flexDrop, setFlexDrop] = useState<FlexDropGuide | null>(null)
+  const flexDropRef = useRef<FlexDropGuide | null>(null)
+  const [dropParentId, setDropParentId] = useState<string | null>(null)
+  const dropParentIdRef = useRef<string | null>(null)
+  const alignGuideTimer = useRef<number | null>(null)
   const [browserMeasureId, setBrowserMeasureId] = useState<string | null>(null)
   const [browserMeasureInspect, setBrowserMeasureInspect] = useState(true)
   const [browserMeasureXray, setBrowserMeasureXray] = useState(false)
+  const [snapshotBrowserId, setSnapshotBrowserId] = useState<string | null>(null)
   const [tool, setTool] = useState<DesignTool>('pointer')
   const [switchMode, setSwitchMode] = useState<SwitchMode>('draw')
   const [design, setDesign] = useState<DesignNode[]>([])
@@ -173,7 +328,7 @@ export function App() {
   const [leftOpen, setLeftOpen] = useState(true)
   const [rightOpen, setRightOpen] = useState(true)
   const [leftWidth, setLeftWidth] = useState(268)
-  const [rightWidth, setRightWidth] = useState(248)
+  const [rightWidth, setRightWidth] = useState(241)
   const [codingActive, setCodingActive] = useState(() => loadCodingAgents().active)
   const [codingRecents, setCodingRecents] = useState(() => loadCodingAgents().recents)
   const [codingPopup, setCodingPopup] = useState(false)
@@ -188,6 +343,7 @@ export function App() {
   const activeCommentIdRef = useRef<string | null>(null)
   const canvasRef = useRef<HTMLDivElement>(null)
   const worldRef = useRef<HTMLDivElement>(null)
+  const actionAnchorRef = useRef<DOMRect | null>(null)
   const holes = useRef(new Map<string, HTMLDivElement>())
   const agentHole = useRef<HTMLDivElement | null>(null)
   const chatHole = useRef<HTMLDivElement | null>(null)
@@ -203,6 +359,7 @@ export function App() {
   const toolRef = useRef(tool)
   const designRef = useRef(design)
   const designSelectedRef = useRef(designSelectedIds)
+  const pasteSnapshotRef = useRef<(tabId: string, tree: SnapshotNode) => void>(() => {})
   const shapeRef = useRef(shapeKind)
   const moveStart = useRef(
     new Map<string, { worldX: number; worldY: number; localX: number; localY: number; points?: PathPoint[] }>()
@@ -335,12 +492,32 @@ export function App() {
 
   const persistDesign = (next: DesignNode[], opts?: { skipReflow?: boolean }) => {
     const flowed = opts?.skipReflow ? next : reflowAutoLayout(next)
+    designRef.current = flowed
     setDesign(flowed)
     if (opts?.skipReflow) return
     if (persistTimer.current) window.clearTimeout(persistTimer.current)
     persistTimer.current = window.setTimeout(() => {
       void window.vanta.setDesign(flowed)
     }, 200)
+  }
+
+  const flashAlignGuides = (guides: AlignGuide[], hold = 0) => {
+    if (alignGuideTimer.current) {
+      window.clearTimeout(alignGuideTimer.current)
+      alignGuideTimer.current = null
+    }
+    setAlignGuides(guides)
+    if (hold > 0) {
+      alignGuideTimer.current = window.setTimeout(() => setAlignGuides([]), hold)
+    }
+  }
+
+  const alignSelection = (action: AlignAction) => {
+    const ids = designSelectedRef.current
+    const result = alignNodes(designRef.current, ids, action)
+    if (!result) return
+    persistDesign(result.nodes)
+    flashAlignGuides(result.guides, 800)
   }
 
   const collectSelectionTree = (ids: string[]) => {
@@ -444,6 +621,7 @@ export function App() {
       strokeOpacity: node.strokeOpacity,
       strokeAlign: node.strokeAlign,
       radius: node.radius,
+      cornerRadii: node.cornerRadii,
       opacity: node.opacity,
       blendMode: node.blendMode,
       effects: node.effects,
@@ -509,12 +687,21 @@ export function App() {
   const nodeCssSnippet = (node: DesignNode, asTailwind: boolean) => {
     const w = Math.round(node.width || 0)
     const h = Math.round(node.height || 0)
+    const radii = node.cornerRadii
     const radius = Math.round(node.radius || 0)
     const fill = node.fill || 'transparent'
+    const radiusCss = radii
+      ? `${Math.round(radii.tl)}px ${Math.round(radii.tr)}px ${Math.round(radii.br)}px ${Math.round(radii.bl)}px`
+      : radius
+        ? `${radius}px`
+        : ''
     if (asTailwind) {
+      if (radii && (radii.tl !== radii.tr || radii.tr !== radii.br || radii.br !== radii.bl)) {
+        return `w-[${w}px] h-[${h}px] rounded-tl-[${Math.round(radii.tl)}px] rounded-tr-[${Math.round(radii.tr)}px] rounded-br-[${Math.round(radii.br)}px] rounded-bl-[${Math.round(radii.bl)}px] bg-[${fill}]`
+      }
       return `w-[${w}px] h-[${h}px]${radius ? ` rounded-[${radius}px]` : ''} bg-[${fill}]`
     }
-    return `width: ${w}px;\nheight: ${h}px;\n${radius ? `border-radius: ${radius}px;\n` : ''}background: ${fill};`
+    return `width: ${w}px;\nheight: ${h}px;\n${radiusCss ? `border-radius: ${radiusCss};\n` : ''}background: ${fill};`
   }
 
   const openContextMenu = (event: { preventDefault: () => void; stopPropagation: () => void; clientX: number; clientY: number; shiftKey: boolean }, world: { x: number; y: number }) => {
@@ -619,6 +806,42 @@ export function App() {
     }
   }
 
+  const nudgeIntoView = (x: number, y: number, width: number, height: number) => {
+    const canvas = canvasRef.current
+    if (!canvas) return
+    const cam = cameraRef.current
+    const mid = worldToScreen(cam, x + width / 2, y + height / 2)
+    const pad = 48
+    let nextX = cam.x
+    let nextY = cam.y
+    if (mid.x < pad) nextX += pad - mid.x
+    if (mid.x > canvas.clientWidth - pad) nextX -= mid.x - (canvas.clientWidth - pad)
+    if (mid.y < pad) nextY += pad - mid.y
+    if (mid.y > canvas.clientHeight - pad) nextY -= mid.y - (canvas.clientHeight - pad)
+    if (nextX !== cam.x || nextY !== cam.y) applyCamera({ ...cam, x: nextX, y: nextY })
+  }
+
+  const pasteSnapshot = (tabId: string, tree: SnapshotNode) => {
+    const frame = browsersRef.current.find(
+      (item) => item.id === tabId || item.activeTabId === tabId || item.tabs.some((tab) => tab.id === tabId)
+    )
+    const x = frame ? frame.x + frame.width + 48 : 80
+    const y = frame ? frame.y : 80
+    const imported = importSnapshot(tree, { x, y, pageId: activePageRef.current }, () => crypto.randomUUID())
+    if (!imported.nodes.length) {
+      window.alert('That element had nothing to paste.')
+      return
+    }
+    persistDesign([...designRef.current, ...imported.nodes])
+    setSelectedId(null)
+    setDesignSelectedIds([imported.rootId])
+    setSnapshotRevealId(imported.rootId)
+    window.setTimeout(() => setSnapshotRevealId((current) => (current === imported.rootId ? null : current)), 700)
+    const root = imported.nodes.find((node) => node.id === imported.rootId)
+    nudgeIntoView(x, y, root?.width || tree.width, root?.height || tree.height)
+  }
+  pasteSnapshotRef.current = pasteSnapshot
+
   const worldFromEvent = (event: { clientX: number; clientY: number }) => {
     const canvas = canvasRef.current
     if (!canvas) return { x: 0, y: 0 }
@@ -651,19 +874,45 @@ export function App() {
   const syncLayout = useCallback(() => {
     if (layoutQueued.current) return
     layoutQueued.current = true
-    requestAnimationFrame(() => {
+    queueMicrotask(() => {
       layoutQueued.current = false
       const canvas = canvasRef.current?.getBoundingClientRect()
       const canvasClip = canvas
         ? { x: canvas.left, y: canvas.top, width: canvas.width, height: canvas.height }
         : { x: 0, y: 0, width: 0, height: 0 }
+      // Keep the selected frame/browser — and the toolbar sitting above it — clear of other BrowserViews.
+      let protect: ScreenRect | null = null
+      if (onCanvasRef.current) {
+        const browserId = selectedRef.current
+        const browserBox = browserId ? holes.current.get(browserId)?.parentElement?.getBoundingClientRect() : null
+        if (browserBox && browserBox.width > 2) {
+          protect = {
+            x: browserBox.left,
+            y: browserBox.top - 60,
+            width: browserBox.width,
+            height: browserBox.height + 60
+          }
+        } else if (designSelectedRef.current.length === 1) {
+          const id = designSelectedRef.current[0]
+          const node = designRef.current.find((item) => item.id === id)
+          const el =
+            node?.type === 'frame' ? worldRef.current?.querySelector(`[data-node-id="${CSS.escape(id)}"]`) : null
+          const box = el?.getBoundingClientRect()
+          if (box && box.width > 2) {
+            protect = { x: box.left, y: box.top - 60, width: box.width, height: box.height + 60 }
+          }
+        }
+      }
       const items = browsersRef.current.flatMap((frame, index) => {
         const hole = holes.current.get(frame.id)
         const box = hole?.getBoundingClientRect()
         const holeRect = box
           ? { x: box.left, y: box.top, width: box.width, height: box.height }
           : { x: 0, y: 0, width: 0, height: 0 }
-        const clip = onCanvasRef.current ? intersectRects(holeRect, canvasClip) : null
+        let clip = onCanvasRef.current ? intersectRects(holeRect, canvasClip) : null
+        if (clip && protect && frame.id !== selectedRef.current) {
+          clip = largestRectOutside(clip, protect)
+        }
         const visibleHole = Boolean(clip && clip.width > 2 && clip.height > 2)
         const z = frame.id === selectedRef.current ? 10_000 + index : index
         return frame.tabs.map((tab) => {
@@ -718,6 +967,60 @@ export function App() {
     })
   }, [])
 
+  const measureActionAnchor = useCallback(() => {
+    const publish = (box: DOMRect | null) => {
+      const prev = actionAnchorRef.current
+      if (!box || box.width < 2 || box.height < 2) {
+        if (prev) {
+          actionAnchorRef.current = null
+          setActionAnchor(null)
+        }
+        return
+      }
+      if (
+        prev &&
+        Math.abs(prev.x - box.x) < 0.5 &&
+        Math.abs(prev.y - box.y) < 0.5 &&
+        Math.abs(prev.width - box.width) < 0.5 &&
+        Math.abs(prev.height - box.height) < 0.5
+      ) {
+        return
+      }
+      const next = new DOMRect(box.x, box.y, box.width, box.height)
+      actionAnchorRef.current = next
+      setActionAnchor(next)
+    }
+
+    if (!onCanvasRef.current) {
+      publish(null)
+      return
+    }
+    const browserId = selectedRef.current
+    if (browserId) {
+      publish(holes.current.get(browserId)?.parentElement?.getBoundingClientRect() ?? null)
+      return
+    }
+    const ids = designSelectedRef.current
+    if (ids.length !== 1) {
+      publish(null)
+      return
+    }
+    const node = designRef.current.find((item) => item.id === ids[0])
+    if (!node || node.type !== 'frame' || (node.pageId || DEFAULT_PAGE.id) !== activePageRef.current) {
+      publish(null)
+      return
+    }
+    if (node.parentId) {
+      const parent = designRef.current.find((item) => item.id === node.parentId)
+      if (parent?.type !== 'section') {
+        publish(null)
+        return
+      }
+    }
+    const el = worldRef.current?.querySelector(`[data-node-id="${CSS.escape(node.id)}"]`)
+    publish(el?.getBoundingClientRect() ?? null)
+  }, [])
+
   const applyCamera = useCallback(
     (next: Camera) => {
       cameraRef.current = next
@@ -729,13 +1032,14 @@ export function App() {
         world.setAttribute('data-zoom', String(next.zoom))
       }
       syncLayout()
+      measureActionAnchor()
       if (cameraRaf.current != null) window.cancelAnimationFrame(cameraRaf.current)
       cameraRaf.current = window.requestAnimationFrame(() => {
         cameraRaf.current = null
         setCamera({ ...cameraRef.current })
       })
     },
-    [syncLayout]
+    [syncLayout, measureActionAnchor]
   )
 
   useEffect(() => {
@@ -772,6 +1076,11 @@ export function App() {
       }
     })
     const offInspect = window.vanta.onInspect(setInspect)
+    const offSnapshot = window.vanta.onSnapshot((event) => {
+      if ('tree' in event) pasteSnapshotRef.current(event.tabId, event.tree)
+      else if ('error' in event) window.alert(event.error)
+      setSnapshotBrowserId(null)
+    })
     const offDesign = window.vanta.onDesign(setDesign)
     const offBuild = window.vanta.onBuild((event: BuildUiEvent) => {
       if (event.type === 'mcp:status') {
@@ -874,6 +1183,7 @@ export function App() {
       offLayout()
       offWorkspace()
       offInspect()
+      offSnapshot()
       offAgent()
       offDesign()
       offBuild()
@@ -887,9 +1197,10 @@ export function App() {
     return () => window.clearTimeout(timer)
   }, [camera])
 
-  useEffect(() => {
-    void syncLayout()
-  }, [camera, browsers, selectedId, view, leftOpen, rightOpen, leftWidth, rightWidth, rail, codingActive, codingPopup, codingFullscreen, syncLayout])
+  useLayoutEffect(() => {
+    syncLayout()
+    measureActionAnchor()
+  }, [camera, browsers, design, designSelectedIds, selectedId, activePageId, view, rail, leftOpen, rightOpen, leftWidth, rightWidth, codingActive, codingPopup, codingFullscreen, syncLayout, measureActionAnchor])
 
   useEffect(() => {
     if (rail !== 'chat') return
@@ -900,40 +1211,25 @@ export function App() {
   }, [rail, syncLayout])
 
   useEffect(() => {
-    if (selectedId) {
-      const hole = holes.current.get(selectedId)
-      const box = hole?.parentElement?.getBoundingClientRect()
-      setActionAnchor(box && box.width > 2 ? box : null)
-      return
-    }
-    const node = design.find(
-      (item) =>
-        item.id === designSelectedId &&
-        item.type === 'frame' &&
-        (item.pageId || DEFAULT_PAGE.id) === activePageId
-    )
-    const canvas = canvasRef.current
-    if (!node || !canvas || view !== 'canvas') {
-      setActionAnchor(null)
-      return
-    }
-    const box = worldRectToScreen(
-      camera,
-      canvas.getBoundingClientRect(),
-      node.x,
-      node.y,
-      Math.max(8, node.width || 8),
-      Math.max(8, node.height || 8)
-    )
-    setActionAnchor(box.width > 2 ? box : null)
-  }, [camera, selectedId, design, designSelectedId, activePageId, view, leftOpen, rightOpen, leftWidth, rightWidth])
+    void window.vanta.setInspect(inspectOn && !browserMeasureId && !snapshotBrowserId ? activeTabId : null)
+  }, [inspectOn, activeTabId, browserMeasureId, snapshotBrowserId])
+
+  const snapshotTabId = snapshotBrowserId
+    ? browsers.find((item) => item.id === snapshotBrowserId)?.activeTabId || null
+    : null
 
   useEffect(() => {
-    void window.vanta.setInspect(inspectOn && !browserMeasureId ? activeTabId : null)
-  }, [inspectOn, activeTabId, browserMeasureId])
+    if (snapshotBrowserId && selectedId !== snapshotBrowserId) setSnapshotBrowserId(null)
+  }, [selectedId, snapshotBrowserId])
 
   useEffect(() => {
-    if (!browserMeasureId) {
+    if (typeof window.vanta.setSnapshot !== 'function') return
+    void window.vanta.setSnapshot(snapshotTabId)
+    if (snapshotTabId) void window.vanta.focus(snapshotTabId)
+  }, [snapshotTabId])
+
+  useEffect(() => {
+    if (!browserMeasureId || snapshotBrowserId) {
       void window.vanta.setMesurer(null, null)
       return
     }
@@ -947,7 +1243,7 @@ export function App() {
       inspect: browserMeasureInspect,
       xray: browserMeasureXray
     })
-  }, [browserMeasureId, browserMeasureInspect, browserMeasureXray, browsers, selectedId])
+  }, [browserMeasureId, browserMeasureInspect, browserMeasureXray, browsers, selectedId, snapshotBrowserId])
 
   useEffect(() => {
     const canvas = canvasRef.current
@@ -1039,6 +1335,10 @@ export function App() {
       }
       if (event.key === 'Alt') {
         setAltHeld(true)
+      }
+      if (event.key === 'Control' || event.key === 'Meta') {
+        deepSelectHeldRef.current = true
+        setDeepSelectHeld(true)
       }
       if (typing) return
       if (designRef.current.some((node) => node.editing)) {
@@ -1227,10 +1527,57 @@ export function App() {
           persistDesign(designRef.current.filter((node) => !ids.has(node.id)))
         }
         setDesignSelectedIds([])
+      } else if (
+        !meta &&
+        (event.key === 'ArrowLeft' ||
+          event.key === 'ArrowRight' ||
+          event.key === 'ArrowUp' ||
+          event.key === 'ArrowDown') &&
+        designSelectedRef.current.length
+      ) {
+        event.preventDefault()
+        const ids = designSelectedRef.current
+        const step = event.shiftKey ? 10 : 1
+        const dx = event.key === 'ArrowLeft' ? -step : event.key === 'ArrowRight' ? step : 0
+        const dy = event.key === 'ArrowUp' ? -step : event.key === 'ArrowDown' ? step : 0
+        const nodes = designRef.current
+        const selected = new Set(ids)
+        const roots = ids
+          .map((id) => nodes.find((node) => node.id === id))
+          .filter((node): node is DesignNode => Boolean(node))
+          .filter((node) => !node.parentId || !selected.has(node.parentId))
+        const parentId = roots[0]?.parentId
+        const parent = parentId ? nodes.find((node) => node.id === parentId) : null
+        const flexParent = parent && isAutoLayout(parent) ? parent : null
+        const vertical = flexParent?.layout?.mode === 'vertical'
+        const alongMain =
+          Boolean(flexParent) &&
+          roots.every((node) => node.parentId === parentId && !node.layoutAbsolute) &&
+          (vertical ? dy !== 0 : dx !== 0)
+        if (alongMain && flexParent && parentId) {
+          const delta = (vertical ? dy : dx) > 0 ? 1 : -1
+          const reordered = reorderFlexByDelta(nodes, ids, delta)
+          if (reordered) persistDesign(reordered)
+          return
+        }
+        if (flexParent && roots.every((node) => !node.layoutAbsolute)) return
+        const selectedRoots = new Set(roots.map((node) => node.id))
+        persistDesign(
+          nodes.map((node) => {
+            if (!selectedRoots.has(node.id)) return node
+            return { ...node, x: node.x + dx, y: node.y + dy }
+          })
+        )
       }
     }
     const up = async (event: KeyboardEvent) => {
       if (event.key === 'Alt') setAltHeld(false)
+      if (event.key === 'Control' || event.key === 'Meta') {
+        deepSelectHeldRef.current = false
+        setDeepSelectHeld(false)
+        deepHoverIdRef.current = null
+        setDeepHoverId(null)
+      }
       if (event.code !== 'Space') return
       space.current = false
       setSpaceHeld(false)
@@ -1786,7 +2133,14 @@ export function App() {
 
   const selectedDesignFrame =
     designSelectedIds.length === 1
-      ? pageNodes.find((node) => node.id === designSelectedId && node.type === 'frame') || null
+      ? (() => {
+          const node = pageNodes.find((item) => item.id === designSelectedId && item.type === 'frame')
+          if (!node) return null
+          // Only top-level artboards get the floating toolbar — not nested flex/frames.
+          if (!node.parentId) return node
+          const parent = pageNodes.find((item) => item.id === node.parentId)
+          return parent?.type === 'section' ? node : null
+        })()
       : null
   const selectedNode = pageNodes.find((node) => node.id === designSelectedId) || null
   const measurePrimary =
@@ -1826,7 +2180,36 @@ export function App() {
           void convertBrowserToDesign(selected.id)
         },
         onResize: (size: { width: number; height: number; name?: string }) =>
-          patchFrame(selected.id, { width: size.width, height: size.height })
+          patchFrame(selected.id, { width: size.width, height: size.height }),
+        measure: {
+          active: browserMeasureId === selected.id,
+          inspect: browserMeasureInspect,
+          xray: browserMeasureXray,
+          onToggle: () => {
+            setSelectedId(selected.id)
+            setDesignSelectedIds([])
+            setInspectOn(false)
+            setBrowserMeasureId((current) => (current === selected.id ? null : selected.id))
+            setBrowserMeasureInspect(true)
+            setBrowserMeasureXray(false)
+          },
+          onInspect: () => setBrowserMeasureInspect((value) => !value),
+          onXray: () => setBrowserMeasureXray((value) => !value)
+        },
+        snapshot: {
+          active: snapshotBrowserId === selected.id,
+          onToggle: () => {
+            if (typeof window.vanta.setSnapshot !== 'function') {
+              window.alert('Snapshot needs a restart. Quit and reopen Vanta, then try again.')
+              return
+            }
+            setSelectedId(selected.id)
+            setDesignSelectedIds([])
+            setInspectOn(false)
+            setBrowserMeasureId(null)
+            setSnapshotBrowserId((current) => (current === selected.id ? null : selected.id))
+          }
+        }
       }
     : selectedDesignFrame
       ? {
@@ -1844,6 +2227,8 @@ export function App() {
             )
           },
           onConvert: undefined as undefined | (() => void),
+          snapshot: undefined,
+          measure: undefined,
           onResize: (size: { width: number; height: number; name?: string }) => {
             const baseName = size.name
             let nextName = selectedDesignFrame.name
@@ -2010,7 +2395,7 @@ export function App() {
         ) : (
           <div
             ref={canvasRef}
-            className={`canvas${panning ? ' is-panning' : ''}${tool === 'hand' || handMode || spaceHeld ? ' is-hand' : ''}${['frame', 'section', 'browser', 'shape', 'pen', 'pencil', 'brush', 'text', 'text-on-path', 'comment', 'widget'].includes(tool) ? ' is-design' : ''}${pathHoverId && (tool === 'text' || tool === 'text-on-path') ? ' is-text-path' : ''}`}
+            className={`canvas${panning ? ' is-panning' : ''}${tool === 'hand' || handMode || spaceHeld ? ' is-hand' : ''}${deepSelectHeld ? ' is-deep-select' : ''}${['frame', 'section', 'browser', 'shape', 'pen', 'pencil', 'brush', 'text', 'text-on-path', 'comment', 'widget'].includes(tool) ? ' is-design' : ''}${pathHoverId && (tool === 'text' || tool === 'text-on-path') ? ' is-text-path' : ''}`}
             data-tool={tool}
             style={customCanvasFill ? { background: customCanvasFill } : undefined}
             onContextMenu={(event) => {
@@ -2044,7 +2429,20 @@ export function App() {
                 startDesign(event)
                 return
               }
-              if (target.closest('.frame, .design-frame, .design-shape, .design-text, .design-comment, .design-widget, .text-on-path')) {
+              if (target.closest('.frame, .design-frame, .design-shape, .design-text, .design-comment, .design-widget, .text-on-path, .draw-path, .draw-pen-stroke, .draw-brush-fill')) {
+                const creating =
+                  toolRef.current === 'shape' ||
+                  toolRef.current === 'frame' ||
+                  toolRef.current === 'section' ||
+                  toolRef.current === 'pen' ||
+                  toolRef.current === 'pencil' ||
+                  toolRef.current === 'brush' ||
+                  toolRef.current === 'widget'
+                if (creating) {
+                  setSelectedId(null)
+                  startDesign(event)
+                  return
+                }
                 return
               }
               if (toolRef.current === 'hand' || toolRef.current === 'scale' || toolRef.current === 'measure') {
@@ -2136,6 +2534,25 @@ export function App() {
                 setPathHoverId(hit?.id || null)
               } else if (pathHoverId) {
                 setPathHoverId(null)
+              }
+              if (
+                (deepSelectHeldRef.current || event.ctrlKey || event.metaKey) &&
+                toolRef.current === 'pointer' &&
+                !marquee.current &&
+                !pan.current
+              ) {
+                const pageNodes = designRef.current.filter(
+                  (node) => (node.pageId || DEFAULT_PAGE.id) === activePageRef.current
+                )
+                const deep = pickDeepAtPoint(point, pageNodes)
+                const hoverId = deep?.id || null
+                if (hoverId !== deepHoverIdRef.current) {
+                  deepHoverIdRef.current = hoverId
+                  setDeepHoverId(hoverId)
+                }
+              } else if (deepHoverIdRef.current) {
+                deepHoverIdRef.current = null
+                setDeepHoverId(null)
               }
               if (toolRef.current === 'pen' && drawRef.current?.kind === 'pen' && !penDrag.current) {
                 setPenHover(point)
@@ -2267,7 +2684,7 @@ export function App() {
                 revealId={snapshotRevealId}
                 revealIds={revealIds}
                 buildingIds={buildingIds}
-                onSelect={(id, additive) => {
+                onSelect={(id, additive, opts) => {
                   const hit = designRef.current.find((node) => node.id === id)
                   if (hit?.type === 'comment') {
                     openCommentThread(id)
@@ -2275,18 +2692,50 @@ export function App() {
                   }
                   setActiveCommentId(null)
                   setSelectedId(null)
+                  let targetId = id
+                  // Shift multi-select and Ctrl deep-select both pick the element under the
+                  // cursor (incl. flex children) — skip drill-to-parent so nested nodes can
+                  // be added without selecting the frame first.
+                  if (opts?.deep || additive) {
+                    const world =
+                      opts?.clientX != null && opts?.clientY != null
+                        ? worldFromEvent({ clientX: opts.clientX, clientY: opts.clientY })
+                        : null
+                    const deep = world ? pickDeepAtPoint(world, designRef.current) : hit
+                    if (deep) targetId = deep.id
+                  } else if (opts?.drill && hit) {
+                    const next = resolveDrillIn(hit, designRef.current, designSelectedRef.current)
+                    if (!next) {
+                      // Already at deepest — text edits / frame rename handled by DesignLayer.
+                      return
+                    }
+                    targetId = next
+                  } else if (hit) {
+                    targetId = resolveClickTarget(hit, designRef.current, designSelectedRef.current)
+                  }
                   if (toolRef.current === 'measure') {
-                    setDesignSelectedIds([id])
+                    designSelectedRef.current = [targetId]
+                    setDesignSelectedIds([targetId])
                     return
                   }
-                  setDesignSelectedIds((current) => {
-                    if (additive) return current.includes(id) ? current.filter((item) => item !== id) : [...current, id]
-                    if (current.includes(id) && current.length > 1) return current
-                    return [id]
-                  })
+                  const nextIds = (() => {
+                    const current = designSelectedRef.current
+                    if (additive) {
+                      return current.includes(targetId)
+                        ? current.filter((item) => item !== targetId)
+                        : [...current, targetId]
+                    }
+                    if (current.includes(targetId) && current.length > 1) return current
+                    return [targetId]
+                  })()
+                  // Sync ref immediately so pointer-down → move-start uses the parent, not the child.
+                  designSelectedRef.current = nextIds
+                  setDesignSelectedIds(nextIds)
                 }}
+                deepHoverId={deepHoverId}
                 onMoveStart={(id) => {
-                  const seed = new Set(designSelectedRef.current.includes(id) ? designSelectedRef.current : [id])
+                  const selected = designSelectedRef.current
+                  const seed = new Set(selected.length ? selected : [id])
                   const roots = [...seed].filter((nodeId) => {
                     const node = designRef.current.find((item) => item.id === nodeId)
                     return Boolean(node && (!node.parentId || !seed.has(node.parentId)))
@@ -2310,8 +2759,33 @@ export function App() {
                       ]
                     })
                   )
+                  const parentIds = new Set(
+                    roots
+                      .map((nodeId) => designRef.current.find((item) => item.id === nodeId)?.parentId)
+                      .filter((parentId): parentId is string => Boolean(parentId))
+                  )
+                  let lifted = false
+                  let next = designRef.current.map((node) => {
+                    if (!roots.includes(node.id) || !node.parentId) return node
+                    const parent = designRef.current.find((item) => item.id === node.parentId)
+                    if (!parent || !isAutoLayout(parent) || node.layoutAbsolute) return node
+                    lifted = true
+                    return { ...node, layoutAbsolute: true }
+                  })
+                  if (lifted) {
+                    for (const parentId of parentIds) {
+                      const parent = next.find((node) => node.id === parentId)
+                      if (parent && isAutoLayout(parent)) next = reorderAutoLayoutChildren(next, parentId)
+                    }
+                    persistDesign(next)
+                  }
+                  flexDropRef.current = null
+                  setFlexDrop(null)
+                  dropParentIdRef.current = null
+                  setDropParentId(null)
+                  return roots[0] || id
                 }}
-                onMove={(id, x, y) => {
+                onMove={(id, x, y, snap = true) => {
                   const start = moveStart.current.get(id)
                   if (!start) {
                     const node = designRef.current.find((item) => item.id === id)
@@ -2339,8 +2813,28 @@ export function App() {
                     )
                     return
                   }
-                  const dx = x - start.worldX
-                  const dy = y - start.worldY
+                  const rawDx = x - start.worldX
+                  const rawDy = y - start.worldY
+                  const movingIds = [...moveStart.current.keys()]
+                  const snapped =
+                    snap === false
+                      ? null
+                      : snapMove({
+                          dx: rawDx,
+                          dy: rawDy,
+                          origins: movingIds.flatMap((nodeId) => {
+                            const origin = moveStart.current.get(nodeId)
+                            const node = designRef.current.find((item) => item.id === nodeId)
+                            if (!origin || !node) return []
+                            const size = resolveWorldRect(node, designRef.current)
+                            return [{ worldX: origin.worldX, worldY: origin.worldY, width: size.width, height: size.height }]
+                          }),
+                          targets: snapTargets(designRef.current, movingIds, activePageRef.current),
+                          zoom: cameraRef.current.zoom
+                        })
+                  const dx = snapped?.dx ?? rawDx
+                  const dy = snapped?.dy ?? rawDy
+                  flashAlignGuides(snapped?.guides || [])
                   persistDesign(
                     designRef.current.map((node) => {
                       const origin = moveStart.current.get(node.id)
@@ -2362,6 +2856,60 @@ export function App() {
                     }),
                     { skipReflow: true }
                   )
+                  const primary = designRef.current.find((node) => node.id === id)
+                  const parent = primary?.parentId
+                    ? designRef.current.find((node) => node.id === primary.parentId)
+                    : null
+                  // Blue outline on the frame/section that would become the drop parent (Paper).
+                  const moving = new Set(movingIds)
+                  const exclude = expandWithDescendants(designRef.current, moving)
+                  let dropId: string | null = null
+                  let dropCenter: { x: number; y: number } | null = null
+                  let dropSize: { width: number; height: number } | null = null
+                  for (const nodeId of movingIds) {
+                    const origin = moveStart.current.get(nodeId)
+                    const node = designRef.current.find((item) => item.id === nodeId)
+                    if (!origin || !node) continue
+                    const size = resolveWorldRect(node, designRef.current)
+                    const center = {
+                      x: origin.worldX + dx + size.width / 2,
+                      y: origin.worldY + dy + size.height / 2
+                    }
+                    const host = findContainingParent(center, designRef.current, exclude)
+                    if (host) {
+                      dropId = host.id
+                      dropCenter = center
+                      dropSize = { width: size.width, height: size.height }
+                      break
+                    }
+                  }
+                  if (dropId !== dropParentIdRef.current) {
+                    dropParentIdRef.current = dropId
+                    setDropParentId(dropId)
+                  }
+                  // Flex insert guide: reordering within a flex parent, or dropping into one.
+                  const flexHostId =
+                    primary?.parentId && parent && isAutoLayout(parent) && primary.layoutAbsolute
+                      ? primary.parentId
+                      : dropId &&
+                          (() => {
+                            const host = designRef.current.find((item) => item.id === dropId)
+                            return host && isAutoLayout(host) ? host.id : null
+                          })()
+                  if (flexHostId && dropCenter && dropSize) {
+                    const guide = measureFlexDrop(
+                      designRef.current,
+                      flexHostId,
+                      movingIds,
+                      dropCenter,
+                      dropSize
+                    )
+                    flexDropRef.current = guide
+                    setFlexDrop(guide)
+                  } else if (flexDropRef.current) {
+                    flexDropRef.current = null
+                    setFlexDrop(null)
+                  }
                 }}
                 onMoveEnd={(id) => {
                   const seed = new Set(designSelectedRef.current.includes(id) ? designSelectedRef.current : [id])
@@ -2370,6 +2918,7 @@ export function App() {
                     return Boolean(node && (!node.parentId || !seed.has(node.parentId)))
                   })
                   let next = [...designRef.current]
+                  const drop = flexDropRef.current
                   for (const rootId of roots) {
                     const exclude = expandWithDescendants(next, new Set([rootId]))
                     const node = next.find((item) => item.id === rootId)
@@ -2379,24 +2928,67 @@ export function App() {
                     if (patched.parentId) {
                       const parentNode = next.find((item) => item.id === patched.parentId)
                       if (parentNode && isAutoLayout(parentNode)) {
-                        next = reorderAutoLayoutChildren(next, patched.parentId)
+                        if (drop && drop.parentId === patched.parentId) {
+                          next = placeFlexChildren(next, patched.parentId, roots, drop.index)
+                        } else {
+                          next = next.map((item) =>
+                            roots.includes(item.id) ? { ...item, layoutAbsolute: false } : item
+                          )
+                          next = reorderAutoLayoutChildren(next, patched.parentId)
+                        }
                       }
+                    } else if (node.layoutAbsolute) {
+                      next = next.map((item) => (item.id === rootId ? { ...item, layoutAbsolute: false } : item))
                     }
                   }
                   persistDesign(next)
                   moveStart.current = new Map()
+                  flexDropRef.current = null
+                  setFlexDrop(null)
+                  dropParentIdRef.current = null
+                  setDropParentId(null)
+                  flashAlignGuides([])
                 }}
+                dropParentId={dropParentId}
                 onResize={(id, next) => {
                   const { world, ...rect } = next
                   persistDesign(
                     designRef.current.map((node) => {
                       if (node.id !== id) return node
-                      if (!world || !node.parentId) return { ...node, ...rect }
-                      const parent = designRef.current.find((item) => item.id === node.parentId)
-                      if (!parent) return { ...node, ...rect }
-                      const parentWorld = resolveWorldRect(parent, designRef.current)
-                      const rel = toRelative({ x: rect.x, y: rect.y }, parentWorld)
-                      return { ...node, x: rel.x, y: rel.y, width: rect.width, height: rect.height }
+                      let patched = node
+                      if (!world || !node.parentId) patched = { ...node, ...rect }
+                      else {
+                        const parent = designRef.current.find((item) => item.id === node.parentId)
+                        if (!parent) patched = { ...node, ...rect }
+                        else {
+                          const parentWorld = resolveWorldRect(parent, designRef.current)
+                          const rel = toRelative({ x: rect.x, y: rect.y }, parentWorld)
+                          patched = { ...node, x: rel.x, y: rel.y, width: rect.width, height: rect.height }
+                        }
+                      }
+                      if (patched.layout && patched.layout.mode !== 'none') {
+                        const sizingH =
+                          Math.abs((patched.width || 0) - (node.width || 0)) > 0.4 || Math.abs(patched.x - node.x) > 0.4
+                            ? 'fixed'
+                            : patched.layout.sizingH
+                        const sizingV =
+                          Math.abs((patched.height || 0) - (node.height || 0)) > 0.4 || Math.abs(patched.y - node.y) > 0.4
+                            ? 'fixed'
+                            : patched.layout.sizingV
+                        patched = { ...patched, layout: { ...patched.layout, sizingH, sizingV } }
+                      }
+                      // Manual resize on a flex child locks that axis to Fixed.
+                      if (node.parentId) {
+                        const parent = designRef.current.find((item) => item.id === node.parentId)
+                        if (parent && isAutoLayout(parent) && !patched.layoutAbsolute) {
+                          const nextSizingH =
+                            Math.abs((patched.width || 0) - (node.width || 0)) > 0.4 ? 'fixed' : patched.layoutSizingH
+                          const nextSizingV =
+                            Math.abs((patched.height || 0) - (node.height || 0)) > 0.4 ? 'fixed' : patched.layoutSizingV
+                          patched = { ...patched, layoutSizingH: nextSizingH, layoutSizingV: nextSizingV }
+                        }
+                      }
+                      return patched
                     })
                   )
                 }}
@@ -2420,7 +3012,37 @@ export function App() {
                   persistDesign(designRef.current.filter((node) => node.id !== id))
                   setDesignSelectedIds((current) => current.filter((item) => item !== id))
                 }}
+                onSpace={(axis, gap) => {
+                  const result = applySelectionGap(designRef.current, designSelectedRef.current, axis, gap)
+                  persistDesign(result.nodes, result.reflow ? undefined : { skipReflow: true })
+                }}
+                onSpaceEnd={() => persistDesign(designRef.current)}
+                onPad={(side, value) => {
+                  const id = designSelectedRef.current[0]
+                  const before = designRef.current.find((node) => node.id === id)
+                  if (!before) return
+                  const beforeW = before.width || 0
+                  const beforeH = before.height || 0
+                  let next = reflowAutoLayout(applyFramePadding(designRef.current, id, side, value))
+                  next = next.map((node) => {
+                    if (node.id !== id || !node.layout) return node
+                    const hugH = (node.layout.sizingH || 'fixed') === 'hug'
+                    const hugV = (node.layout.sizingV || 'fixed') === 'hug'
+                    if (side === 'l' && hugH) return { ...node, x: before.x - ((node.width || 0) - beforeW) }
+                    if (side === 't' && hugV) return { ...node, y: before.y - ((node.height || 0) - beforeH) }
+                    return node
+                  })
+                  persistDesign(next, { skipReflow: true })
+                }}
+                onPadEnd={() => persistDesign(designRef.current)}
+                onLayoutAlign={(justify, align) => {
+                  const id = designSelectedRef.current[0]
+                  if (!id) return
+                  persistDesign(applyLayoutAlignment(designRef.current, id, justify, align))
+                }}
+                flexDrop={flexDrop}
               />
+              {alignGuides.length > 0 && <AlignGuidesOverlay guides={alignGuides} zoom={camera.zoom} />}
               {(tool === 'measure' || altHeld) && measureLines.length > 0 && (
                 <MeasureOverlay
                   lines={measureLines}
@@ -2434,23 +3056,6 @@ export function App() {
                   key={frame.id}
                   frame={frame}
                   selected={selectedId === frame.id}
-                  measureActive={browserMeasureId === frame.id}
-                  measureInspect={browserMeasureInspect}
-                  measureXray={browserMeasureXray}
-                  onToggleMeasure={() => {
-                    setSelectedId(frame.id)
-                    setDesignSelectedIds([])
-                    setInspectOn(false)
-                    setBrowserMeasureId((current) => (current === frame.id ? null : frame.id))
-                    setBrowserMeasureInspect(true)
-                    setBrowserMeasureXray(false)
-                  }}
-                  onMeasureInspect={() => {
-                    setBrowserMeasureInspect((value) => !value)
-                  }}
-                  onMeasureXray={() => {
-                    setBrowserMeasureXray((value) => !value)
-                  }}
                   onSelect={() => {
                     setSelectedId(frame.id)
                     setDesignSelectedIds([])
@@ -2626,6 +3231,12 @@ export function App() {
           page={activePage}
           node={selected ? null : selectedNode}
           nodes={design}
+          selectedIds={designSelectedIds}
+          onAlign={alignSelection}
+          onSpace={(axis, gap) => {
+            const result = applySelectionGap(designRef.current, designSelectedRef.current, axis, gap)
+            persistDesign(result.nodes)
+          }}
           browser={selected}
           tool={tool}
           onPatchPage={(patch) => persistPages(pages.map((page) => (page.id === activePage.id ? { ...page, ...patch } : page)))}
@@ -2705,6 +3316,8 @@ export function App() {
           onRename={actionBar.onRename}
           onConvert={actionBar.onConvert}
           onResize={actionBar.onResize}
+          snapshot={actionBar.snapshot}
+          measure={actionBar.measure}
         />
       )}
       {view === 'canvas' && rail !== 'chat' && (

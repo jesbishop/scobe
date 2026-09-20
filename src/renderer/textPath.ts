@@ -135,6 +135,8 @@ export function pointAtPathOffset(
   return { x: best.x, y: best.y }
 }
 
+import { cssFontFamily } from './googleFonts'
+
 let measureCanvas: HTMLCanvasElement | null = null
 
 export function measurePlainText(
@@ -149,7 +151,8 @@ export function measurePlainText(
   if (!measureCanvas) measureCanvas = document.createElement('canvas')
   const ctx = measureCanvas.getContext('2d')
   if (!ctx) return { width: Math.max(8, fontSize * 0.55), height: lineHeight || Math.round(fontSize * 1.2) }
-  ctx.font = `${fontStyle === 'italic' ? 'italic ' : ''}${fontWeight || 400} ${fontSize}px ${fontFamily || 'Inter'}`
+  const family = /['",]/.test(fontFamily || '') ? fontFamily : cssFontFamily(fontFamily || 'Inter')
+  ctx.font = `${fontStyle === 'italic' ? 'italic ' : ''}${fontWeight || 400} ${fontSize}px ${family}`
   const lines = (text || '').split('\n')
   const width = Math.max(
     8,

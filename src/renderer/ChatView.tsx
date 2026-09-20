@@ -1,11 +1,9 @@
 import { useEffect, useRef, useState, type FormEvent, type KeyboardEvent as ReactKeyboardEvent } from 'react'
 import AddIcon from '@mui/icons-material/Add'
 import ArrowUpwardIcon from '@mui/icons-material/ArrowUpward'
-import ImageOutlinedIcon from '@mui/icons-material/ImageOutlined'
 import KeyboardArrowDownIcon from '@mui/icons-material/KeyboardArrowDown'
 import MicNoneOutlinedIcon from '@mui/icons-material/MicNoneOutlined'
 import StopRoundedIcon from '@mui/icons-material/StopRounded'
-import AutoAwesomeOutlinedIcon from '@mui/icons-material/AutoAwesomeOutlined'
 import { normalizeUrl } from '../shared/url'
 import type { SwitchMode } from '../shared/types'
 import { ModeSwitch } from './ModeSwitch'
@@ -94,7 +92,7 @@ export function ChatWorkspace({
   )
 }
 
-const AGENT_MODES = ['Agent', 'Ask', 'Manual'] as const
+const AGENT_MODES = ['Auto', 'Agent', 'Ask', 'Manual'] as const
 
 export function ChatComposer({
   value,
@@ -115,7 +113,7 @@ export function ChatComposer({
 }) {
   const areaRef = useRef<HTMLTextAreaElement>(null)
   const rootRef = useRef<HTMLFormElement>(null)
-  const [agentMode, setAgentMode] = useState<(typeof AGENT_MODES)[number]>('Agent')
+  const [agentMode, setAgentMode] = useState<(typeof AGENT_MODES)[number]>('Auto')
   const [modeOpen, setModeOpen] = useState(false)
   const canSend = value.trim().length > 0 && !busy
   const hint = placeholder || 'Plan, search, build anything'
@@ -124,7 +122,7 @@ export function ChatComposer({
     const el = areaRef.current
     if (!el) return
     el.style.height = '0px'
-    el.style.height = `${Math.min(compact ? 120 : 200, Math.max(compact ? 20 : 24, el.scrollHeight))}px`
+    el.style.height = `${Math.min(compact ? 120 : 200, Math.max(compact ? 24 : 28, el.scrollHeight))}px`
   }, [value, compact])
 
   useEffect(() => {
@@ -174,16 +172,18 @@ export function ChatComposer({
       />
       <div className="cursor-composer-bar">
         <div className="cursor-composer-left">
+          <button type="button" className="cursor-composer-plus" title="Add" disabled>
+            <AddIcon sx={{ fontSize: 20 }} />
+          </button>
           <div className="cursor-mode-wrap">
             <button
               type="button"
-              className="cursor-mode-pill"
+              className="cursor-mode-select"
               title="Mode"
               onClick={() => setModeOpen((open) => !open)}
             >
-              <AutoAwesomeOutlinedIcon sx={{ fontSize: 15 }} />
               <span>{agentMode}</span>
-              <KeyboardArrowDownIcon sx={{ fontSize: 15 }} />
+              <KeyboardArrowDownIcon sx={{ fontSize: 18 }} />
             </button>
             {modeOpen && (
               <div className="cursor-mode-menu">
@@ -203,20 +203,10 @@ export function ChatComposer({
               </div>
             )}
           </div>
-          <button type="button" className="cursor-composer-icon" title="Add context" disabled>
-            <AddIcon sx={{ fontSize: 18 }} />
-          </button>
-          <button type="button" className="cursor-model-pill" title="Model">
-            <span>Composer</span>
-            <KeyboardArrowDownIcon sx={{ fontSize: 14 }} />
-          </button>
         </div>
         <div className="cursor-composer-right">
-          <button type="button" className="cursor-composer-icon" title="Image" disabled>
-            <ImageOutlinedIcon sx={{ fontSize: 18 }} />
-          </button>
           <button type="button" className="cursor-composer-icon" title="Voice" disabled>
-            <MicNoneOutlinedIcon sx={{ fontSize: 18 }} />
+            <MicNoneOutlinedIcon sx={{ fontSize: 22 }} />
           </button>
           <button
             type="submit"
@@ -224,7 +214,7 @@ export function ChatComposer({
             disabled={!canSend && !busy}
             title={busy ? 'Stop' : 'Send'}
           >
-            {busy ? <StopRoundedIcon sx={{ fontSize: 16 }} /> : <ArrowUpwardIcon sx={{ fontSize: 16 }} />}
+            {busy ? <StopRoundedIcon sx={{ fontSize: 18 }} /> : <ArrowUpwardIcon sx={{ fontSize: 18 }} />}
           </button>
         </div>
       </div>

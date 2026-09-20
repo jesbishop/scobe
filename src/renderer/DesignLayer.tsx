@@ -1,16 +1,32 @@
-import { useEffect, useRef, type CSSProperties, type PointerEvent as ReactPointerEvent, type ReactNode } from 'react'
-import type { DesignNode, DesignTool, PathPoint } from '../shared/types'
+import { useEffect, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent, type ReactNode } from 'react'
+import type { AutoLayoutAlign, AutoLayoutJustify, DesignNode, DesignTool, PathPoint } from '../shared/types'
 import { getCommentPerson } from '../shared/comments'
 import { cssBlendMode, cssIsolation } from '../shared/blendModes'
 import { blurRadius, getNodeEffects, type DesignEffect } from '../shared/effects'
-import { resolveWorldRect } from '../shared/layoutEngine'
+import { layersAtPoint, resolveWorldRect } from '../shared/layoutEngine'
 import { getNodePaints, gradientCss } from '../shared/paint'
+import {
+  borderRadiusCss,
+  clampCornerRadii,
+  resolveCornerRadii
+} from '../shared/corners'
 import { BuildRevealShell, BuildWorkingDots } from './BuildWorkingDots'
 import { handleOrigin, nodeBounds, scaleFactorFromDrag } from './canvasMath'
 import { toHex, withAlpha } from './DesignInspector'
 import { brushFills, pathDFromPoints } from './drawBrushes'
 import { ShaderFill } from './ShaderFill'
-import { ensureGoogleFontLoaded } from './googleFonts'
+import { AdjustedImage, type ImageFit } from './AdjustedImage'
+import {
+  alignmentForOffset,
+  measureAlignTarget,
+  measurePaddingBands,
+  measureSelectionGaps,
+  type AlignTarget,
+  type GapBand,
+  type PadBand,
+  type PadSide
+} from './selectionSpace'
+import { ensureGoogleFontLoaded, cssFontFamily } from './googleFonts'
 import {
   isTextOnPath,
   measurePlainText,
@@ -28,6 +44,34 @@ function canDragNode(tool: DesignTool) {
   return tool === 'pointer' || tool === 'frame' || tool === 'section' || tool === 'browser'
 }
 
+function nodeBorderRadiusCss(node: DesignNode, width: number, height: number, fallback = 0): string {
+  return borderRadiusCss(clampCornerRadii(resolveCornerRadii(node, fallback), width, height))
+}
+
+function imageFit(mode?: string): ImageFit {
+  if (mode === 'fit') return 'contain'
+  if (mode === 'tile') return 'tile'
+  if (mode === 'crop') return 'cover'
+  return 'cover'
+}
+
+function NodeImage({ node, fit, className }: { node: DesignNode; fit: ImageFit; className: string }) {
+  const paint = getNodePaints(node).find((item) => item.type === 'image' && item.visible !== false)
+  const src = paint?.type === 'image' ? paint.imageDataUrl || node.imageDataUrl : node.imageDataUrl
+  if (!src) return null
+  return (
+    <AdjustedImage
+      src={src}
+      adjust={paint?.type === 'image' ? paint : undefined}
+      fit={
+        paint?.type === 'image' && paint.scaleMode && paint.scaleMode !== 'fill' ? imageFit(paint.scaleMode) : fit
+      }
+      opacity={paint?.type === 'image' ? paint.opacity : 1}
+      className={className}
+    />
+  )
+}
+
 function resolveLetterSpacingPx(node: DesignNode, fontSize: number): number {
   const value = node.letterSpacing || 0
   if (!value) return 0
@@ -43,6 +87,56 @@ function formatTextCase(text: string, textCase?: DesignNode['textCase']): string
     return text.replace(/\w\S*/g, (word) => word.charAt(0).toUpperCase() + word.slice(1).toLowerCase())
   }
   return text
+}
+
+type SelectHandler = (
+  id: string,
+  additive: boolean,
+  opts?: { deep?: boolean; drill?: boolean; clientX?: number; clientY?: number }
+) => void
+
+function selectFromPointer(
+  onSelect: SelectHandler,
+  id: string,
+  event: { shiftKey: boolean; ctrlKey: boolean; metaKey: boolean; clientX: number; clientY: number }
+) {
+  onSelect(id, event.shiftKey, {
+    deep: event.metaKey || event.ctrlKey,
+    clientX: event.clientX,
+    clientY: event.clientY
+  })
+}
+
+function drillFromPointer(
+  onSelect: SelectHandler,
+  id: string,
+  event: { clientX: number; clientY: number }
+) {
+  onSelect(id, false, {
+    drill: true,
+    clientX: event.clientX,
+    clientY: event.clientY
+  })
+}
+
+function stackingZIndex(
+  node: DesignNode,
+  selectedIds: Set<string>,
+  byId: Map<string, DesignNode>
+): number | undefined {
+  if (selectedIds.has(node.id)) return 40
+  let depth = 0
+  let parentId = node.parentId
+  const seen = new Set<string>()
+  while (parentId) {
+    if (seen.has(parentId)) break
+    seen.add(parentId)
+    depth += 1
+    // Keep children above a selected ancestor frame so they don't disappear under it.
+    if (selectedIds.has(parentId)) return 40 + depth
+    parentId = byId.get(parentId)?.parentId
+  }
+  return undefined
 }
 
 function ResizeHandles({
@@ -72,6 +166,8 @@ export function DesignLayer({
   revealId = null,
   revealIds = [],
   buildingIds = [],
+  deepHoverId = null,
+  dropParentId = null,
   onSelect,
   onMoveStart,
   onMove,
@@ -80,7 +176,13 @@ export function DesignLayer({
   onScaleStart,
   onScale,
   onEdit,
-  onRemove
+  onRemove,
+  onSpace,
+  onSpaceEnd,
+  onPad,
+  onPadEnd,
+  onLayoutAlign,
+  flexDrop = null
 }: {
   nodes: DesignNode[]
   selectedIds: string[]
@@ -91,24 +193,65 @@ export function DesignLayer({
   revealId?: string | null
   revealIds?: string[]
   buildingIds?: string[]
-  onSelect: (id: string, additive: boolean) => void
-  onMoveStart: (id: string) => void
-  onMove: (id: string, worldX: number, worldY: number) => void
+  deepHoverId?: string | null
+  dropParentId?: string | null
+  onSelect: (
+    id: string,
+    additive: boolean,
+    opts?: { deep?: boolean; drill?: boolean; clientX?: number; clientY?: number }
+  ) => void
+  onMoveStart: (id: string) => string | void
+  onMove: (id: string, worldX: number, worldY: number, snap?: boolean) => void
   onMoveEnd?: (id: string) => void
   onResize: (id: string, next: { x: number; y: number; width: number; height: number; world?: boolean }) => void
   onScaleStart: () => void
   onScale: (origin: { x: number; y: number }, factor: number) => void
   onEdit: (id: string, patch: Partial<DesignNode>) => void
   onRemove?: (id: string) => void
+  onSpace?: (axis: 'x' | 'y', gap: number) => void
+  onSpaceEnd?: () => void
+  onPad?: (side: PadSide, value: number) => void
+  onPadEnd?: () => void
+  onLayoutAlign?: (justify: AutoLayoutJustify, align: AutoLayoutAlign) => void
+  flexDrop?: {
+    axis: 'x' | 'y'
+    line: { x: number; y: number; width: number; height: number }
+    slot: { x: number; y: number; width: number; height: number }
+  } | null
 }) {
   const selected = new Set(selectedIds)
+  const byId = new Map(nodes.map((node) => [node.id, node]))
   const revealing = new Set([...(revealIds || []), ...(revealId ? [revealId] : [])])
   const building = new Set(buildingIds || [])
   const paths = [...nodes, draft].filter((node): node is DesignNode => Boolean(node && node.type === 'path'))
   const group = selectedIds.length > 1 ? unionWorldBounds(nodes.filter((node) => selected.has(node.id)), nodes) : null
+  const spacing = tool === 'pointer' && selectedIds.length >= 1 ? measureSelectionGaps(nodes, selectedIds) : null
+  const gaps = spacing?.bands || []
+  const pads = tool === 'pointer' && onPad ? measurePaddingBands(nodes, selectedIds) : []
+  const alignTarget = tool === 'pointer' && onLayoutAlign ? measureAlignTarget(nodes, selectedIds) : null
+  const deepHover =
+    deepHoverId && !selected.has(deepHoverId)
+      ? nodes.find((node) => node.id === deepHoverId)
+      : deepHoverId
+        ? nodes.find((node) => node.id === deepHoverId)
+        : null
+  const deepHoverBox = deepHover ? resolveWorldRect(deepHover, nodes) : null
+  const dropParent = dropParentId ? nodes.find((node) => node.id === dropParentId) : null
+  const dropParentBox = dropParent ? resolveWorldRect(dropParent, nodes) : null
 
   return (
     <div className="design-layer">
+      {dropParentBox && (
+        <div
+          className="design-drop-target"
+          style={{
+            left: dropParentBox.x,
+            top: dropParentBox.y,
+            width: dropParentBox.width,
+            height: dropParentBox.height
+          }}
+        />
+      )}
       <svg className="design-svg" width="1" height="1">
         {paths.map((node) => (
           <DrawnPath
@@ -147,6 +290,7 @@ export function DesignLayer({
             node={node}
             allNodes={nodes}
             selected={selected.has(node.id)}
+            stackZ={stackingZIndex(node, selected, byId)}
             hideSoloChrome={selectedIds.length > 1 && selected.has(node.id)}
             pathHover={pathHoverId === node.id}
             tool={tool}
@@ -165,6 +309,17 @@ export function DesignLayer({
           />
         )
       })}
+      {deepHoverBox && (
+        <div
+          className="design-deep-hover"
+          style={{
+            left: deepHoverBox.x,
+            top: deepHoverBox.y,
+            width: deepHoverBox.width,
+            height: deepHoverBox.height
+          }}
+        />
+      )}
       {group && (
         <div
           className={`design-group${tool === 'scale' ? ' is-scale' : ''}`}
@@ -224,7 +379,189 @@ export function DesignLayer({
           </div>
         </div>
       )}
+      {onSpace &&
+        gaps.map((band, index) => (
+          <SpacingHandle key={`${band.axis}-${index}`} band={band} onSpace={onSpace} onSpaceEnd={onSpaceEnd} />
+        ))}
+      {pads.map((band) => (
+        <PaddingHandle key={`pad-${band.side}`} band={band} onPad={onPad!} onPadEnd={onPadEnd} />
+      ))}
+      {alignTarget && onLayoutAlign && (
+        <AlignHandle target={alignTarget} nodes={nodes} onAlign={onLayoutAlign} onSelect={onSelect} />
+      )}
+      {flexDrop && (
+        <>
+          <div
+            className="flex-drop-slot"
+            style={{
+              left: flexDrop.slot.x,
+              top: flexDrop.slot.y,
+              width: flexDrop.slot.width,
+              height: flexDrop.slot.height
+            }}
+          />
+          <div
+            className={`flex-drop-line is-${flexDrop.axis}`}
+            style={{
+              left: flexDrop.line.x,
+              top: flexDrop.line.y,
+              width: flexDrop.line.width,
+              height: flexDrop.line.height
+            }}
+          />
+        </>
+      )}
     </div>
+  )
+}
+
+function SpacingHandle({
+  band,
+  onSpace,
+  onSpaceEnd
+}: {
+  band: GapBand
+  onSpace: (axis: 'x' | 'y', gap: number) => void
+  onSpaceEnd?: () => void
+}) {
+  const [active, setActive] = useState(false)
+  return (
+    <div
+      className={`space-gap is-${band.axis}${active ? ' is-active' : ''}`}
+      style={{ left: band.x, top: band.y, width: Math.max(band.width, 1), height: Math.max(band.height, 1) }}
+      onPointerDown={(event) => {
+        event.preventDefault()
+        event.stopPropagation()
+        setActive(true)
+        const start = band.gap
+        const origin = band.axis === 'x' ? event.clientX : event.clientY
+        const zoom = Number(event.currentTarget.closest('.world')?.getAttribute('data-zoom') || '1')
+        const move = (next: PointerEvent) => {
+          const delta = ((band.axis === 'x' ? next.clientX : next.clientY) - origin) / zoom
+          onSpace(band.axis, Math.max(0, start + delta))
+        }
+        const up = () => {
+          window.removeEventListener('pointermove', move)
+          window.removeEventListener('pointerup', up)
+          setActive(false)
+          onSpaceEnd?.()
+        }
+        window.addEventListener('pointermove', move)
+        window.addEventListener('pointerup', up)
+      }}
+    >
+      <span className="space-gap-label">{Math.round(band.gap)}</span>
+    </div>
+  )
+}
+
+function PaddingHandle({
+  band,
+  onPad,
+  onPadEnd
+}: {
+  band: PadBand
+  onPad: (side: PadSide, value: number) => void
+  onPadEnd?: () => void
+}) {
+  const [active, setActive] = useState(false)
+  const empty = band.value < 0.5
+  const across = band.side === 'l' || band.side === 'r'
+  return (
+    <div
+      className={`pad-gap is-${band.side}${empty ? ' is-empty' : ''}${active ? ' is-active' : ''}`}
+      style={{
+        left: band.x,
+        top: band.y,
+        width: Math.max(across ? band.width : band.width, 1),
+        height: Math.max(across ? band.height : band.height, 1)
+      }}
+    >
+      <div
+        className="pad-hit"
+        onPointerDown={(event) => {
+          event.preventDefault()
+          event.stopPropagation()
+          setActive(true)
+          const start = band.value
+          const origin = across ? event.clientX : event.clientY
+          const zoom = Number(event.currentTarget.closest('.world')?.getAttribute('data-zoom') || '1')
+          const move = (next: PointerEvent) => {
+            const delta = ((across ? next.clientX : next.clientY) - origin) / zoom
+            const signed = band.side === 'r' || band.side === 'b' ? -delta : delta
+            onPad(band.side, Math.max(0, start + signed))
+          }
+          const up = () => {
+            window.removeEventListener('pointermove', move)
+            window.removeEventListener('pointerup', up)
+            setActive(false)
+            onPadEnd?.()
+          }
+          window.addEventListener('pointermove', move)
+          window.addEventListener('pointerup', up)
+        }}
+      />
+      <span className="space-gap-label">{Math.round(band.value)}</span>
+    </div>
+  )
+}
+
+function AlignHandle({
+  target,
+  nodes,
+  onAlign,
+  onSelect
+}: {
+  target: AlignTarget
+  nodes: DesignNode[]
+  onAlign: (justify: AutoLayoutJustify, align: AutoLayoutAlign) => void
+  onSelect: SelectHandler
+}) {
+  return (
+    <div
+      className="align-drag"
+      style={{ left: target.x, top: target.y, width: target.width, height: target.height }}
+      onPointerDown={(event) => {
+        if (event.button !== 0) return
+        const zoom = Number(event.currentTarget.closest('.world')?.getAttribute('data-zoom') || '1')
+        const localX = target.x + (event.clientX - event.currentTarget.getBoundingClientRect().left) / zoom
+        const localY = target.y + (event.clientY - event.currentTarget.getBoundingClientRect().top) / zoom
+        const hit = [...layersAtPoint({ x: localX, y: localY }, nodes)]
+          .reverse()
+          .find((node) => node.id !== target.frameId && node.parentId === target.frameId)
+        // Let flex children receive the drag so they can be reordered.
+        if (hit) return
+        event.preventDefault()
+        event.stopPropagation()
+        const originX = event.clientX
+        const originY = event.clientY
+        const frame = nodes.find((node) => node.id === target.frameId)
+        const current = {
+          justify: frame?.layout?.justifyContent || 'start',
+          align: frame?.layout?.alignItems || 'start'
+        }
+        let moved = false
+        const move = (next: PointerEvent) => {
+          const dx = (next.clientX - originX) / zoom
+          const dy = (next.clientY - originY) / zoom
+          if (!moved && Math.hypot(dx, dy) < 3) return
+          moved = true
+          const nextAlign = alignmentForOffset(target, target.offsetX + dx, target.offsetY + dy, current)
+          onAlign(nextAlign.justifyContent, nextAlign.alignItems)
+        }
+        const up = (next: PointerEvent) => {
+          window.removeEventListener('pointermove', move)
+          window.removeEventListener('pointerup', up)
+          if (moved) return
+          const emptyHit = [...layersAtPoint({ x: localX, y: localY }, nodes)]
+            .reverse()
+            .find((node) => node.id !== target.frameId)
+          if (emptyHit) selectFromPointer(onSelect, emptyHit.id, next)
+        }
+        window.addEventListener('pointermove', move)
+        window.addEventListener('pointerup', up)
+      }}
+    />
   )
 }
 
@@ -241,7 +578,7 @@ function DrawnPath({
   pathHover?: boolean
   hoverPoint?: PathPoint | null
   tool: DesignTool
-  onSelect: (id: string, additive: boolean) => void
+  onSelect: SelectHandler
 }) {
   const points = node.points || []
   const color = toHex(node.stroke || node.fill, '#1A1A1A')
@@ -261,7 +598,7 @@ function DrawnPath({
         if (tool === 'text' || tool === 'text-on-path') return
         if (tool !== 'pointer') return
         event.stopPropagation()
-        onSelect(node.id, event.shiftKey)
+        selectFromPointer(onSelect, node.id, event)
       }}
     >
       {fills.map((d, index) => (
@@ -328,9 +665,9 @@ function TextOnPathItem({
   selected: boolean
   hideSoloChrome: boolean
   tool: DesignTool
-  onSelect: (id: string, additive: boolean) => void
+  onSelect: SelectHandler
   onMoveStart: (id: string) => void
-  onMove: (id: string, x: number, y: number) => void
+  onMove: (id: string, x: number, y: number, snap?: boolean) => void
   onEdit: (id: string, patch: Partial<DesignNode>) => void
   onRemove?: (id: string) => void
 }) {
@@ -348,6 +685,7 @@ function TextOnPathItem({
   const showChrome = (selected || node.editing) && !hideSoloChrome
   const inputRef = useRef<HTMLInputElement>(null)
   const drag = useRef({ x: 0, y: 0, nodeX: node.x, nodeY: node.y })
+  const familyCss = cssFontFamily(node.fontFamily || 'Inter')
 
   useEffect(() => {
     if (!node.editing) return
@@ -375,14 +713,19 @@ function TextOnPathItem({
       onPointerDown={(event) => {
         if (tool === 'hand') return
         event.stopPropagation()
-        onSelect(node.id, event.shiftKey)
+        selectFromPointer(onSelect, node.id, event)
         if (tool !== 'pointer' || node.editing) return
         onMoveStart(node.id)
         drag.current = { x: event.clientX, y: event.clientY, nodeX: node.x, nodeY: node.y }
         const target = event.currentTarget
         const move = (next: PointerEvent) => {
           const scale = Number(target.closest('.world')?.getAttribute('data-zoom') || '1')
-          onMove(node.id, drag.current.nodeX + (next.clientX - drag.current.x) / scale, drag.current.nodeY + (next.clientY - drag.current.y) / scale)
+          onMove(
+            node.id,
+            drag.current.nodeX + (next.clientX - drag.current.x) / scale,
+            drag.current.nodeY + (next.clientY - drag.current.y) / scale,
+            !next.altKey && !next.ctrlKey && !next.metaKey
+          )
         }
         const up = () => {
           window.removeEventListener('pointermove', move)
@@ -393,7 +736,11 @@ function TextOnPathItem({
       }}
       onDoubleClick={(event) => {
         event.stopPropagation()
-        onEdit(node.id, { editing: true })
+        if (selected) {
+          onEdit(node.id, { editing: true })
+          return
+        }
+        drillFromPointer(onSelect, node.id, event)
       }}
     >
       <defs>
@@ -411,7 +758,7 @@ function TextOnPathItem({
       <text
         className="text-on-path-label"
         fill={color}
-        fontFamily={node.fontFamily || 'Inter, system-ui, sans-serif'}
+        fontFamily={familyCss}
         fontSize={fontSize}
         fontWeight={node.fontWeight || 400}
         fontStyle={node.fontStyle || 'normal'}
@@ -430,7 +777,7 @@ function TextOnPathItem({
             value={node.text || ''}
             placeholder=""
             style={{
-              fontFamily: node.fontFamily || 'Inter, system-ui, sans-serif',
+              fontFamily: familyCss,
               fontSize,
               fontWeight: node.fontWeight || 400,
               fontStyle: node.fontStyle || 'normal',
@@ -501,6 +848,7 @@ function DesignItem({
   node,
   allNodes,
   selected,
+  stackZ,
   hideSoloChrome,
   pathHover,
   tool,
@@ -520,15 +868,16 @@ function DesignItem({
   node: DesignNode
   allNodes: DesignNode[]
   selected: boolean
+  stackZ?: number
   hideSoloChrome: boolean
   pathHover?: boolean
   tool: DesignTool
   drafting: boolean
   reveal?: boolean
   building?: boolean
-  onSelect: (id: string, additive: boolean) => void
-  onMoveStart: (id: string) => void
-  onMove: (id: string, worldX: number, worldY: number) => void
+  onSelect: SelectHandler
+  onMoveStart: (id: string) => string | void
+  onMove: (id: string, worldX: number, worldY: number, snap?: boolean) => void
   onMoveEnd?: (id: string) => void
   onResize: (id: string, next: { x: number; y: number; width: number; height: number; world?: boolean }) => void
   onScaleStart: () => void
@@ -536,11 +885,34 @@ function DesignItem({
   onEdit: (id: string, patch: Partial<DesignNode>) => void
   onRemove?: (id: string) => void
 }) {
-  const drag = useRef({ x: 0, y: 0, nodeX: 0, nodeY: 0, width: 0, height: 0, handle: null as Handle | null })
+  const drag = useRef({
+    x: 0,
+    y: 0,
+    nodeX: 0,
+    nodeY: 0,
+    width: 0,
+    height: 0,
+    handle: null as Handle | null,
+    moveId: '' as string
+  })
   const editRef = useRef<HTMLDivElement>(null)
+  const [fontTick, setFontTick] = useState(0)
   const showChrome = (selected || drafting || node.editing) && !hideSoloChrome
   const world = resolveWorldRect(node, allNodes)
   const box = world
+
+  useEffect(() => {
+    if (node.type !== 'text') return
+    let cancelled = false
+    void ensureGoogleFontLoaded(node.fontFamily || 'Inter', node.fontWeight || 400, node.fontStyle === 'italic').then(
+      () => {
+        if (!cancelled) setFontTick((value) => value + 1)
+      }
+    )
+    return () => {
+      cancelled = true
+    }
+  }, [node.type, node.fontFamily, node.fontWeight, node.fontStyle])
 
   useEffect(() => {
     if (!node.editing || node.type !== 'text' || !editRef.current) return
@@ -561,8 +933,18 @@ function DesignItem({
 
   const onPointerDown = (event: ReactPointerEvent<HTMLDivElement>) => {
     if (tool === 'hand') return
-    if (tool === 'text' || tool === 'text-on-path') {
-      if (node.type === 'text' && !isTextOnPath(node)) {
+    const creating =
+      tool === 'shape' ||
+      tool === 'frame' ||
+      tool === 'section' ||
+      tool === 'pen' ||
+      tool === 'pencil' ||
+      tool === 'brush' ||
+      tool === 'widget' ||
+      tool === 'text' ||
+      tool === 'text-on-path'
+    if (creating) {
+      if ((tool === 'text' || tool === 'text-on-path') && node.type === 'text' && !isTextOnPath(node)) {
         event.stopPropagation()
         onSelect(node.id, false)
         onEdit(node.id, { editing: true })
@@ -570,18 +952,21 @@ function DesignItem({
       return
     }
     event.stopPropagation()
-    onSelect(node.id, event.shiftKey)
+    selectFromPointer(onSelect, node.id, event)
     if (tool === 'scale') return
     if (!canDragNode(tool) || node.editing) return
-    onMoveStart(node.id)
+    const moveId = onMoveStart(node.id) || node.id
+    const moveNode = allNodes.find((item) => item.id === moveId) || node
+    const moveWorld = resolveWorldRect(moveNode, allNodes)
     drag.current = {
       x: event.clientX,
       y: event.clientY,
-      nodeX: world.x,
-      nodeY: world.y,
-      width: world.width,
-      height: world.height,
-      handle: null
+      nodeX: moveWorld.x,
+      nodeY: moveWorld.y,
+      width: moveWorld.width,
+      height: moveWorld.height,
+      handle: null,
+      moveId
     }
     event.currentTarget.setPointerCapture(event.pointerId)
   }
@@ -612,7 +997,7 @@ function DesignItem({
         onScale(origin, scaleFactorFromDrag(origin, startCorner, dx, dy))
         return
       }
-      onResize(node.id, {
+      onResize(start.moveId || node.id, {
         ...resizeRect(start.nodeX, start.nodeY, start.width, start.height, start.handle, dx, dy, {
           lockAspect: Boolean(node.aspectLocked) || event.shiftKey,
           ratio: start.width / Math.max(1, start.height)
@@ -621,13 +1006,18 @@ function DesignItem({
       })
       return
     }
-    onMove(node.id, start.nodeX + dx, start.nodeY + dy)
+    onMove(
+      start.moveId || node.id,
+      start.nodeX + dx,
+      start.nodeY + dy,
+      !event.altKey && !event.ctrlKey && !event.metaKey
+    )
   }
 
   const onPointerUp = (event: ReactPointerEvent<HTMLDivElement>) => {
     if (!event.currentTarget.hasPointerCapture(event.pointerId)) return
     event.currentTarget.releasePointerCapture(event.pointerId)
-    if (!drag.current.handle) onMoveEnd?.(node.id)
+    if (!drag.current.handle) onMoveEnd?.(drag.current.moveId || node.id)
   }
 
   const startHandle = (handle: Handle) => (event: ReactPointerEvent<HTMLSpanElement>) => {
@@ -643,7 +1033,8 @@ function DesignItem({
       nodeY: world.y,
       width: world.width,
       height: world.height,
-      handle
+      handle,
+      moveId: node.id
     }
     drag.current = start
     const target = event.currentTarget
@@ -730,7 +1121,7 @@ function DesignItem({
 
   if (node.type === 'text') {
     const fontSize = node.fontSize || 12
-    const fontFamily = node.fontFamily || 'Inter, system-ui, sans-serif'
+    const fontFamily = cssFontFamily(node.fontFamily || 'Inter')
     const fontWeight = node.fontWeight || 400
     const fontStyle = node.fontStyle || 'normal'
     ensureGoogleFontLoaded(node.fontFamily || 'Inter', fontWeight, fontStyle === 'italic')
@@ -788,12 +1179,14 @@ function DesignItem({
       <BuildRevealShell
         active={Boolean(reveal)}
         className={`design-text${selected || node.editing ? ' is-selected' : ''}${node.editing ? ' is-editing' : ''}${reveal ? ' is-reveal' : ''}`}
+        data-font-tick={fontTick}
         style={{
           ...styleFromNode(node, { ...box, width, height }),
           left: box.x,
           top: box.y,
           width,
           height,
+          ...(stackZ != null ? { zIndex: stackZ } : {}),
           fontFamily,
           fontWeight,
           fontStyle,
@@ -829,7 +1222,14 @@ function DesignItem({
         onPointerDown={onPointerDown}
         onPointerMove={onPointerMove}
         onPointerUp={onPointerUp}
-        onDoubleClick={editText}
+        onDoubleClick={(event: ReactPointerEvent<HTMLDivElement>) => {
+          event.stopPropagation()
+          if (selected) {
+            editText()
+            return
+          }
+          drillFromPointer(onSelect, node.id, event)
+        }}
       >
         <EffectOverlays node={node} radius={0} />
         {node.editing ? (
@@ -928,7 +1328,8 @@ function DesignItem({
           left: box.x,
           top: box.y,
           width: Math.max(48, node.width || 200),
-          height: Math.max(32, node.height || 120)
+          height: Math.max(32, node.height || 120),
+          ...(stackZ != null ? { zIndex: stackZ } : {})
         }}
         onPointerDown={onPointerDown}
         onPointerMove={onPointerMove}
@@ -949,14 +1350,15 @@ function DesignItem({
           left: box.x,
           top: box.y,
           width: Math.max(1, box.width),
-          height: Math.max(1, box.height)
+          height: Math.max(1, box.height),
+          ...(stackZ != null ? { zIndex: stackZ } : {})
         }}
         onPointerDown={onPointerDown}
         onPointerMove={onPointerMove}
         onPointerUp={onPointerUp}
       >
-        <EffectOverlays node={node} radius={node.radius ?? 0} />
-        {node.imageDataUrl ? <img className="design-image-media" src={node.imageDataUrl} alt="" draggable={false} /> : null}
+        <EffectOverlays node={node} radius={nodeBorderRadiusCss(node, box.width, box.height)} />
+        <NodeImage node={node} fit="stretch" className="design-image-media" />
         {showChrome && (
           <>
             <ResizeHandles onStart={startHandle} />
@@ -980,6 +1382,7 @@ function DesignItem({
   return (
     <BuildRevealShell
       active={Boolean(reveal)}
+      data-node-id={node.id}
       className={`design-shape design-${node.type}${showChrome || selected ? ' is-selected' : ''}${pathHover ? ' is-path-hover' : ''}${reveal ? ' is-reveal' : ''}${showWorkingChrome ? ' is-build-host' : ''}`}
       style={{
         ...styleFromNode(node, { ...box, width, height }),
@@ -987,15 +1390,19 @@ function DesignItem({
         top: box.y,
         width,
         height: Math.max(1, height),
+        ...(stackZ != null ? { zIndex: stackZ } : {}),
         ...((showWorkingChrome || showChrome) ? { overflow: 'visible' as const } : {})
       }}
       onPointerDown={onPointerDown}
       onPointerMove={onPointerMove}
       onPointerUp={onPointerUp}
-      onDoubleClick={() => {
-        if (!isSection && !isFrame) return
-        const next = window.prompt(isSection ? 'Section name' : 'Frame name', name)
-        if (next?.trim()) onEdit(node.id, { name: next.trim() })
+      onDoubleClick={(event: ReactPointerEvent<HTMLDivElement>) => {
+        event.stopPropagation()
+        if (selected && node.type === 'text') {
+          editText()
+          return
+        }
+        drillFromPointer(onSelect, node.id, event)
       }}
     >
       {showWorkingChrome ? (
@@ -1004,7 +1411,10 @@ function DesignItem({
         </div>
       ) : null}
       <PaintLayers node={node} />
-      <EffectOverlays node={node} radius={node.radius ?? 0} />
+      <EffectOverlays
+        node={node}
+        radius={nodeBorderRadiusCss(node, width, Math.max(1, height), isSection ? 2 : 0)}
+      />
       <ShapeGraphic node={node} origin={box} width={width} height={Math.max(1, height)} />
       {isSection && (
         <div
@@ -1017,7 +1427,20 @@ function DesignItem({
           {name}
         </div>
       )}
-      {isFrame && !selected && !drafting && <div className="design-name">{name}</div>}
+      {isFrame &&
+        !drafting &&
+        !(selected && !hideSoloChrome) &&
+        (!node.parentId || allNodes.find((item) => item.id === node.parentId)?.type === 'section') && (
+        <div
+          className={`design-name${selected ? ' is-selected' : ''}`}
+          onPointerDown={(event) => {
+            event.stopPropagation()
+            selectFromPointer(onSelect, node.id, event)
+          }}
+        >
+          {name}
+        </div>
+      )}
       {showChrome && (
         <>
           {node.type !== 'line' && node.type !== 'arrow' && <ResizeHandles onStart={startHandle} />}
@@ -1127,20 +1550,28 @@ function starPoints(width: number, height: number, spikes = 5): string {
 
 function formatSizeLabel(node: DesignNode, width: number, height: number): string {
   const layout = node.layout
+  const axisLabel = (
+    layoutSizing: string | undefined,
+    frameSizing: string | undefined,
+    value: number,
+    percent?: number
+  ) => {
+    if (layoutSizing === 'fill') return `Fill ${Math.round(value)}`
+    if (layoutSizing === 'relative') return `${Math.round(percent ?? 100)}%`
+    if (frameSizing === 'hug') return `Fit ${Math.round(value)}`
+    if (frameSizing === 'fill') return `Fill ${Math.round(value)}`
+    return String(Math.round(value))
+  }
   if (layout && layout.mode !== 'none') {
-    const w =
-      (layout.sizingH || 'fixed') === 'hug'
-        ? `${Math.round(width)} Hug`
-        : (layout.sizingH || 'fixed') === 'fill'
-          ? `${Math.round(width)} Fill`
-          : String(Math.round(width))
-    const h =
-      (layout.sizingV || 'fixed') === 'hug'
-        ? `${Math.round(height)} Hug`
-        : (layout.sizingV || 'fixed') === 'fill'
-          ? `${Math.round(height)} Fill`
-          : String(Math.round(height))
-    return `${w} × ${h}`
+    return `${axisLabel(node.layoutSizingH, layout.sizingH, width, node.layoutPercentH)} × ${axisLabel(node.layoutSizingV, layout.sizingV, height, node.layoutPercentV)}`
+  }
+  if (
+    node.layoutSizingH === 'fill' ||
+    node.layoutSizingV === 'fill' ||
+    node.layoutSizingH === 'relative' ||
+    node.layoutSizingV === 'relative'
+  ) {
+    return `${axisLabel(node.layoutSizingH, undefined, width, node.layoutPercentH)} × ${axisLabel(node.layoutSizingV, undefined, height, node.layoutPercentV)}`
   }
   return `${Math.round(width)} × ${Math.round(height)}`
 }
@@ -1164,9 +1595,10 @@ function styleFromNode(node: DesignNode, box: { width: number; height: number })
             ? '#D9D9D9'
             : '#D9D9D9'
   )
-  const radius = boxed
-    ? Math.min(node.radius ?? (isSection ? 2 : 0), Math.min(box.width, box.height) / 2)
-    : 0
+  const radii = boxed
+    ? clampCornerRadii(resolveCornerRadii(node, isSection ? 2 : 0), box.width, box.height)
+    : { tl: 0, tr: 0, br: 0, bl: 0 }
+  const radiusCss = borderRadiusCss(radii)
   const stroke = toHex(node.stroke, isSection ? '#000000' : '#1A1A1A')
   const strokeAlpha = node.strokeOpacity ?? (isSection ? 0.1 : 1)
   const strokeWidth = node.strokeWidth || 0
@@ -1174,8 +1606,6 @@ function styleFromNode(node: DesignNode, box: { width: number; height: number })
     node.strokeAlign ||
     (node.type === 'line' || node.type === 'arrow' || node.type === 'path' || isSection ? 'center' : 'inside')
   const strokeColor = withAlpha(stroke, strokeAlpha)
-  const clip = isFrame ? node.clipsContent !== false : false
-
   const shadowParts: string[] = []
   if (boxed && strokeWidth > 0 && !isSection) {
     if (strokeAlign === 'inside') shadowParts.push(`inset 0 0 0 ${strokeWidth}px ${strokeColor}`)
@@ -1213,12 +1643,11 @@ function styleFromNode(node: DesignNode, box: { width: number; height: number })
   } else if (topPaint && boxed) {
     if (topPaint.type === 'solid') background = withAlpha(topPaint.color, topPaint.opacity)
     else if (topPaint.type === 'gradient') background = gradientCss(topPaint)
-    else if (topPaint.type === 'image' && topPaint.imageDataUrl) {
-      background = `center / cover no-repeat url("${topPaint.imageDataUrl}")`
-    } else if (topPaint.type === 'shader' || topPaint.type === 'video') {
-      background = 'transparent'
-    } else if (topPaint.type === 'image') {
-      background = 'repeating-conic-gradient(#eee 0% 25%, #fff 0% 50%) 50% / 12px 12px'
+    else if (topPaint.type === 'shader' || topPaint.type === 'video' || topPaint.type === 'image') {
+      background =
+        topPaint.type === 'image' && !topPaint.imageDataUrl
+          ? 'repeating-conic-gradient(#eee 0% 25%, #fff 0% 50%) 50% / 12px 12px'
+          : 'transparent'
     }
   } else if (hasExplicitFill && boxed && node.type !== 'image') {
     background = withAlpha(fill, node.fillOpacity ?? 1)
@@ -1227,6 +1656,9 @@ function styleFromNode(node: DesignNode, box: { width: number; height: number })
     background = withAlpha(fill, node.fillOpacity ?? 1)
   } else if (isSection) {
     background = withAlpha('#FFFFFF', node.fillOpacity ?? 1)
+  } else if (isFrame) {
+    // Keep a fully transparent fill so empty / no-fill frames still receive clicks
+    background = 'rgba(0,0,0,0)'
   } else if (topPaint && !boxed) {
     // Non-boxed vectors (ellipse etc.) still paint via SVG; keep CSS bg clear
     background = 'transparent'
@@ -1258,7 +1690,7 @@ function styleFromNode(node: DesignNode, box: { width: number; height: number })
         : useBorderStroke
           ? `${strokeWidth}px solid ${strokeColor}`
           : 'none',
-    borderRadius: radius,
+    borderRadius: radiusCss,
     opacity: node.opacity ?? 1,
     boxShadow: boxed ? shadow : undefined,
     filter: filters.length ? filters.join(' ') : undefined,
@@ -1275,11 +1707,14 @@ function styleFromNode(node: DesignNode, box: { width: number; height: number })
     mixBlendMode: cssBlendMode(node.blendMode),
     isolation: cssIsolation(node.blendMode),
     zIndex: isSection ? 0 : 1,
-    overflow: isSection ? 'visible' : clip ? 'hidden' : undefined
+    // Frames keep overflow visible so the name label (above the box) stays
+    // hittable — same as auto-layout wraps (`clipsContent: false`). Child
+    // nodes are siblings in world space, so CSS overflow never clipped them.
+    overflow: isFrame || isSection ? 'visible' : undefined
   }
 }
 
-function EffectOverlays({ node, radius }: { node: DesignNode; radius: number }) {
+function EffectOverlays({ node, radius }: { node: DesignNode; radius: string | number }) {
   const effects = getNodeEffects(node).filter((fx) => fx.visible !== false && (fx.type === 'NOISE' || fx.type === 'TEXTURE'))
   if (!effects.length) return null
   return (
@@ -1295,7 +1730,7 @@ function EffectOverlays({ node, radius }: { node: DesignNode; radius: number }) 
   )
 }
 
-function NoiseOverlay({ effect, radius }: { effect: DesignEffect; radius: number }) {
+function NoiseOverlay({ effect, radius }: { effect: DesignEffect; radius: string | number }) {
   const sizeX = Math.max(0.05, effect.noiseSizeX ?? 0.5)
   const sizeY = Math.max(0.05, effect.noiseSizeY ?? sizeX)
   // Figma noiseSize ~ grain scale; map to SVG turbulence baseFrequency (higher = finer)
@@ -1346,7 +1781,7 @@ function NoiseOverlay({ effect, radius }: { effect: DesignEffect; radius: number
   )
 }
 
-function TextureOverlay({ effect, radius }: { effect: DesignEffect; radius: number }) {
+function TextureOverlay({ effect, radius }: { effect: DesignEffect; radius: string | number }) {
   // Lightweight placeholder until full texture rendering ships — soft grain grid.
   const size = Math.max(0.05, effect.noiseSizeX ?? 0.5)
   const cell = Math.max(2, Math.round(8 * size))
@@ -1369,10 +1804,21 @@ function TextureOverlay({ effect, radius }: { effect: DesignEffect; radius: numb
 
 function PaintLayers({ node }: { node: DesignNode }) {
   const paints = getNodePaints(node).filter((paint) => paint.visible !== false)
+  const top = paints[0]
   const media = paints.filter((paint) => paint.type === 'shader' || (paint.type === 'video' && paint.videoDataUrl))
-  if (!media.length) return null
+  const image = top?.type === 'image' && top.imageDataUrl ? top : null
+  if (!media.length && !image) return null
   return (
     <>
+      {image ? (
+        <AdjustedImage
+          src={image.imageDataUrl}
+          adjust={image}
+          fit={imageFit(image.scaleMode)}
+          opacity={image.opacity}
+          className="design-paint-media"
+        />
+      ) : null}
       {media.map((paint, index) => {
         if (paint.type === 'shader') {
           return <ShaderFill key={`shader-${index}`} paint={paint} />

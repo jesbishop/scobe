@@ -84,6 +84,16 @@ export function toWorld(local: { x: number; y: number }, parentWorld: Rect): { x
 
 type SizedChild = { child: DesignNode; w: number; h: number; growH: boolean; growV: boolean }
 
+function clampPercent(value: number): number {
+  if (!Number.isFinite(value)) return 100
+  return Math.min(100, Math.max(0, value))
+}
+
+function percentFromSize(size: number, parentInner: number): number {
+  if (parentInner <= 0) return 100
+  return clampPercent((size / parentInner) * 100)
+}
+
 function resolveGap(layout: AutoLayout): { gap: number; autoGap: boolean } {
   if (layout.gap === 'auto' || layout.justifyContent === 'space-between') {
     return { gap: 0, autoGap: true }
@@ -104,7 +114,10 @@ function placeLine(
   justify: NonNullable<AutoLayout['justifyContent']>,
   parentId: string
 ): DesignNode[] {
-  const fixedMain = line.reduce((sum, item) => sum + (vertical ? item.h : item.w), 0)
+  const fixedMain = line.reduce((sum, item) => {
+    const grows = vertical ? item.growV : item.growH
+    return grows ? sum : sum + (vertical ? item.h : item.w)
+  }, 0)
   const growCount = line.filter((item) => (vertical ? item.growV : item.growH)).length
   const gapsBetween = Math.max(0, line.length - 1)
   const freeBeforeGrow = Math.max(0, innerMain - fixedMain - (autoGap ? 0 : gap * gapsBetween))
@@ -114,10 +127,10 @@ function placeLine(
     let w = item.w
     let h = item.h
     if (vertical) {
-      if (item.growV) h = Math.max(1, item.h + growShare)
+      if (item.growV) h = Math.max(1, growShare)
       if (item.growH || align === 'stretch') w = Math.max(1, innerCross)
     } else {
-      if (item.growH) w = Math.max(1, item.w + growShare)
+      if (item.growH) w = Math.max(1, growShare)
       if (item.growV || align === 'stretch') h = Math.max(1, innerCross)
     }
     return { ...item, w, h }
@@ -198,8 +211,19 @@ export function applyAutoLayout(parent: DesignNode, children: DesignNode[]): Des
     const sizingV = child.layoutSizingV || 'fixed'
     let w = Math.max(1, box.width)
     let h = Math.max(1, box.height)
+    // Relative = % of the parent's content box (CSS percentage sizing).
+    if (sizingH === 'relative') {
+      const pct = clampPercent(child.layoutPercentH ?? percentFromSize(box.width, innerW))
+      w = Math.max(1, (innerW * pct) / 100)
+    }
+    if (sizingV === 'relative') {
+      const pct = clampPercent(child.layoutPercentV ?? percentFromSize(box.height, innerH))
+      h = Math.max(1, (innerH * pct) / 100)
+    }
+    // Fill / stretch on the cross axis takes the full cross size.
     if (vertical && (sizingH === 'fill' || align === 'stretch')) w = Math.max(1, innerCross)
     if (!vertical && (sizingV === 'fill' || align === 'stretch')) h = Math.max(1, innerCross)
+    // Hug/Fit children keep their intrinsic size (nested flex Fit already reflowed).
     return {
       child,
       w,
@@ -560,7 +584,7 @@ function cryptoRandomId(): string {
   return `node-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`
 }
 
-/** Collect every node under a world point (top-most last). */
+/** Collect every node under a world point (document order; top-most last). */
 export function layersAtPoint(
   worldPoint: { x: number; y: number },
   nodes: DesignNode[]
@@ -579,6 +603,123 @@ export function layersAtPoint(
     }
   }
   return hits
+}
+
+function ancestorDepth(node: DesignNode, byId: Map<string, DesignNode>): number {
+  let d = 0
+  let cur: DesignNode | undefined = node
+  const seen = new Set<string>()
+  while (cur?.parentId) {
+    if (seen.has(cur.parentId)) break
+    seen.add(cur.parentId)
+    d += 1
+    cur = byId.get(cur.parentId)
+  }
+  return d
+}
+
+/** Deepest (then smallest) node under a point — Ctrl/Cmd deep-select. */
+export function pickDeepAtPoint(
+  worldPoint: { x: number; y: number },
+  nodes: DesignNode[]
+): DesignNode | null {
+  const hits = layersAtPoint(worldPoint, nodes)
+  if (!hits.length) return null
+  const byId = indexById(nodes)
+  let best = hits[0]
+  let bestDepth = ancestorDepth(best, byId)
+  let bestArea = resolveWorldRect(best, byId).width * resolveWorldRect(best, byId).height
+  for (let i = 1; i < hits.length; i++) {
+    const node = hits[i]
+    const depth = ancestorDepth(node, byId)
+    const box = resolveWorldRect(node, byId)
+    const area = box.width * box.height
+    if (depth > bestDepth || (depth === bestDepth && area <= bestArea)) {
+      best = node
+      bestDepth = depth
+      bestArea = area
+    }
+  }
+  return best
+}
+
+/**
+ * Single-click target (Figma/Paper): prefer the top-level frame, or keep the
+ * currently selected ancestor. Never drills deeper — use resolveDrillIn for that.
+ * Sibling clicks stay at the same depth under a shared parent.
+ */
+export function resolveClickTarget(
+  hit: DesignNode,
+  nodes: DesignNode[],
+  selectedIds: string[]
+): string {
+  const byId = indexById(nodes)
+  const selected = new Set(selectedIds)
+  const chain: DesignNode[] = []
+  let cur: DesignNode | undefined = hit
+  const seen = new Set<string>()
+  while (cur) {
+    chain.push(cur)
+    if (!cur.parentId || seen.has(cur.parentId)) break
+    seen.add(cur.parentId)
+    cur = byId.get(cur.parentId)
+  }
+  if (!chain.length) return hit.id
+
+  const selectedIdx = chain.findIndex((node) => selected.has(node.id))
+  // Already on the hit, or an ancestor is selected — stay at that depth (no drill).
+  if (selectedIdx === 0) return hit.id
+  if (selectedIdx > 0) return chain[selectedIdx].id
+
+  // Sibling of the current selection under the same parent → select that sibling.
+  for (const selId of selectedIds) {
+    const sel = byId.get(selId)
+    if (!sel?.parentId) continue
+    const parentIdx = chain.findIndex((node) => node.id === sel.parentId)
+    if (parentIdx > 0) return chain[parentIdx - 1].id
+    if (parentIdx === 0) return hit.id
+  }
+
+  // Nothing relevant selected → outermost layer under the cursor.
+  return chain[chain.length - 1]?.id || hit.id
+}
+
+/**
+ * Double-click drill: move one level deeper from the selected ancestor toward the hit.
+ * If nothing in the chain is selected, enter one level below the top-level node.
+ */
+export function resolveDrillIn(
+  hit: DesignNode,
+  nodes: DesignNode[],
+  selectedIds: string[]
+): string | null {
+  const byId = indexById(nodes)
+  const selected = new Set(selectedIds)
+  const chain: DesignNode[] = []
+  let cur: DesignNode | undefined = hit
+  const seen = new Set<string>()
+  while (cur) {
+    chain.push(cur)
+    if (!cur.parentId || seen.has(cur.parentId)) break
+    seen.add(cur.parentId)
+    cur = byId.get(cur.parentId)
+  }
+  if (chain.length < 2) return null
+
+  const selectedIdx = chain.findIndex((node) => selected.has(node.id))
+  if (selectedIdx === 0) return null
+  if (selectedIdx > 0) return chain[selectedIdx - 1].id
+  // Top-level not selected yet — drill from root into its child toward the hit.
+  return chain[chain.length - 2]?.id || null
+}
+
+/** @deprecated Prefer resolveClickTarget / resolveDrillIn */
+export function resolveDrillTarget(
+  hit: DesignNode,
+  nodes: DesignNode[],
+  selectedIds: string[]
+): string {
+  return resolveClickTarget(hit, nodes, selectedIds)
 }
 
 /** Remove flex layout from selected frames (Paper ⌥⇧A). */
@@ -660,10 +801,12 @@ export function measureHugSize(
   return { width: Math.max(1, width), height: Math.max(1, height) }
 }
 
-/** Reflow every auto-layout frame in the document (deepest first so nested hug works). */
+/** Reflow every auto-layout frame in the document (deepest first so nested hug works).
+ *  A few extra passes propagate Fill/Relative through nested flex after an outer size change. */
 export function reflowAutoLayout(nodes: DesignNode[]): DesignNode[] {
-  const byId = indexById(nodes)
-  const depth = (node: DesignNode): number => {
+  if (!nodes.some((node) => isAutoLayout(node))) return nodes
+
+  const depthOf = (node: DesignNode, byId: Map<string, DesignNode>): number => {
     let d = 0
     let cur: DesignNode | undefined = node
     const seen = new Set<string>()
@@ -672,48 +815,116 @@ export function reflowAutoLayout(nodes: DesignNode[]): DesignNode[] {
       seen.add(cur.parentId)
       d += 1
       cur = byId.get(cur.parentId)
+      if (!cur) break
     }
     return d
   }
 
-  const frames = nodes.filter((node) => isAutoLayout(node)).sort((a, b) => depth(b) - depth(a))
-  if (!frames.length) return nodes
-
-  let next = [...nodes]
-  for (const frame of frames) {
-    let parent = next.find((node) => node.id === frame.id) || frame
-    const layout = parent.layout!
-    const kids = childrenOf(next, frame.id)
-    if (!kids.length) continue
-    const childFillH = kids.some((child) => !child.layoutAbsolute && child.layoutSizingH === 'fill')
-    const childFillV = kids.some((child) => !child.layoutAbsolute && child.layoutSizingV === 'fill')
-    // Figma: Fill children force the parent axis to Fixed (can't Hug)
-    let sizingH = layout.sizingH || 'fixed'
-    let sizingV = layout.sizingV || 'fixed'
-    if (childFillH && sizingH === 'hug') sizingH = 'fixed'
-    if (childFillV && sizingV === 'hug') sizingV = 'fixed'
-    const hugH = sizingH === 'hug'
-    const hugV = sizingV === 'hug'
-    if (hugH || hugV || sizingH !== (layout.sizingH || 'fixed') || sizingV !== (layout.sizingV || 'fixed')) {
-      const measured = measureHugSize(
-        { ...layout, sizingH, sizingV },
-        kids,
-        { width: parent.width, height: parent.height }
-      )
-      parent = {
-        ...parent,
-        width: hugH ? measured.width : parent.width,
-        height: hugV ? measured.height : parent.height,
-        layout: { ...layout, sizingH, sizingV }
+  /** Cheap stability check — only auto-layout frames and their direct children matter. */
+  const layoutSignature = (
+    byId: Map<string, DesignNode>,
+    frameIds: string[],
+    kidsByParent: Map<string, DesignNode[]>
+  ) => {
+    let sig = ''
+    for (const id of frameIds) {
+      const frame = byId.get(id)
+      if (!frame) continue
+      sig += `${id}:${frame.x},${frame.y},${frame.width},${frame.height};`
+      const kids = kidsByParent.get(id)
+      if (!kids) continue
+      for (const kid of kids) {
+        const live = byId.get(kid.id) || kid
+        sig += `${live.id}:${live.x},${live.y},${live.width},${live.height};`
       }
     }
-    const patched = applyAutoLayout(parent, kids)
-    const map = new Map(patched.map((node) => [node.id, node]))
-    next = next.map((node) => {
-      if (node.id === parent.id) return parent
-      return map.get(node.id) || node
-    })
+    return sig
   }
+
+  let next = nodes
+  const byId0 = indexById(next)
+  let maxDepth = 0
+  const frameIds: string[] = []
+  for (const node of next) {
+    if (!isAutoLayout(node)) continue
+    frameIds.push(node.id)
+    maxDepth = Math.max(maxDepth, depthOf(node, byId0))
+  }
+  if (!frameIds.length) return nodes
+
+  // Nested Fill only needs depth+1 passes; hard-cap so large docs stay snappy.
+  const maxPasses = Math.min(6, maxDepth + 2)
+
+  for (let pass = 0; pass < maxPasses; pass++) {
+    const byId = indexById(next)
+    const kidsByParent = new Map<string, DesignNode[]>()
+    for (const node of next) {
+      if (!node.parentId) continue
+      const list = kidsByParent.get(node.parentId)
+      if (list) list.push(node)
+      else kidsByParent.set(node.parentId, [node])
+    }
+
+    const frames = frameIds
+      .map((id) => byId.get(id))
+      .filter((node): node is DesignNode => Boolean(node && isAutoLayout(node)))
+      .sort((a, b) => depthOf(b, byId) - depthOf(a, byId))
+
+    const before = layoutSignature(byId, frameIds, kidsByParent)
+    const updates = new Map<string, DesignNode>()
+
+    for (const frame of frames) {
+      const parent = updates.get(frame.id) || byId.get(frame.id) || frame
+      const layout = parent.layout!
+      const kids = (kidsByParent.get(frame.id) || []).map((kid) => updates.get(kid.id) || kid)
+      if (!kids.length) continue
+
+      const childFillH = kids.some((child) => !child.layoutAbsolute && child.layoutSizingH === 'fill')
+      const childFillV = kids.some((child) => !child.layoutAbsolute && child.layoutSizingV === 'fill')
+      const childRelH = kids.some((child) => !child.layoutAbsolute && child.layoutSizingH === 'relative')
+      const childRelV = kids.some((child) => !child.layoutAbsolute && child.layoutSizingV === 'relative')
+
+      let sizingH = layout.sizingH || 'fixed'
+      let sizingV = layout.sizingV || 'fixed'
+      if ((childFillH || childRelH) && sizingH === 'hug') sizingH = 'fixed'
+      if ((childFillV || childRelV) && sizingV === 'hug') sizingV = 'fixed'
+      const hugH = sizingH === 'hug'
+      const hugV = sizingV === 'hug'
+
+      let nextParent = parent
+      if (hugH || hugV || sizingH !== (layout.sizingH || 'fixed') || sizingV !== (layout.sizingV || 'fixed')) {
+        const measured = measureHugSize(
+          { ...layout, sizingH, sizingV },
+          kids,
+          { width: parent.width, height: parent.height }
+        )
+        nextParent = {
+          ...parent,
+          width: hugH ? measured.width : parent.width,
+          height: hugV ? measured.height : parent.height,
+          layout: { ...layout, sizingH, sizingV }
+        }
+      }
+
+      const patched = applyAutoLayout(nextParent, kids)
+      updates.set(nextParent.id, nextParent)
+      for (const child of patched) updates.set(child.id, child)
+    }
+
+    if (!updates.size) break
+    next = next.map((node) => updates.get(node.id) || node)
+
+    const byIdAfter = indexById(next)
+    const kidsAfter = new Map<string, DesignNode[]>()
+    for (const node of next) {
+      if (!node.parentId) continue
+      const list = kidsAfter.get(node.parentId)
+      if (list) list.push(node)
+      else kidsAfter.set(node.parentId, [node])
+    }
+    if (layoutSignature(byIdAfter, frameIds, kidsAfter) === before) break
+  }
+
   return next
 }
 
@@ -770,4 +981,50 @@ export function defaultFrameLayout(): AutoLayout {
     sizingH: 'hug',
     sizingV: 'hug'
   }
+}
+
+/** Move selected flex siblings earlier/later in order (Figma arrow-key reorder). */
+export function reorderFlexByDelta(
+  nodes: DesignNode[],
+  selectedIds: string[],
+  delta: number
+): DesignNode[] | null {
+  if (!delta || !selectedIds.length) return null
+  const selected = new Set(selectedIds)
+  const roots = selectedIds
+    .map((id) => nodes.find((node) => node.id === id))
+    .filter((node): node is DesignNode => Boolean(node))
+    .filter((node) => !node.parentId || !selected.has(node.parentId))
+  if (!roots.length) return null
+  const parentId = roots[0].parentId
+  if (!parentId || roots.some((node) => node.parentId !== parentId)) return null
+  const parent = nodes.find((node) => node.id === parentId)
+  if (!parent || !isAutoLayout(parent)) return null
+
+  const kids = childrenOf(nodes, parentId).filter((node) => !node.layoutAbsolute)
+  const indices = kids.map((node, index) => (selected.has(node.id) ? index : -1)).filter((index) => index >= 0)
+  if (!indices.length || indices.length === kids.length) return null
+
+  const moving = indices.map((index) => kids[index])
+  const rest = kids.filter((node) => !selected.has(node.id))
+  const first = indices[0]
+  const baseInRest = kids.slice(0, first).filter((node) => !selected.has(node.id)).length
+  const insertAt = Math.max(0, Math.min(rest.length, baseInRest + delta))
+  if (insertAt === baseInRest) return null
+
+  const ordered = [...rest.slice(0, insertAt), ...moving, ...rest.slice(insertAt)]
+  const kidIds = new Set(kids.map((node) => node.id))
+  const result: DesignNode[] = []
+  let inserted = false
+  for (const node of nodes) {
+    if (!kidIds.has(node.id)) {
+      result.push(node)
+      continue
+    }
+    if (!inserted) {
+      result.push(...ordered)
+      inserted = true
+    }
+  }
+  return result
 }

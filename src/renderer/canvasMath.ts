@@ -174,6 +174,7 @@ export function scaleNodeAround<T extends {
   width?: number
   height?: number
   radius?: number
+  cornerRadii?: { tl: number; tr: number; br: number; bl: number }
   fontSize?: number
   strokeWidth?: number
   letterSpacing?: number
@@ -187,6 +188,14 @@ export function scaleNodeAround<T extends {
     width: node.width == null ? node.width : Math.max(1, node.width * f),
     height: node.height == null ? node.height : Math.max(1, node.height * f),
     radius: node.radius == null ? node.radius : node.radius * f,
+    cornerRadii: node.cornerRadii
+      ? {
+          tl: node.cornerRadii.tl * f,
+          tr: node.cornerRadii.tr * f,
+          br: node.cornerRadii.br * f,
+          bl: node.cornerRadii.bl * f
+        }
+      : node.cornerRadii,
     fontSize: node.fontSize == null ? node.fontSize : Math.max(1, node.fontSize * f),
     strokeWidth: node.strokeWidth == null ? node.strokeWidth : Math.max(0.5, node.strokeWidth * f),
     letterSpacing: node.letterSpacing == null ? node.letterSpacing : node.letterSpacing * f,

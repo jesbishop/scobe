@@ -612,6 +612,9 @@ export function RightSidebar({
   page,
   node,
   nodes = [],
+  selectedIds = [],
+  onAlign,
+  onSpace,
   browser,
   tool,
   onPatchPage,
@@ -635,6 +638,9 @@ export function RightSidebar({
   page: DesignPage
   node: DesignNode | null
   nodes?: DesignNode[]
+  selectedIds?: string[]
+  onAlign?: (action: 'left' | 'hcenter' | 'right' | 'top' | 'vcenter' | 'bottom') => void
+  onSpace?: (axis: 'x' | 'y', gap: number) => void
   browser: BrowserFrame | null
   tool?: DesignTool
   onPatchPage: (patch: Partial<DesignPage>) => void
@@ -676,24 +682,50 @@ export function RightSidebar({
       <div className="rightbar-chrome">
         <div className="rightbar-chrome-row">
           <button type="button" className="sidebar-min" title="Hide sidebar" onClick={onToggle}>
-            <ChevronRightIcon sx={{ fontSize: 18 }} />
+            <ChevronRightIcon sx={{ fontSize: 16 }} />
           </button>
-          <button type="button" className="rightbar-user" title="Account">
-            <span className="avatar sm rightbar-avatar">J</span>
-            <IconCaret size={12} />
-          </button>
+          <div className="rightbar-avatars" title="Account">
+            <span className="rightbar-avatar-ring">
+              <span className="avatar rightbar-avatar">J</span>
+            </span>
+            <button type="button" className="rightbar-user">
+              <span className="avatar sm rightbar-avatar-secondary">J</span>
+              <IconCaret size={12} />
+            </button>
+          </div>
           <span className="rightbar-chrome-spacer" />
+          <button type="button" className="rightbar-play" title="Preview" disabled>
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden>
+              <path
+                fillRule="evenodd"
+                clipRule="evenodd"
+                d="M6 5.903C6 4.43 7.604 3.517 8.87 4.269l10.15 6.028c1.307.776 1.305 2.669-.003 3.442l-10.15 5.995c-1.228.724-2.768-.11-2.863-1.5L6 18.098zm1 12.195a.9.9 0 0 0 1.357.774l10.152-5.995a1 1 0 0 0 .002-1.72L8.359 5.129A.9.9 0 0 0 7 5.903z"
+                fill="currentColor"
+              />
+            </svg>
+          </button>
+          <button type="button" className="rightbar-share" title="Share" onClick={onCopyLink}>
+            Share
+          </button>
         </div>
         {!commentsMode && !browserPanel && (
           <div className="rightbar-tabs" role="tablist" aria-label="Properties">
-            <button type="button" role="tab" aria-selected="true" className="is-on">
-              Design
-            </button>
-            <button type="button" role="tab" aria-selected="false" disabled title="Coming soon">
-              Prototype
-            </button>
+            <div className="rightbar-tab-group">
+              <button type="button" role="tab" aria-selected="true" className="is-on">
+                Design
+              </button>
+              <button type="button" role="tab" aria-selected="false" disabled title="Coming soon">
+                Prototype
+              </button>
+            </div>
             <button type="button" className="rightbar-zoom" title="Reset zoom" onClick={onZoom}>
               {zoom}%
+              <svg width="12" height="12" viewBox="0 0 16 16" fill="none" aria-hidden>
+                <path
+                  d="M9.768 6.768a.5.5 0 0 1 .707.707l-2.12 2.121a.5.5 0 0 1-.708 0L5.525 7.475a.5.5 0 0 1 .708-.707l1.768 1.767z"
+                  fill="currentColor"
+                />
+              </svg>
             </button>
           </div>
         )}
@@ -706,6 +738,9 @@ export function RightSidebar({
             page={page}
             node={node}
             nodes={nodes}
+            selectedIds={selectedIds}
+            onAlign={onAlign}
+            onSpace={onSpace}
             browser={browser}
             inspect={inspect}
             inspectOn={inspectOn}

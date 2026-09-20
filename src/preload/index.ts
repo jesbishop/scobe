@@ -12,6 +12,7 @@ import type {
   McpStatus,
   Workspace
 } from '../shared/types'
+import type { SnapshotEvent } from '../shared/snapshot'
 
 const api = {
   getStatus: (): Promise<ChromeStatus> => ipcRenderer.invoke('vanta:getStatus'),
@@ -49,6 +50,7 @@ const api = {
     id: string | null,
     mode: { inspect?: boolean; xray?: boolean } | null
   ): Promise<void> => ipcRenderer.invoke('vanta:setMesurer', id, mode),
+  setSnapshot: (id: string | null): Promise<void> => ipcRenderer.invoke('vanta:setSnapshot', id),
   getDesign: (): Promise<DesignNode[]> => ipcRenderer.invoke('vanta:getDesign'),
   setDesign: (nodes: DesignNode[]): Promise<DesignNode[]> => ipcRenderer.invoke('vanta:setDesign', nodes),
   addDesign: (node: DesignNode): Promise<DesignNode[]> => ipcRenderer.invoke('vanta:addDesign', node),
@@ -83,6 +85,11 @@ const api = {
     const listener = (_event: unknown, info: InspectInfo | null) => handler(info)
     ipcRenderer.on('vanta:inspect', listener)
     return () => ipcRenderer.off('vanta:inspect', listener)
+  },
+  onSnapshot: (handler: (event: SnapshotEvent) => void): (() => void) => {
+    const listener = (_event: unknown, event: SnapshotEvent) => handler(event)
+    ipcRenderer.on('vanta:snapshot', listener)
+    return () => ipcRenderer.off('vanta:snapshot', listener)
   },
   onAgent: (handler: (event: AgentEvent) => void): (() => void) => {
     const listener = (_event: unknown, event: AgentEvent) => handler(event)

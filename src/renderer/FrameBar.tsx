@@ -1,5 +1,9 @@
 import { useEffect, useRef, useState } from 'react'
 import KeyboardArrowDownIcon from '@mui/icons-material/KeyboardArrowDown'
+import StraightenIcon from '@mui/icons-material/Straighten'
+import CenterFocusStrongIcon from '@mui/icons-material/CenterFocusStrong'
+import GridOnIcon from '@mui/icons-material/GridOn'
+import PhotoCameraOutlinedIcon from '@mui/icons-material/PhotoCameraOutlined'
 import { ALL_FRAME_PRESETS, DEVICE_PRESETS } from '../shared/framePresets'
 import { IconCode, IconDesktop, IconMenu, IconPhone, IconSparkle, IconTablet } from './icons'
 
@@ -42,7 +46,9 @@ export function FrameActionBar({
   renameable = false,
   onRename,
   onConvert,
-  onResize
+  onResize,
+  snapshot,
+  measure
 }: {
   id: string
   width: number
@@ -57,14 +63,28 @@ export function FrameActionBar({
   onRename?: (name: string) => void
   onConvert?: () => void
   onResize: (size: { width: number; height: number; name?: string }) => void
+  snapshot?: {
+    active: boolean
+    onToggle: () => void
+  }
+  measure?: {
+    active: boolean
+    inspect: boolean
+    xray: boolean
+    onToggle: () => void
+    onInspect: () => void
+    onXray: () => void
+  }
 }) {
   const [open, setOpen] = useState(false)
   const [editing, setEditing] = useState(false)
   const root = useRef<HTMLDivElement>(null)
+  const skipRename = useRef(false)
   const presets = sizeCatalog === 'all' ? ALL_FRAME_PRESETS : DEVICE_PRESETS
   const current = matchPreset(presets, width, height)
   const currentCategory = categoryFor(presets, width, height)
   const designMode = sizeCatalog === 'all'
+  const sizeLabel = current?.label || (designMode ? `${width} × ${height}` : currentCategory)
 
   useEffect(() => {
     setOpen(false)
@@ -82,7 +102,7 @@ export function FrameActionBar({
 
   if (!anchor || anchor.width < 8) return null
 
-  const top = Math.max(52, anchor.top - offset)
+  const top = anchor.top - offset
   const left = anchor.left + anchor.width / 2
   const categories = Array.from(new Set(presets.map((preset) => preset.category)))
 
@@ -115,77 +135,142 @@ export function FrameActionBar({
     </div>
   )
 
+  const commitRename = (value: string) => {
+    if (skipRename.current) {
+      skipRename.current = false
+      setEditing(false)
+      return
+    }
+    const next = value.trim()
+    if (next && next !== title) onRename?.(next)
+    setEditing(false)
+  }
+
+  const nameField =
+    editing && renameable ? (
+      <input
+        autoFocus
+        className="frame-action-title-input"
+        defaultValue={title}
+        aria-label="Frame name"
+        style={{ width: `${Math.min(28, Math.max(10, title.length + 1))}ch` }}
+        onPointerDown={(event) => event.stopPropagation()}
+        onFocus={(event) => event.currentTarget.select()}
+        onBlur={(event) => commitRename(event.currentTarget.value)}
+        onKeyDown={(event) => {
+          if (event.key === 'Enter') event.currentTarget.blur()
+          if (event.key === 'Escape') {
+            skipRename.current = true
+            event.currentTarget.blur()
+          }
+        }}
+      />
+    ) : renameable ? (
+      <button
+        type="button"
+        className="frame-action-title"
+        title="Rename frame"
+        onClick={() => {
+          setOpen(false)
+          setEditing(true)
+        }}
+      >
+        {title}
+      </button>
+    ) : (
+      <span className="frame-action-title" title={title}>
+        {title}
+      </span>
+    )
+
   return (
     <div ref={root} className="frame-action-wrap" style={{ top, left }} onPointerDown={(event) => event.stopPropagation()}>
       <div className="frame-action-bar">
-        {showDevice && designMode && (
-          editing && renameable ? (
-            <input
-              autoFocus
-              className="frame-action-title-input"
-              defaultValue={title}
-              onPointerDown={(event) => event.stopPropagation()}
-              onBlur={(event) => {
-                const next = event.currentTarget.value.trim()
-                if (next && next !== title) onRename?.(next)
-                setEditing(false)
-              }}
-              onKeyDown={(event) => {
-                if (event.key === 'Enter') event.currentTarget.blur()
-                if (event.key === 'Escape') setEditing(false)
-              }}
-            />
-          ) : (
+        {nameField}
+        {showDevice && (
+          <div className="frame-action-size-wrap">
             <button
               type="button"
               className={`frame-action-size${open ? ' is-on' : ''}`}
               title="Screen size"
               onClick={() => setOpen((value) => !value)}
-              onDoubleClick={(event) => {
-                if (!renameable) return
-                event.preventDefault()
-                event.stopPropagation()
-                setOpen(false)
-                setEditing(true)
-              }}
             >
-              <span className="frame-action-size-label">{title}</span>
+              {!designMode && <DeviceIcon category={currentCategory} />}
+              <span className="frame-action-size-label">{sizeLabel}</span>
               <KeyboardArrowDownIcon sx={{ fontSize: 16, opacity: 0.55 }} />
             </button>
-          )
+            {sizeMenu}
+          </div>
         )}
-        {showDevice && !designMode && (
-          <button
-            type="button"
-            className={`frame-action-size${open ? ' is-on' : ''}`}
-            title="Screen size"
-            onClick={() => setOpen((value) => !value)}
-          >
-            <DeviceIcon category={currentCategory} />
-            <span className="frame-action-size-label">{current?.label || currentCategory}</span>
-            <KeyboardArrowDownIcon sx={{ fontSize: 16, opacity: 0.55 }} />
-          </button>
-        )}
-        {!designMode &&
-          (renameable && editing ? (
-            <input
-              autoFocus
-              className="frame-action-title-input"
-              defaultValue={title}
+        {measure && (
+          <>
+            <span className="frame-action-divider" aria-hidden />
+            <button
+              type="button"
+              className={`frame-action-icon${measure.active ? ' is-on' : ''}`}
+              title={measure.active ? 'Measure — hold Alt for spacing' : 'Measure'}
               onPointerDown={(event) => event.stopPropagation()}
-              onBlur={(event) => {
-                const next = event.currentTarget.value.trim()
-                if (next && next !== title) onRename?.(next)
-                setEditing(false)
+              onClick={(event) => {
+                event.preventDefault()
+                event.stopPropagation()
+                measure.onToggle()
               }}
-              onKeyDown={(event) => {
-                if (event.key === 'Enter') event.currentTarget.blur()
-                if (event.key === 'Escape') setEditing(false)
+            >
+              <StraightenIcon sx={{ fontSize: 18 }} />
+            </button>
+            {measure.active && (
+              <>
+                <button
+                  type="button"
+                  className={`frame-action-measure${measure.inspect ? ' is-on' : ''}`}
+                  title="Inspect"
+                  onPointerDown={(event) => event.stopPropagation()}
+                  onClick={(event) => {
+                    event.preventDefault()
+                    event.stopPropagation()
+                    measure.onInspect()
+                  }}
+                >
+                  <CenterFocusStrongIcon sx={{ fontSize: 16 }} />
+                  <span>Inspect</span>
+                </button>
+                <button
+                  type="button"
+                  className={`frame-action-measure${measure.xray ? ' is-on' : ''}`}
+                  title="X-ray"
+                  onPointerDown={(event) => event.stopPropagation()}
+                  onClick={(event) => {
+                    event.preventDefault()
+                    event.stopPropagation()
+                    measure.onXray()
+                  }}
+                >
+                  <GridOnIcon sx={{ fontSize: 16 }} />
+                  <span>X-ray</span>
+                </button>
+              </>
+            )}
+          </>
+        )}
+        {snapshot && (
+          <>
+            <span className="frame-action-divider" aria-hidden />
+            <button
+              type="button"
+              className={`frame-action-measure${snapshot.active ? ' is-on' : ''}`}
+              title={snapshot.active ? 'Snapshot — click an element, ↑ parent, ↓ child, Esc cancels' : 'Snapshot'}
+              onPointerDown={(event) => event.stopPropagation()}
+              onClick={(event) => {
+                event.preventDefault()
+                event.stopPropagation()
+                snapshot.onToggle()
               }}
-            />
-          ) : (
-            <span className="frame-action-title">{title}</span>
-          ))}
+            >
+              <PhotoCameraOutlinedIcon sx={{ fontSize: 16 }} />
+              <span>Snapshot</span>
+            </button>
+          </>
+        )}
         <span className="frame-action-divider" aria-hidden />
         <button
           type="button"
@@ -208,7 +293,9 @@ export function FrameActionBar({
           <IconMenu />
         </button>
       </div>
-      {sizeMenu}
+      {snapshot?.active && (
+        <div className="frame-action-hint">Click anything on the page to paste it onto the canvas · ↑ parent · ↓ child · Esc</div>
+      )}
     </div>
   )
 }
