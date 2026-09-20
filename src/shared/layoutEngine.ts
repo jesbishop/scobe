@@ -1,4 +1,4 @@
-import type { AutoLayout, DesignNode } from './types'
+import type { AutoLayout, DesignNode, LayoutSizing } from './types'
 
 export type Rect = { x: number; y: number; width: number; height: number }
 
@@ -70,6 +70,38 @@ export function isAutoLayout(node: DesignNode): boolean {
 
 export function canParent(node: DesignNode): boolean {
   return node.type === 'frame' || node.type === 'section'
+}
+
+/** Fill/Relative are offered for any nested child that is not absolutely positioned. */
+export function allowChildFill(
+  parent: DesignNode | null | undefined,
+  opts?: { layoutAbsolute?: boolean }
+): boolean {
+  return Boolean(parent) && !opts?.layoutAbsolute
+}
+
+/** Width/height sizing modes shown in the inspector for a node. */
+export function layoutSizeModes(opts: {
+  showResizing: boolean
+  allowFill: boolean
+  textMode?: boolean
+  hasFlexFrame?: boolean
+  sizingH?: LayoutSizing
+  sizingV?: LayoutSizing
+}): LayoutSizing[] {
+  const { showResizing, allowFill, textMode, hasFlexFrame, sizingH, sizingV } = opts
+  if (!showResizing) return ['fixed']
+  if (textMode) return allowFill ? ['fixed', 'hug', 'fill'] : ['fixed', 'hug']
+  if (hasFlexFrame) {
+    return allowFill ||
+      sizingH === 'fill' ||
+      sizingV === 'fill' ||
+      sizingH === 'relative' ||
+      sizingV === 'relative'
+      ? ['fixed', 'hug', 'fill', 'relative']
+      : ['fixed', 'hug']
+  }
+  return allowFill ? ['fixed', 'hug', 'fill', 'relative'] : ['fixed']
 }
 
 /** Convert world position to parent-relative. */

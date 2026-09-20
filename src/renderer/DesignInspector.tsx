@@ -9,7 +9,7 @@ import {
   paintPreviewCss,
   type Paint
 } from '../shared/paint'
-import { defaultFrameLayout } from '../shared/layoutEngine'
+import { allowChildFill, defaultFrameLayout, layoutSizeModes } from '../shared/layoutEngine'
 import { BLEND_MODE_GROUPS, normalizeBlendMode } from '../shared/blendModes'
 import {
   defaultEffect,
@@ -162,8 +162,8 @@ export function DesignInspector({
     const inAutoLayout =
       Boolean(parent && parent.type === 'frame' && parent.layout && parent.layout.mode !== 'none')
     const frameAuto = node.type === 'frame' && node.layout && node.layout.mode !== 'none'
-    // Fill/Relative only apply while flowing in a parent flex (not absolute).
-    const allowFill = inAutoLayout && !node.layoutAbsolute
+    // Fill/Relative whenever nested in a parent (not absolute). Roots stay Fixed/Fit-only.
+    const allowFill = allowChildFill(parent, { layoutAbsolute: node.layoutAbsolute })
     const showDims = !frameAuto
     const sizingH = node.layoutSizingH || 'fixed'
     const sizingV = node.layoutSizingV || 'fixed'
@@ -247,7 +247,7 @@ export function DesignInspector({
             height={isText ? box.height || node.fontSize || 12 : box.height}
             aspectLocked={Boolean(node.aspectLocked)}
             showDimensions={showDims || inAutoLayout || frameAuto}
-            showResizing={inAutoLayout || isText || Boolean(frameAuto)}
+            showResizing={inAutoLayout || isText || Boolean(frameAuto) || allowFill}
             sizingH={
               isText
                 ? textResize === 'auto-width'
@@ -789,16 +789,14 @@ function LayoutDimsBlock({
   }) => void
 }) {
   const ratio = width / Math.max(1, height)
-  const modes: LayoutSizing[] = (() => {
-    if (!showResizing) return ['fixed']
-    if (textMode) return allowFill ? ['fixed', 'hug', 'fill'] : ['fixed', 'hug']
-    if (flexFrame) {
-      return allowFill || sizingH === 'fill' || sizingV === 'fill' || sizingH === 'relative' || sizingV === 'relative'
-        ? ['fixed', 'hug', 'fill', 'relative']
-        : ['fixed', 'hug']
-    }
-    return allowFill ? ['fixed', 'hug', 'fill', 'relative'] : ['fixed']
-  })()
+  const modes: LayoutSizing[] = layoutSizeModes({
+    showResizing,
+    allowFill,
+    textMode,
+    hasFlexFrame: Boolean(flexFrame),
+    sizingH,
+    sizingV
+  })
 
   const applyFrameSizing = (axis: 'h' | 'v', mode: LayoutSizing) => {
     const base = { ...defaultFrameLayout(), ...flexFrame! }
@@ -824,10 +822,18 @@ function LayoutDimsBlock({
     }
     if (mode === 'fill') {
       if (axis === 'h') {
-        onChange({ layout: { ...base, sizingH: 'fixed' }, layoutSizingH: 'fill' })
+        onChange({
+          layout: { ...base, sizingH: 'fixed' },
+          layoutSizingH: 'fill',
+          width: Math.max(1, parentInnerW)
+        })
         return
       }
-      onChange({ layout: { ...base, sizingV: 'fixed' }, layoutSizingV: 'fill' })
+      onChange({
+        layout: { ...base, sizingV: 'fixed' },
+        layoutSizingV: 'fill',
+        height: Math.max(1, parentInnerH)
+      })
       return
     }
     if (mode === 'hug') {
@@ -862,7 +868,7 @@ function LayoutDimsBlock({
   const setSizingH = (mode: LayoutSizing) => {
     if (textMode) {
       if (mode === 'hug') onChange({ textResize: 'auto-width', layoutSizingH: 'fixed' })
-      else if (mode === 'fill') onChange({ textResize: 'fixed', layoutSizingH: 'fill' })
+      else if (mode === 'fill') onChange({ textResize: 'fixed', layoutSizingH: 'fill', width: Math.max(1, parentInnerW) })
       else onChange({ textResize: 'fixed', layoutSizingH: 'fixed' })
       return
     }
@@ -883,12 +889,16 @@ function LayoutDimsBlock({
       onChange({ layoutSizingH: 'hug' })
       return
     }
+    if (mode === 'fill') {
+      onChange({ layoutSizingH: 'fill', width: Math.max(1, parentInnerW) })
+      return
+    }
     onChange({ layoutSizingH: mode })
   }
   const setSizingV = (mode: LayoutSizing) => {
     if (textMode) {
       if (mode === 'hug') onChange({ textResize: 'auto-height', layoutSizingV: 'fixed' })
-      else if (mode === 'fill') onChange({ textResize: 'fixed', layoutSizingV: 'fill' })
+      else if (mode === 'fill') onChange({ textResize: 'fixed', layoutSizingV: 'fill', height: Math.max(1, parentInnerH) })
       else onChange({ textResize: 'fixed', layoutSizingV: 'fixed' })
       return
     }
@@ -907,6 +917,10 @@ function LayoutDimsBlock({
     }
     if (mode === 'hug') {
       onChange({ layoutSizingV: 'hug' })
+      return
+    }
+    if (mode === 'fill') {
+      onChange({ layoutSizingV: 'fill', height: Math.max(1, parentInnerH) })
       return
     }
     onChange({ layoutSizingV: mode })

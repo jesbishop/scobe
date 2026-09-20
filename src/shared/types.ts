@@ -258,9 +258,9 @@ export type AutoLayout = {
   alignItems?: AutoLayoutAlign
   justifyContent?: AutoLayoutJustify
   wrap?: boolean
-  /** Flex frame width: Fixed or Fit (`hug`). Fill only when nested in another flex. */
+  /** Flex frame width: Fixed or Fit (`hug`). Fill when nested in a parent container. */
   sizingH?: LayoutSizing
-  /** Flex frame height: Fixed or Fit (`hug`). Fill only when nested in another flex. */
+  /** Flex frame height: Fixed or Fit (`hug`). Fill when nested in a parent container. */
   sizingV?: LayoutSizing
 }
 
