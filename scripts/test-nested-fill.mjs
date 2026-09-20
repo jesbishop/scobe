@@ -14,9 +14,8 @@ fs.mkdirSync(outDir, { recursive: true })
 const outfile = path.join(outDir, 'layoutEngine.mjs')
 
 const bundle = spawnSync(
-  process.execPath,
+  esbuildBin,
   [
-    esbuildBin,
     path.join(root, 'src', 'shared', 'layoutEngine.ts'),
     '--bundle',
     '--platform=node',
