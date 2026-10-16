@@ -252,6 +252,18 @@ function registerTools(server: McpServer, ctx: CanvasToolContext) {
     run('screenshot')
   )
   tool(
+    'build_youtube_sidebar',
+    'Place a YouTube-like desktop shell on the canvas: nested left sidebar + fill main content (frame-in-frame).',
+    {
+      x: z.number().optional(),
+      y: z.number().optional(),
+      width: z.number().optional(),
+      height: z.number().optional(),
+      pageId: z.string().optional()
+    },
+    run('build_youtube_sidebar')
+  )
+  tool(
     'finish_working_on_nodes',
     'Clear Paper-like working indicators after a build pass. Call when done building.',
     { ids: z.array(z.string()).optional() },

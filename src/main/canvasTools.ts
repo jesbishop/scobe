@@ -10,6 +10,7 @@ import {
   toRelative
 } from '../shared/layoutEngine'
 import { normalizeUrl } from '../shared/url'
+import { buildYoutubeSidebarNodes, youtubeSidebarRootId } from '../shared/youtubeSidebar'
 import { finishWorking, stageCreate, emitBuild } from './buildBus'
 
 export type BrowserGeometry = {
@@ -455,6 +456,68 @@ export async function runCanvasTool(
     }
     setDesign([...getDesign(), frame, image])
     return stage([frameId, imageId], { content: JSON.stringify({ frame, imageId }) })
+  }
+
+  if (name === 'build_youtube_sidebar') {
+    const nodes = buildYoutubeSidebarNodes({
+      x: input.x != null ? Number(input.x) : 80,
+      y: input.y != null ? Number(input.y) : 80,
+      width: input.width != null ? Number(input.width) : 1440,
+      height: input.height != null ? Number(input.height) : 900,
+      pageId: input.pageId != null ? String(input.pageId) : DEFAULT_PAGE.id,
+      idFactory: () => randomUUID()
+    })
+    const next = setDesign([...getDesign(), ...nodes])
+    const rootId = youtubeSidebarRootId(nodes)
+    const ids = nodes.map((node) => node.id)
+    return stage(ids, {
+      content: JSON.stringify({
+        rootId,
+        nodeCount: nodes.length,
+        sidebarId: nodes.find((node) => node.name === 'YouTube Sidebar')?.id,
+        placed: next.filter((node) => ids.includes(node.id)).map((node) => ({
+          id: node.id,
+          name: node.name,
+          parentId: node.parentId || null,
+          layoutSizingH: node.layoutSizingH,
+          layoutSizingV: node.layoutSizingV,
+          width: node.width,
+          height: node.height
+        }))
+      })
+    })
+  }
+
+  if (name === 'build_youtube_sidebar') {
+    const nodes = buildYoutubeSidebarNodes({
+      x: input.x != null ? Number(input.x) : 80,
+      y: input.y != null ? Number(input.y) : 80,
+      width: input.width != null ? Number(input.width) : 1440,
+      height: input.height != null ? Number(input.height) : 900,
+      pageId: input.pageId != null ? String(input.pageId) : DEFAULT_PAGE.id,
+      idFactory: () => randomUUID()
+    })
+    const next = setDesign([...getDesign(), ...nodes])
+    const rootId = youtubeSidebarRootId(nodes)
+    const ids = nodes.map((node) => node.id)
+    return stage(ids, {
+      content: JSON.stringify({
+        rootId,
+        nodeCount: nodes.length,
+        sidebarId: nodes.find((node) => node.name === 'YouTube Sidebar')?.id,
+        placed: next
+          .filter((node) => ids.includes(node.id))
+          .map((node) => ({
+            id: node.id,
+            name: node.name,
+            parentId: node.parentId || null,
+            layoutSizingH: node.layoutSizingH,
+            layoutSizingV: node.layoutSizingV,
+            width: node.width,
+            height: node.height
+          }))
+      })
+    })
   }
 
   if (name === 'finish_working_on_nodes') {
