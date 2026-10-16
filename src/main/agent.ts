@@ -269,9 +269,23 @@ const TOOLS: Tool[] = [
     }
   },
   {
-    name: 'build_youtube_sidebar',
+    name: 'build_youtube_homepage',
     description:
-      'Place a YouTube-like desktop shell on the canvas with a nested left sidebar and fill-sized main content.',
+      'Place a full YouTube homepage on the canvas: nested sidebar, top bar, chips/filters, and video grid with Fill sizing.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        x: { type: 'number' },
+        y: { type: 'number' },
+        width: { type: 'number' },
+        height: { type: 'number' },
+        pageId: { type: 'string' }
+      }
+    }
+  },
+  {
+    name: 'build_youtube_sidebar',
+    description: 'Alias of build_youtube_homepage (full YouTube home shell).',
     input_schema: {
       type: 'object',
       properties: {
@@ -383,6 +397,6 @@ function summarize(name: string, input: unknown): string {
   if (name === 'move_design') return `${data.id} → ${data.x},${data.y}`
   if (name === 'resize_design') return `${data.id} ${data.width}×${data.height}`
   if (name === 'snapshot_browser_to_frame') return String(data.browserId || '')
-  if (name === 'build_youtube_sidebar') return 'YouTube sidebar'
+  if (name === 'build_youtube_homepage' || name === 'build_youtube_sidebar') return 'YouTube homepage'
   return name
 }

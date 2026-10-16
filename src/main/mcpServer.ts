@@ -252,8 +252,20 @@ function registerTools(server: McpServer, ctx: CanvasToolContext) {
     run('screenshot')
   )
   tool(
+    'build_youtube_homepage',
+    'Place a full YouTube homepage on the canvas: sidebar, top bar, chips/filters, and video grid (nested frames + Fill).',
+    {
+      x: z.number().optional(),
+      y: z.number().optional(),
+      width: z.number().optional(),
+      height: z.number().optional(),
+      pageId: z.string().optional()
+    },
+    run('build_youtube_homepage')
+  )
+  tool(
     'build_youtube_sidebar',
-    'Place a YouTube-like desktop shell on the canvas: nested left sidebar + fill main content (frame-in-frame).',
+    'Alias of build_youtube_homepage (full home shell including sidebar).',
     {
       x: z.number().optional(),
       y: z.number().optional(),

@@ -75,20 +75,20 @@ async function main() {
   const init = await rpc(undefined, 1, 'initialize', {
     protocolVersion: '2024-11-05',
     capabilities: {},
-    clientInfo: { name: 'vanta-youtube-sidebar', version: '1.0.0' }
+    clientInfo: { name: 'vanta-youtube-homepage', version: '1.0.0' }
   })
   let sid = init.sessionId
   if (!sid) throw new Error('No mcp-session-id from initialize')
   await request('POST', { jsonrpc: '2.0', method: 'notifications/initialized' }, sid)
 
-  sid = await callTool(sid, 10, 'build_youtube_sidebar', {
+  sid = await callTool(sid, 10, 'build_youtube_homepage', {
     x: 80,
     y: 80,
     width: 1440,
     height: 900
   })
   sid = await callTool(sid, 11, 'finish_working_on_nodes', {})
-  console.log('\nDone. YouTube sidebar shell should be on the Vanta canvas.')
+  console.log('\nDone. YouTube homepage should be on the Vanta canvas.')
 }
 
 main().catch((err) => {
