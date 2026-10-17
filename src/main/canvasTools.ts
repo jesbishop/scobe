@@ -11,6 +11,12 @@ import {
 } from '../shared/layoutEngine'
 import { normalizeUrl } from '../shared/url'
 import {
+  buildSidebarNodes,
+  canvasSidebarId,
+  canvasSidebarMainId,
+  canvasSidebarRootId
+} from '../shared/canvasSidebar'
+import {
   buildYoutubeHomepageNodes,
   youtubeChipsId,
   youtubeGridId,
@@ -462,6 +468,42 @@ export async function runCanvasTool(
     }
     setDesign([...getDesign(), frame, image])
     return stage([frameId, imageId], { content: JSON.stringify({ frame, imageId }) })
+  }
+
+  if (name === 'build_sidebar') {
+    const items = Array.isArray(input.items) ? input.items.map(String).filter(Boolean) : undefined
+    const nodes = buildSidebarNodes({
+      x: input.x != null ? Number(input.x) : 80,
+      y: input.y != null ? Number(input.y) : 80,
+      width: input.width != null ? Number(input.width) : 960,
+      height: input.height != null ? Number(input.height) : 640,
+      sidebarWidth: input.sidebarWidth != null ? Number(input.sidebarWidth) : 240,
+      pageId: input.pageId != null ? String(input.pageId) : DEFAULT_PAGE.id,
+      name: input.name != null ? String(input.name) : undefined,
+      items,
+      idFactory: () => randomUUID()
+    })
+    const next = setDesign([...getDesign(), ...nodes])
+    const ids = nodes.map((node) => node.id)
+    return stage(ids, {
+      content: JSON.stringify({
+        rootId: canvasSidebarRootId(nodes),
+        sidebarId: canvasSidebarId(nodes),
+        mainId: canvasSidebarMainId(nodes),
+        nodeCount: nodes.length,
+        placed: next
+          .filter((node) => ids.includes(node.id))
+          .map((node) => ({
+            id: node.id,
+            name: node.name,
+            parentId: node.parentId || null,
+            layoutSizingH: node.layoutSizingH,
+            layoutSizingV: node.layoutSizingV,
+            width: node.width,
+            height: node.height
+          }))
+      })
+    })
   }
 
   if (name === 'build_youtube_homepage' || name === 'build_youtube_sidebar') {
