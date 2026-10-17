@@ -252,6 +252,45 @@ function registerTools(server: McpServer, ctx: CanvasToolContext) {
     run('screenshot')
   )
   tool(
+    'build_sidebar',
+    'Place a focused left sidebar shell on the canvas: parent artboard with nested Sidebar (fixed W, fill H) + Main (fill W/H).',
+    {
+      x: z.number().optional(),
+      y: z.number().optional(),
+      width: z.number().optional(),
+      height: z.number().optional(),
+      sidebarWidth: z.number().optional(),
+      pageId: z.string().optional(),
+      name: z.string().optional(),
+      items: z.array(z.string()).optional().describe('Sidebar nav labels; first is active')
+    },
+    run('build_sidebar')
+  )
+  tool(
+    'build_youtube_homepage',
+    'Place a full YouTube homepage on the canvas: sidebar, top bar, chips/filters, and video grid (nested frames + Fill).',
+    {
+      x: z.number().optional(),
+      y: z.number().optional(),
+      width: z.number().optional(),
+      height: z.number().optional(),
+      pageId: z.string().optional()
+    },
+    run('build_youtube_homepage')
+  )
+  tool(
+    'build_youtube_sidebar',
+    'Alias of build_youtube_homepage (full home shell including sidebar).',
+    {
+      x: z.number().optional(),
+      y: z.number().optional(),
+      width: z.number().optional(),
+      height: z.number().optional(),
+      pageId: z.string().optional()
+    },
+    run('build_youtube_sidebar')
+  )
+  tool(
     'finish_working_on_nodes',
     'Clear Paper-like working indicators after a build pass. Call when done building.',
     { ids: z.array(z.string()).optional() },

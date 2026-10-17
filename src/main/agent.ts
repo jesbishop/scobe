@@ -267,6 +267,53 @@ const TOOLS: Tool[] = [
       },
       required: ['browserId']
     }
+  },
+  {
+    name: 'build_sidebar',
+    description:
+      'Place a left sidebar on the canvas as a nested child of a parent artboard (sidebar fixed width + fill height; main fills remaining space).',
+    input_schema: {
+      type: 'object',
+      properties: {
+        x: { type: 'number' },
+        y: { type: 'number' },
+        width: { type: 'number' },
+        height: { type: 'number' },
+        sidebarWidth: { type: 'number' },
+        pageId: { type: 'string' },
+        name: { type: 'string' },
+        items: { type: 'array', items: { type: 'string' } }
+      }
+    }
+  },
+  {
+    name: 'build_youtube_homepage',
+    description:
+      'Place a full YouTube homepage on the canvas: nested sidebar, top bar, chips/filters, and video grid with Fill sizing.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        x: { type: 'number' },
+        y: { type: 'number' },
+        width: { type: 'number' },
+        height: { type: 'number' },
+        pageId: { type: 'string' }
+      }
+    }
+  },
+  {
+    name: 'build_youtube_sidebar',
+    description: 'Alias of build_youtube_homepage (full YouTube home shell).',
+    input_schema: {
+      type: 'object',
+      properties: {
+        x: { type: 'number' },
+        y: { type: 'number' },
+        width: { type: 'number' },
+        height: { type: 'number' },
+        pageId: { type: 'string' }
+      }
+    }
   }
 ]
 
@@ -368,5 +415,7 @@ function summarize(name: string, input: unknown): string {
   if (name === 'move_design') return `${data.id} → ${data.x},${data.y}`
   if (name === 'resize_design') return `${data.id} ${data.width}×${data.height}`
   if (name === 'snapshot_browser_to_frame') return String(data.browserId || '')
+  if (name === 'build_sidebar') return 'Canvas sidebar'
+  if (name === 'build_youtube_homepage' || name === 'build_youtube_sidebar') return 'YouTube homepage'
   return name
 }
