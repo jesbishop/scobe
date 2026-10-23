@@ -119,32 +119,82 @@ function placeOnSquare(inkPng, size, { bg = [0, 0, 0, 255], ink = [255, 255, 255
   return out
 }
 
-/** Squircle-ish app-icon corners: fades alpha outside a rounded square, antialiased with 4×4 supersampling. */
-function roundCorners(png, radiusRatio = 0.225) {
-  const size = png.width
-  const r = size * radiusRatio
-  const coverage = (px, py) => {
-    let inside = 0
-    for (let sy = 0; sy < 4; sy++) {
-      for (let sx = 0; sx < 4; sx++) {
-        const x = px + (sx + 0.5) / 4
-        const y = py + (sy + 0.5) / 4
-        const cx = Math.min(Math.max(x, r), size - r)
-        const cy = Math.min(Math.max(y, r), size - r)
-        if ((x - cx) ** 2 + (y - cy) ** 2 <= r * r) inside++
+const BAYER4 = [
+  [0, 8, 2, 10],
+  [12, 4, 14, 6],
+  [3, 11, 1, 9],
+  [15, 7, 13, 5]
+]
+
+/**
+ * 1-bit pixel icon: the mark is sampled onto a `grid`×`grid` board, shaded top-to-bottom, over a faint glow,
+ * then ordered-dithered (Bayer 4×4). Corners are rounded on the pixel grid so they step like the art.
+ */
+function ditherIcon(inkPng, size, { grid = 32, margin = 0.16, radiusRatio = 0.225 } = {}) {
+  const out = new PNG({ width: size, height: size, colorType: 6 })
+  out.data.fill(0)
+  const inner = grid * (1 - margin * 2)
+  const scale = Math.min(inner / inkPng.width, inner / inkPng.height)
+  const drawW = inkPng.width * scale
+  const drawH = inkPng.height * scale
+  const ox = (grid - drawW) / 2
+  const oy = (grid - drawH) / 2
+  const inkAt = (gx, gy) => {
+    const sx = Math.floor((gx - ox) / scale)
+    const sy = Math.floor((gy - oy) / scale)
+    if (sx < 0 || sy < 0 || sx >= inkPng.width || sy >= inkPng.height) return 0
+    return inkPng.data[((inkPng.width * sy + sx) << 2) + 3] > 20 ? 1 : 0
+  }
+  const radius = grid * radiusRatio
+  const cell = size / grid
+  const mark = []
+  for (let gy = 0; gy < grid; gy++) {
+    const row = []
+    for (let gx = 0; gx < grid; gx++) {
+      let coverage = 0
+      for (let sy = 0; sy < 4; sy++) {
+        for (let sx = 0; sx < 4; sx++) coverage += inkAt(gx + (sx + 0.5) / 4, gy + (sy + 0.5) / 4)
+      }
+      row.push(coverage >= 8)
+    }
+    mark.push(row)
+  }
+  const nearMark = (gx, gy) => {
+    for (let dy = -1; dy <= 1; dy++) {
+      for (let dx = -1; dx <= 1; dx++) if (mark[gy + dy]?.[gx + dx]) return true
+    }
+    return false
+  }
+  for (let gy = 0; gy < grid; gy++) {
+    for (let gx = 0; gx < grid; gx++) {
+      const cx = gx + 0.5
+      const cy = gy + 0.5
+      const kx = Math.min(Math.max(cx, radius), grid - radius)
+      const ky = Math.min(Math.max(cy, radius), grid - radius)
+      if ((cx - kx) ** 2 + (cy - ky) ** 2 > radius * radius) continue
+
+      // Background brightens toward the bottom; a 1-cell black moat keeps the mark legible.
+      const rise = Math.max(0, (cy / grid - 0.35) / 0.65)
+      const tone = mark[gy][gx] ? 1 : nearMark(gx, gy) ? 0 : rise * rise * 0.62
+      const on = tone * 16 > BAYER4[gy % 4][gx % 4] + 0.5
+
+      const value = on ? 255 : 0
+      const x0 = Math.round(gx * cell)
+      const y0 = Math.round(gy * cell)
+      const x1 = Math.round((gx + 1) * cell)
+      const y1 = Math.round((gy + 1) * cell)
+      for (let y = y0; y < y1; y++) {
+        for (let x = x0; x < x1; x++) {
+          const idx = (size * y + x) << 2
+          out.data[idx] = value
+          out.data[idx + 1] = value
+          out.data[idx + 2] = value
+          out.data[idx + 3] = 255
+        }
       }
     }
-    return inside / 16
   }
-  for (let y = 0; y < png.height; y++) {
-    for (let x = 0; x < png.width; x++) {
-      const nearCorner = (x < r || x >= size - r) && (y < r || y >= size - r)
-      if (!nearCorner) continue
-      const idx = (png.width * y + x) << 2
-      png.data[idx + 3] = Math.round(png.data[idx + 3] * coverage(x, y))
-    }
-  }
-  return png
+  return out
 }
 
 function pngToDataUri(png) {
@@ -189,8 +239,8 @@ writePng(path.join(assets, 'vanta-logo-white.png'), wordmarkWhite)
 writePng(path.join(assets, 'vanta-mark.png'), mark)
 writePng(path.join(assets, 'vanta-mark-white.png'), markWhite)
 
-const icon256 = roundCorners(placeOnSquare(markWhite, 256, { bg: [0, 0, 0, 255], ink: [255, 255, 255, 255], margin: 0.2 }))
-const icon32 = roundCorners(placeOnSquare(markWhite, 32, { bg: [0, 0, 0, 255], ink: [255, 255, 255, 255], margin: 0.18 }))
+const icon256 = ditherIcon(markWhite, 256)
+const icon32 = ditherIcon(markWhite, 32)
 writePng(path.join(resources, 'icon.png'), icon256)
 writePng(path.join(pub, 'favicon.png'), icon256)
 writePng(path.join(pub, 'favicon-32.png'), icon32)

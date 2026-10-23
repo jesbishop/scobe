@@ -1,0 +1,145 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Vanta — design at the speed of code</title>
+    <meta
+      name="description"
+      content="Vanta is an infinite canvas of live browsers and editable frames. Snapshot any site into layers, and let your coding agent build on the canvas over MCP."
+    />
+    <meta property="og:title" content="Vanta — design at the speed of code" />
+    <meta
+      property="og:description"
+      content="An infinite canvas of live browsers and editable frames, driven by your coding agent."
+    />
+    <meta property="og:image" content="/icon.png" />
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <link rel="preconnect" href="https://api.fontshare.com" />
+    <link href="https://api.fontshare.com/v2/css?f[]=satoshi@400,500,700,900&display=swap" rel="stylesheet" />
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <header class="nav">
+      <a class="wordmark" href="/" aria-label="Vanta home"></a>
+      <nav class="nav-links">
+        <a href="#features">Features</a>
+        <a href="#mcp">Agents</a>
+        <a href="https://github.com/jesbishop/vanta" target="_blank" rel="noopener">GitHub</a>
+        <a class="btn btn-small" href="#download">Download</a>
+      </nav>
+    </header>
+
+    <main>
+      <section class="hero">
+        <p class="eyebrow">Desktop app · Windows, macOS, Linux</p>
+        <h1>Design at the speed&nbsp;of&nbsp;code</h1>
+        <p class="lede">
+          Vanta is an infinite canvas of live browsers and editable frames. Snapshot any site into real layers, then let
+          your coding agent build right on the canvas.
+        </p>
+        <div class="cta" id="download">
+          <a class="btn btn-primary" data-os="win" href="https://github.com/jesbishop/vanta/releases/latest/download/Vanta-Setup.exe">
+            Download for Windows
+          </a>
+          <a class="btn btn-primary" data-os="mac" href="https://github.com/jesbishop/vanta/releases/latest/download/Vanta-mac-arm64.dmg">
+            Download for macOS
+          </a>
+          <a class="btn btn-primary" data-os="linux" href="https://github.com/jesbishop/vanta/releases/latest">
+            Download for Linux
+          </a>
+          <a class="btn btn-ghost" href="https://github.com/jesbishop/vanta/releases/latest">All downloads</a>
+        </div>
+
+        <div class="stage" aria-hidden="true">
+          <div class="win">
+            <div class="win-bar"><i></i><i></i><i></i></div>
+            <div class="canvas">
+              <div class="browser">
+                <div class="browser-bar"><span class="url">youtube.com</span></div>
+                <div class="browser-body">
+                  <div class="side">
+                    <b></b><b></b><b></b><b></b><b></b><b></b>
+                  </div>
+                  <div class="grid">
+                    <span></span><span></span><span></span><span></span><span></span><span></span>
+                  </div>
+                </div>
+              </div>
+              <div class="frame">
+                <div class="frame-label">Sidebar · Snapshot</div>
+                <div class="frame-body">
+                  <div class="row sel"><em></em><b></b></div>
+                  <div class="row"><em></em><b></b></div>
+                  <div class="row"><em></em><b></b></div>
+                  <div class="row"><em></em><b></b></div>
+                  <div class="badge">Fill × Hug</div>
+                </div>
+              </div>
+              <div class="agent">
+                <span class="dot"></span>
+                <span>Cursor is building on the canvas…</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="features" id="features">
+        <article>
+          <h3>Live browsers on the canvas</h3>
+          <p>Real, interactive Chromium tabs sit beside your designs. Browse, log in, and compare at any zoom.</p>
+        </article>
+        <article>
+          <h3>Snapshot into layers</h3>
+          <p>
+            Bring any part of a page in as editable frames, text, and vector icons — with auto layout inferred, not a
+            flat screenshot.
+          </p>
+        </article>
+        <article>
+          <h3>Paper-style auto layout</h3>
+          <p>Fill and hug sizing, drag-to-reorder, keyboard nudging, crop, and image fills that behave like you expect.</p>
+        </article>
+      </section>
+
+      <section class="mcp" id="mcp">
+        <div class="mcp-copy">
+          <p class="eyebrow">Built for coding agents</p>
+          <h2>Your agent gets a canvas</h2>
+          <p>
+            Vanta runs an MCP server so Cursor, Claude Code, Codex, and v0 can create frames, snapshot pages, and lay out
+            UI while you watch. Click <strong>Connect</strong> in Vanta and it wires up your agent — locally, or through a
+            private, token-protected tunnel for cloud agents.
+          </p>
+        </div>
+        <pre class="code"><code><span class="c">// ~/.cursor/mcp.json — written for you by Connect</span>
+{
+  <span class="k">"mcpServers"</span>: {
+    <span class="k">"vanta"</span>: {
+      <span class="k">"type"</span>: <span class="s">"http"</span>,
+      <span class="k">"url"</span>: <span class="s">"http://127.0.0.1:29980/mcp"</span>
+    }
+  }
+}</code></pre>
+      </section>
+    </main>
+
+    <footer class="foot">
+      <span class="wordmark small" aria-hidden="true"></span>
+      <span>© <span id="year"></span> Vanta</span>
+      <a href="https://github.com/jesbishop/vanta" target="_blank" rel="noopener">GitHub</a>
+    </footer>
+
+    <script>
+      document.getElementById('year').textContent = new Date().getFullYear()
+      const ua = navigator.userAgent
+      const os = /Windows/i.test(ua) ? 'win' : /Mac/i.test(ua) ? 'mac' : /Linux/i.test(ua) ? 'linux' : null
+      if (os) {
+        for (const el of document.querySelectorAll('[data-os]')) {
+          if (el.dataset.os !== os) el.classList.add('btn-alt')
+        }
+      }
+    </script>
+  </body>
+</html>

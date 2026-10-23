@@ -51,10 +51,11 @@
     "nsis": {
       "oneClick": false,
       "allowToChangeInstallationDirectory": true,
-      "artifactName": "Vanta-Setup-${version}.${ext}"
+      "artifactName": "Vanta-Setup.${ext}"
     },
     "mac": {
       "icon": "resources/icon.png",
+      "artifactName": "Vanta-mac-${arch}.${ext}",
       "category": "public.app-category.graphics-design",
       "target": [
         "dmg",
@@ -67,6 +68,7 @@
     "linux": {
       "icon": "resources/icon.png",
       "category": "Graphics",
+      "artifactName": "Vanta-linux-${arch}.${ext}",
       "target": [
         "AppImage"
       ],
