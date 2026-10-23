@@ -1,26 +1,24 @@
-import { useLayoutEffect, useRef, useState } from 'react'
+import { useLayoutEffect, useRef, useState, type ReactNode } from 'react'
 import { motion } from 'motion/react'
-import GestureIcon from '@mui/icons-material/Gesture'
-import NearMeIcon from '@mui/icons-material/NearMe'
-import ForumOutlinedIcon from '@mui/icons-material/ForumOutlined'
+import { GestureIcon, NearMeIcon, SparkleIcon } from './lucideIcons'
 import type { SwitchMode } from '../shared/types'
-
-const SWITCH: Array<{ id: SwitchMode; label: string; Icon: typeof GestureIcon }> = [
-  { id: 'draw', label: 'Draw', Icon: GestureIcon },
-  { id: 'design', label: 'Design', Icon: NearMeIcon },
-  { id: 'chat', label: 'Chat', Icon: ForumOutlinedIcon }
-]
 
 const FIGMA_SPRING = { type: 'spring' as const, stiffness: 520, damping: 38, mass: 0.55 }
 
 export function ModeSwitch({ mode, onMode }: { mode: SwitchMode; onMode: (mode: SwitchMode) => void }) {
   const trackRef = useRef<HTMLDivElement>(null)
   const btnRefs = useRef<Array<HTMLButtonElement | null>>([])
-  const [pill, setPill] = useState({ x: 3, width: 34 })
+  const [pill, setPill] = useState({ x: 2, width: 28 })
+
+  const items: Array<{ id: SwitchMode; label: string; icon: ReactNode }> = [
+    { id: 'design', label: 'Design', icon: <NearMeIcon sx={{ fontSize: 18 }} /> },
+    { id: 'draw', label: 'Draw', icon: <GestureIcon sx={{ fontSize: 18 }} /> },
+    { id: 'chat', label: 'Chat', icon: <SparkleIcon sx={{ fontSize: 18 }} /> }
+  ]
 
   useLayoutEffect(() => {
     const track = trackRef.current
-    const btn = btnRefs.current[SWITCH.findIndex((item) => item.id === mode)]
+    const btn = btnRefs.current[items.findIndex((item) => item.id === mode)]
     if (!track || !btn) return
     const trackBox = track.getBoundingClientRect()
     const btnBox = btn.getBoundingClientRect()
@@ -35,8 +33,7 @@ export function ModeSwitch({ mode, onMode }: { mode: SwitchMode; onMode: (mode: 
         animate={{ x: pill.x, width: pill.width }}
         transition={FIGMA_SPRING}
       />
-      {SWITCH.map((item, index) => {
-        const Icon = item.Icon
+      {items.map((item, index) => {
         const active = mode === item.id
         return (
           <button
@@ -53,10 +50,10 @@ export function ModeSwitch({ mode, onMode }: { mode: SwitchMode; onMode: (mode: 
           >
             <motion.span
               className="mode-switch-icon"
-              animate={{ color: active ? 'var(--blue-text)' : 'var(--muted)' }}
+              animate={{ color: active ? 'var(--mode-switch-on)' : 'var(--mode-switch-off)' }}
               transition={{ duration: 0.18 }}
             >
-              <Icon sx={{ fontSize: 18 }} />
+              {item.icon}
             </motion.span>
           </button>
         )

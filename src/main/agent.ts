@@ -31,64 +31,6 @@ const TOOLS: Tool[] = [
     }
   },
   {
-    name: 'screenshot',
-    description: 'Capture the visible page of a canvas browser. Click coordinates should use this image.',
-    input_schema: {
-      type: 'object',
-      properties: { browserId: { type: 'string' } },
-      required: ['browserId']
-    }
-  },
-  {
-    name: 'click',
-    description: 'Click inside a canvas browser using screenshot pixel coordinates.',
-    input_schema: {
-      type: 'object',
-      properties: {
-        browserId: { type: 'string' },
-        x: { type: 'number' },
-        y: { type: 'number' }
-      },
-      required: ['browserId', 'x', 'y']
-    }
-  },
-  {
-    name: 'type_text',
-    description: 'Type into the focused field of a canvas browser.',
-    input_schema: {
-      type: 'object',
-      properties: {
-        browserId: { type: 'string' },
-        text: { type: 'string' }
-      },
-      required: ['browserId', 'text']
-    }
-  },
-  {
-    name: 'scroll',
-    description: 'Scroll a canvas browser. Positive deltaY scrolls down.',
-    input_schema: {
-      type: 'object',
-      properties: {
-        browserId: { type: 'string' },
-        deltaY: { type: 'number' }
-      },
-      required: ['browserId', 'deltaY']
-    }
-  },
-  {
-    name: 'press_key',
-    description: 'Press a key in a canvas browser (Enter, Tab, Escape, Backspace, arrows, or a character).',
-    input_schema: {
-      type: 'object',
-      properties: {
-        browserId: { type: 'string' },
-        key: { type: 'string' }
-      },
-      required: ['browserId', 'key']
-    }
-  },
-  {
     name: 'list_design',
     description: 'List design nodes with parentId, layout, and world bounds.',
     input_schema: { type: 'object', properties: {} }
@@ -254,15 +196,34 @@ const TOOLS: Tool[] = [
   },
   {
     name: 'snapshot_browser_to_frame',
-    description: 'Screenshot a live browser into a design frame beside it.',
+    description:
+      'Bring a live browser region into the canvas with Vanta Snapshot (DOM → editable layers, not a flat PNG). Optional CSS selector for sidebars.',
     input_schema: {
       type: 'object',
       properties: {
         browserId: { type: 'string' },
+        selector: { type: 'string', description: 'CSS selector to snapshot (e.g. ytd-guide-renderer)' },
+        pointX: { type: 'number' },
+        pointY: { type: 'number' },
         x: { type: 'number' },
         y: { type: 'number' },
-        width: { type: 'number' },
-        height: { type: 'number' },
+        name: { type: 'string' }
+      },
+      required: ['browserId']
+    }
+  },
+  {
+    name: 'snapshot_to_canvas',
+    description: 'Alias of snapshot_browser_to_frame — Vanta Snapshot layered paste onto the canvas.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        browserId: { type: 'string' },
+        selector: { type: 'string' },
+        pointX: { type: 'number' },
+        pointY: { type: 'number' },
+        x: { type: 'number' },
+        y: { type: 'number' },
         name: { type: 'string' }
       },
       required: ['browserId']
@@ -272,13 +233,13 @@ const TOOLS: Tool[] = [
 
 const SYSTEM = `You operate Vanta, an infinite canvas of real website browsers plus a Paper-like design layer.
 
-Browsers: use screenshot then click/type. Browser click coords are pixels in the latest screenshot.
+Browsers: open, list, and navigate URLs. Do not click or type inside pages — there is no computer-use / screenshot click loop.
 
 Design: build UI on the canvas with frames, auto-layout, shapes, and text — like Paper/Figma.
 - Prefer nested frames with vertical/horizontal auto-layout over one giant image when generating from scratch.
 - Children of a parent use parent-relative x/y when parentId is set.
 - list_design returns parentId, layout, and world bounds.
-- Use snapshot_browser_to_frame to mirror a live page into a design frame; the live browser stays open.
+- Use snapshot_browser_to_frame / snapshot_to_canvas to bring a live page region into the canvas via Vanta Snapshot (editable layers). Do not flat-screenshot for “snapshot” requests.
 - Design objects sit behind browsers and never replace a live page.
 - Do not close, move, or resize browsers unless the user asks.`
 
@@ -367,6 +328,8 @@ function summarize(name: string, input: unknown): string {
   }
   if (name === 'move_design') return `${data.id} → ${data.x},${data.y}`
   if (name === 'resize_design') return `${data.id} ${data.width}×${data.height}`
-  if (name === 'snapshot_browser_to_frame') return String(data.browserId || '')
+  if (name === 'snapshot_browser_to_frame' || name === 'snapshot_to_canvas') {
+    return String(data.browserId || data.selector || '')
+  }
   return name
 }

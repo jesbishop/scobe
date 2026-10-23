@@ -1,4 +1,4 @@
-import type { BrushStyleId, PathPoint } from '../shared/types'
+import type { BrushStyleId, PathPoint, StrokeProfile } from '../shared/types'
 
 export type Point = { x: number; y: number }
 
@@ -129,7 +129,7 @@ function widthAt(sample: Sample, brush: BrushDef, weight: number, random: () => 
   return Math.max(0.35, weight * taper * calligraphy * velocity * noise)
 }
 
-function ribbon(samples: Sample[], widths: number[], offset: number): string {
+function ribbon(samples: Sample[], widths: number[], offset: number, cap: BrushCap = 'round'): string {
   if (samples.length < 2) return ''
   const left: Point[] = []
   const right: Point[] = []
@@ -145,25 +145,43 @@ function ribbon(samples: Sample[], widths: number[], offset: number): string {
       y: sample.y - sample.ny * (radius - offset)
     })
   }
-  const start = samples[0]
-  const end = samples[samples.length - 1]
-  const startW = widths[0] / 2
-  const endW = widths[widths.length - 1] / 2
-  const parts = [`M ${left[0].x.toFixed(2)} ${left[0].y.toFixed(2)}`]
-  for (let i = 1; i < left.length; i++) parts.push(`L ${left[i].x.toFixed(2)} ${left[i].y.toFixed(2)}`)
-  parts.push(
-    `A ${endW.toFixed(2)} ${endW.toFixed(2)} 0 0 1 ${right[right.length - 1].x.toFixed(2)} ${right[right.length - 1].y.toFixed(2)}`
-  )
-  for (let i = right.length - 2; i >= 0; i--) parts.push(`L ${right[i].x.toFixed(2)} ${right[i].y.toFixed(2)}`)
-  parts.push(`A ${startW.toFixed(2)} ${startW.toFixed(2)} 0 0 1 ${left[0].x.toFixed(2)} ${left[0].y.toFixed(2)}`)
+  const last = samples.length - 1
+  const fmt = (p: Point) => `${p.x.toFixed(2)} ${p.y.toFixed(2)}`
+  const capTo = (from: Point, to: Point, sample: Sample, r: number, dir: 1 | -1): string => {
+    if (cap === 'round') return `A ${r.toFixed(2)} ${r.toFixed(2)} 0 0 1 ${fmt(to)}`
+    if (cap === 'square') {
+      const tx = sample.ny * dir * r
+      const ty = -sample.nx * dir * r
+      return `L ${fmt({ x: from.x + tx, y: from.y + ty })} L ${fmt({ x: to.x + tx, y: to.y + ty })} L ${fmt(to)}`
+    }
+    return `L ${fmt(to)}`
+  }
+  const parts = [`M ${fmt(left[0])}`]
+  for (let i = 1; i < left.length; i++) parts.push(`L ${fmt(left[i])}`)
+  parts.push(capTo(left[last], right[last], samples[last], widths[last] / 2, 1))
+  for (let i = right.length - 2; i >= 0; i--) parts.push(`L ${fmt(right[i])}`)
+  parts.push(capTo(right[0], left[0], samples[0], widths[0] / 2, -1))
   parts.push('Z')
-  void start
-  void end
   return parts.join(' ')
 }
 
-function jitterRibbon(samples: Sample[], widths: number[], brush: BrushDef, random: () => number, offset: number): string {
-  if (!brush.roughness) return ribbon(samples, widths, offset)
+export type BrushCap = 'none' | 'square' | 'round'
+
+export type BrushShape = {
+  profile?: StrokeProfile
+  flip?: boolean
+  cap?: BrushCap
+}
+
+function jitterRibbon(
+  samples: Sample[],
+  widths: number[],
+  brush: BrushDef,
+  random: () => number,
+  offset: number,
+  cap: BrushCap = 'round'
+): string {
+  if (!brush.roughness) return ribbon(samples, widths, offset, cap)
   const noisy = samples.map((sample, i) => {
     const jolt = (random() - 0.5) * widths[i] * brush.roughness * 0.22
     return {
@@ -172,7 +190,7 @@ function jitterRibbon(samples: Sample[], widths: number[], brush: BrushDef, rand
       y: sample.y + sample.ny * jolt
     }
   })
-  return ribbon(noisy, widths, offset)
+  return ribbon(noisy, widths, offset, cap)
 }
 
 export function pathDFromPoints(points: PathPoint[], closed = false): string {
@@ -237,7 +255,8 @@ export function brushFills(
   style: BrushStyleId | undefined,
   weight: number,
   seed: string,
-  closed = false
+  closed = false,
+  shape: BrushShape = {}
 ): string[] {
   const brush = brushById(style)
   const raw = flattenPathPoints(points, closed)
@@ -245,17 +264,94 @@ export function brushFills(
   const spacing = Math.max(1.2, Math.min(4.5, weight * 0.08))
   const samples = samplesFrom(densifyPoints(smoothPoints(raw, brush.id === 'basic' ? 1 : 2), spacing))
   const random = rng(hashString(seed + brush.id))
+  const profile = shape.profile || 'uniform'
+  const along = (t: number) => (profile === 'uniform' ? 1 : Math.max(0.01, profileWidth(profile, shape.flip ? 1 - t : t)))
   const fills: string[] = []
   const strandCount = Math.max(1, brush.strands)
   for (let strand = 0; strand < strandCount; strand++) {
     const center = (strand - (strandCount - 1) / 2) * weight * brush.strandGap
     const widths = samples.map((sample) => {
-      if (brush.dryness && random() < brush.dryness * 0.08) return Math.max(0.4, weight * 0.12)
-      return widthAt(sample, brush, weight * (strandCount > 1 ? 0.42 : 1), random)
+      if (brush.dryness && random() < brush.dryness * 0.08) return Math.max(0.4, weight * 0.12) * along(sample.t)
+      return widthAt(sample, brush, weight * (strandCount > 1 ? 0.42 : 1), random) * along(sample.t)
     })
-    fills.push(jitterRibbon(samples, widths, brush, random, center))
+    fills.push(jitterRibbon(samples, widths, brush, random, center, shape.cap || 'round'))
   }
   return fills.filter(Boolean)
+}
+
+export const STROKE_PROFILES: Array<{ id: StrokeProfile; name: string }> = [
+  { id: 'uniform', name: 'Uniform' },
+  { id: 'wedge', name: 'Wedge' },
+  { id: 'taper', name: 'Taper' },
+  { id: 'swell', name: 'Swell' },
+  { id: 'lens', name: 'Lens' },
+  { id: 'bulge', name: 'Bulge' }
+]
+
+/** Width multiplier (0–1) at position t (0–1) along the stroke. */
+export function profileWidth(profile: StrokeProfile, t: number): number {
+  switch (profile) {
+    case 'wedge':
+      return 1 - t
+    case 'taper':
+      return 1 - 0.5 * t
+    case 'swell':
+      return t < 0.8 ? 0.5 + 0.5 * (t / 0.8) : (1 - t) / 0.2
+    case 'lens':
+      return Math.sin(Math.PI * t)
+    case 'bulge':
+      return 0.55 + 0.45 * Math.sin(Math.PI * t)
+    default:
+      return 1
+  }
+}
+
+/** Plain path strokes draw with SVG stroke attributes; brush styles draw as fills. */
+export function isPlainStroke(node: { pathTool?: string; brushStyle?: BrushStyleId }): boolean {
+  if (!node.pathTool || node.pathTool === 'pen') return true
+  return (node.brushStyle || (node.pathTool === 'brush' ? 'heist' : 'basic')) === 'basic'
+}
+
+/** Filled outline of a stroke whose width follows `profile`. */
+export function profileOutline(
+  points: PathPoint[],
+  closed: boolean,
+  weight: number,
+  profile: StrokeProfile,
+  flip: boolean,
+  cap: 'none' | 'square' | 'round'
+): string {
+  const raw = flattenPathPoints(points, closed)
+  if (raw.length < 2) return ''
+  const samples = samplesFrom(densifyPoints(raw, Math.max(0.5, Math.min(3, weight * 0.25))))
+  const radii = samples.map((sample) => Math.max(0.005, (weight * profileWidth(profile, flip ? 1 - sample.t : sample.t)) / 2))
+  const left = samples.map((s, i) => ({ x: s.x + s.nx * radii[i], y: s.y + s.ny * radii[i] }))
+  const right = samples.map((s, i) => ({ x: s.x - s.nx * radii[i], y: s.y - s.ny * radii[i] }))
+  const fmt = (p: Point) => `${p.x.toFixed(2)} ${p.y.toFixed(2)}`
+  if (closed) {
+    return `M ${left.map(fmt).join(' L ')} Z M ${[...right].reverse().map(fmt).join(' L ')} Z`
+  }
+  const last = samples.length - 1
+  const endCap = (from: Point, to: Point, sample: Sample, r: number, dir: 1 | -1): string => {
+    if (cap === 'round') return `A ${r.toFixed(2)} ${r.toFixed(2)} 0 0 1 ${fmt(to)}`
+    if (cap === 'square') {
+      const tx = sample.ny * dir * r
+      const ty = -sample.nx * dir * r
+      return `L ${fmt({ x: from.x + tx, y: from.y + ty })} L ${fmt({ x: to.x + tx, y: to.y + ty })} L ${fmt(to)}`
+    }
+    return `L ${fmt(to)}`
+  }
+  return [
+    `M ${left.map(fmt).join(' L ')}`,
+    endCap(left[last], right[last], samples[last], radii[last], 1),
+    `L ${right
+      .slice(0, last)
+      .reverse()
+      .map(fmt)
+      .join(' L ')}`,
+    endCap(right[0], left[0], samples[0], radii[0], -1),
+    'Z'
+  ].join(' ')
 }
 
 export const PREVIEW_CURVE: Point[] = [

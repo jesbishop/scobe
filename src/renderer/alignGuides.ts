@@ -120,25 +120,24 @@ function gapShift(
   return bestAbs <= threshold ? best : 0
 }
 
+/** Merge guides on the same line so one continuous stroke spans every aligned object (Figma). */
 function pushGuide(guides: AlignGuide[], guide: AlignGuide) {
-  const key = [
-    Math.round(guide.x1 * 2),
-    Math.round(guide.y1 * 2),
-    Math.round(guide.x2 * 2),
-    Math.round(guide.y2 * 2)
-  ].join(':')
+  const vertical = Math.abs(guide.x1 - guide.x2) < 0.01
   const existing = guides.find((item) => {
-    const other = [
-      Math.round(item.x1 * 2),
-      Math.round(item.y1 * 2),
-      Math.round(item.x2 * 2),
-      Math.round(item.y2 * 2)
-    ].join(':')
-    return other === key
+    const itemVertical = Math.abs(item.x1 - item.x2) < 0.01
+    if (itemVertical !== vertical) return false
+    return vertical ? Math.abs(item.x1 - guide.x1) < 0.5 : Math.abs(item.y1 - guide.y1) < 0.5
   })
   if (!existing) {
-    guides.push(guide)
+    guides.push({ ...guide, dots: [...guide.dots] })
     return
+  }
+  if (vertical) {
+    existing.y1 = Math.min(existing.y1, existing.y2, guide.y1, guide.y2)
+    existing.y2 = Math.max(existing.y1, existing.y2, guide.y1, guide.y2)
+  } else {
+    existing.x1 = Math.min(existing.x1, existing.x2, guide.x1, guide.x2)
+    existing.x2 = Math.max(existing.x1, existing.x2, guide.x1, guide.x2)
   }
   for (const dot of guide.dots) {
     if (!existing.dots.some((item) => Math.abs(item.x - dot.x) < 0.5 && Math.abs(item.y - dot.y) < 0.5)) {
@@ -147,9 +146,16 @@ function pushGuide(guides: AlignGuide[], guide: AlignGuide) {
   }
 }
 
-function edgeGuides(moving: Rect, targets: Rect[], zoom: number): AlignGuide[] {
+/** Points where a rect meets an alignment line: both corners for an edge, the midpoint for the moving centre. */
+function linePoints(rect: Rect, at: Edge['at'], axis: 'x' | 'y', moving: boolean): number[] {
+  const start = axis === 'x' ? rect.y : rect.x
+  const size = axis === 'x' ? rect.height : rect.width
+  if (at === 'center' && moving) return [start + size / 2]
+  return [start, start + size]
+}
+
+function edgeGuides(moving: Rect, targets: Rect[]): AlignGuide[] {
   const guides: AlignGuide[] = []
-  const extend = 10 / Math.max(0.05, zoom)
   const eps = 0.75
 
   for (const target of targets) {
@@ -157,20 +163,13 @@ function edgeGuides(moving: Rect, targets: Rect[], zoom: number): AlignGuide[] {
       for (const to of xEdges(target)) {
         if (Math.abs(from.pos - to.pos) > eps) continue
         const x = to.pos
-        const y1 = Math.min(moving.y, target.y) - extend
-        const y2 = Math.max(moving.y + moving.height, target.y + target.height) + extend
-        const mid = (rect: Rect) => rect.y + rect.height / 2
+        const ys = [...linePoints(moving, from.at, 'x', true), ...linePoints(target, to.at, 'x', false)]
         pushGuide(guides, {
           x1: x,
-          y1,
+          y1: Math.min(...ys),
           x2: x,
-          y2,
-          dots: [
-            { x, y: y1 },
-            { x, y: y2 },
-            { x, y: from.at === 'center' ? mid(moving) : from.at === 'start' ? moving.y : moving.y + moving.height },
-            { x, y: to.at === 'center' ? mid(target) : to.at === 'start' ? target.y : target.y + target.height }
-          ]
+          y2: Math.max(...ys),
+          dots: ys.map((y) => ({ x, y }))
         })
       }
     }
@@ -178,20 +177,13 @@ function edgeGuides(moving: Rect, targets: Rect[], zoom: number): AlignGuide[] {
       for (const to of yEdges(target)) {
         if (Math.abs(from.pos - to.pos) > eps) continue
         const y = to.pos
-        const x1 = Math.min(moving.x, target.x) - extend
-        const x2 = Math.max(moving.x + moving.width, target.x + target.width) + extend
-        const mid = (rect: Rect) => rect.x + rect.width / 2
+        const xs = [...linePoints(moving, from.at, 'y', true), ...linePoints(target, to.at, 'y', false)]
         pushGuide(guides, {
-          x1,
+          x1: Math.min(...xs),
           y1: y,
-          x2,
+          x2: Math.max(...xs),
           y2: y,
-          dots: [
-            { x: x1, y },
-            { x: x2, y },
-            { x: from.at === 'center' ? mid(moving) : from.at === 'start' ? moving.x : moving.x + moving.width, y },
-            { x: to.at === 'center' ? mid(target) : to.at === 'start' ? target.x : target.x + target.width, y }
-          ]
+          dots: xs.map((x) => ({ x, y }))
         })
       }
     }
@@ -271,7 +263,7 @@ function spacingGuides(moving: Rect, targets: Rect[], axis: 'x' | 'y'): AlignGui
 
 /** Snap a proposed world rect to other objects. Alt/Ctrl should skip this. */
 export function snapRect(proposed: Rect, targets: Rect[], zoom: number): { x: number; y: number; guides: AlignGuide[] } {
-  const threshold = SNAP_PX / Math.max(0.05, zoom)
+  const threshold = SNAP_PX / Math.max(0.02, zoom)
   const edgeDx = bestShift(xEdges(proposed), targets.flatMap(xEdges), threshold)
   const edgeDy = bestShift(yEdges(proposed), targets.flatMap(yEdges), threshold)
   const gapDx = gapShift(proposed, targets, 'x', threshold)
@@ -282,7 +274,7 @@ export function snapRect(proposed: Rect, targets: Rect[], zoom: number): { x: nu
   return {
     x: snapped.x,
     y: snapped.y,
-    guides: [...edgeGuides(snapped, targets, zoom), ...spacingGuides(snapped, targets, 'x'), ...spacingGuides(snapped, targets, 'y')]
+    guides: [...edgeGuides(snapped, targets), ...spacingGuides(snapped, targets, 'x'), ...spacingGuides(snapped, targets, 'y')]
   }
 }
 
@@ -343,7 +335,6 @@ function shiftNode(node: DesignNode, dx: number, dy: number): DesignNode {
 
 function sharedGuide(rects: Rect[], action: AlignAction): AlignGuide[] {
   if (!rects.length) return []
-  const extend = 12
   if (action === 'left' || action === 'right' || action === 'hcenter') {
     const x =
       action === 'left'
@@ -351,19 +342,14 @@ function sharedGuide(rects: Rect[], action: AlignAction): AlignGuide[] {
         : action === 'right'
           ? Math.max(...rects.map((rect) => rect.x + rect.width))
           : rects.reduce((sum, rect) => sum + rect.x + rect.width / 2, 0) / rects.length
-    const y1 = Math.min(...rects.map((rect) => rect.y)) - extend
-    const y2 = Math.max(...rects.map((rect) => rect.y + rect.height)) + extend
+    const ys = rects.flatMap((rect) => [rect.y, rect.y + rect.height])
     return [
       {
         x1: x,
-        y1,
+        y1: Math.min(...ys),
         x2: x,
-        y2,
-        dots: [
-          { x, y: y1 },
-          { x, y: y2 },
-          ...rects.map((rect) => ({ x, y: rect.y + rect.height / 2 }))
-        ]
+        y2: Math.max(...ys),
+        dots: ys.map((y) => ({ x, y }))
       }
     ]
   }
@@ -373,19 +359,14 @@ function sharedGuide(rects: Rect[], action: AlignAction): AlignGuide[] {
       : action === 'bottom'
         ? Math.max(...rects.map((rect) => rect.y + rect.height))
         : rects.reduce((sum, rect) => sum + rect.y + rect.height / 2, 0) / rects.length
-  const x1 = Math.min(...rects.map((rect) => rect.x)) - extend
-  const x2 = Math.max(...rects.map((rect) => rect.x + rect.width)) + extend
+  const xs = rects.flatMap((rect) => [rect.x, rect.x + rect.width])
   return [
     {
-      x1,
+      x1: Math.min(...xs),
       y1: y,
-      x2,
+      x2: Math.max(...xs),
       y2: y,
-      dots: [
-        { x: x1, y },
-        { x: x2, y },
-        ...rects.map((rect) => ({ x: rect.x + rect.width / 2, y }))
-      ]
+      dots: xs.map((x) => ({ x, y }))
     }
   ]
 }

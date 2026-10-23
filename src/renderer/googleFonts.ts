@@ -163,6 +163,47 @@ function googleFontsHref(entry: GoogleFontEntry, weight: number, italic: boolean
   return `https://fonts.googleapis.com/css2?family=${familyParam}:wght@${sorted.join(';')}&display=swap`
 }
 
+/** Icon fonts aren't in the text catalog but Snapshot imports their glyphs as live icons. */
+const ICON_FONT_PARAMS: Record<string, string> = {
+  'material symbols outlined': 'Material+Symbols+Outlined:opsz,wght,FILL,GRAD@20..48,100..700,0..1,-50..200',
+  'material symbols rounded': 'Material+Symbols+Rounded:opsz,wght,FILL,GRAD@20..48,100..700,0..1,-50..200',
+  'material symbols sharp': 'Material+Symbols+Sharp:opsz,wght,FILL,GRAD@20..48,100..700,0..1,-50..200',
+  'material icons': 'Material+Icons',
+  'material icons outlined': 'Material+Icons+Outlined',
+  'material icons round': 'Material+Icons+Round',
+  'material icons sharp': 'Material+Icons+Sharp',
+  'material icons two tone': 'Material+Icons+Two+Tone'
+}
+
+function ensureIconFontLoaded(family: string): Promise<void> | null {
+  const bare = family.split(',')[0]?.trim().replace(/^['"]|['"]$/g, '') || ''
+  const param = ICON_FONT_PARAMS[bare.toLowerCase()]
+  if (!param) return null
+  const key = `icon::${bare.toLowerCase()}`
+  const existing = pending.get(key)
+  if (existing) return existing
+  const run = (async () => {
+    const link = document.createElement('link')
+    link.rel = 'stylesheet'
+    link.crossOrigin = 'anonymous'
+    link.dataset.vantaFont = bare
+    await new Promise<void>((resolve) => {
+      link.addEventListener('load', () => resolve(), { once: true })
+      link.addEventListener('error', () => resolve(), { once: true })
+      window.setTimeout(resolve, 4000)
+      link.href = `https://fonts.googleapis.com/css2?family=${param}&display=block`
+      document.head.appendChild(link)
+    })
+    try {
+      await document.fonts.load(`400 24px ${cssFontFamily(bare)}`)
+    } catch {
+      /* glyph falls back to its ligature name until the font arrives */
+    }
+  })()
+  pending.set(key, run)
+  return run
+}
+
 /** Inject a Google Fonts stylesheet and wait until the face can paint. */
 export function ensureGoogleFontLoaded(
   family: string,
@@ -170,6 +211,8 @@ export function ensureGoogleFontLoaded(
   italic = false
 ): Promise<void> {
   if (typeof document === 'undefined') return Promise.resolve()
+  const icon = ensureIconFontLoaded(family)
+  if (icon) return icon
   const entry = findGoogleFont(family)
   if (!entry) return Promise.resolve()
 

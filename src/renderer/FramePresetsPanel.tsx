@@ -1,6 +1,5 @@
-import { useState } from 'react'
-import KeyboardArrowDownIcon from '@mui/icons-material/KeyboardArrowDown'
-import KeyboardArrowRightIcon from '@mui/icons-material/KeyboardArrowRight'
+import { useEffect, useRef, useState } from 'react'
+import { KeyboardArrowDownIcon, KeyboardArrowRightIcon } from './lucideIcons'
 import type { FramePreset, FramePresetCategory } from '../shared/framePresets'
 
 export function FramePresetsPanel({
@@ -14,7 +13,13 @@ export function FramePresetsPanel({
   defaultOpenId?: string
   onSelect: (preset: FramePreset) => void
 }) {
+  const rootRef = useRef<HTMLDivElement>(null)
   const [openIds, setOpenIds] = useState<Set<string>>(() => new Set([defaultOpenId]))
+
+  useEffect(() => {
+    const scrollParent = rootRef.current?.closest('.props')
+    if (scrollParent instanceof HTMLElement) scrollParent.scrollTop = 0
+  }, [title])
 
   const toggle = (id: string) => {
     setOpenIds((current) => {
@@ -26,7 +31,7 @@ export function FramePresetsPanel({
   }
 
   return (
-    <div className="frame-presets">
+    <div className="frame-presets" ref={rootRef}>
       <div className="prop-node-title">{title}</div>
       {categories.map((category) => {
         const open = openIds.has(category.id)

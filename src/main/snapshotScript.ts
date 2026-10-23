@@ -4,14 +4,24 @@
  * serializes that subtree (computed styles + images) so the shell can paste
  * it onto the design canvas.
  */
-export const SNAPSHOT_SCRIPT = `
+const SNAPSHOT_SOURCE = `
 (() => {
   const NS = '__vantaSnapshot';
-  if (window[NS] && window[NS].ready) return;
+  const VERSION = '__SNAPSHOT_VERSION__';
+  if (window[NS] && window[NS].ready && window[NS].version === VERSION) return;
+  // A tab that ran an older build keeps that copy until replaced here.
+  if (window[NS] && window[NS].disable) {
+    try { window[NS].disable(); } catch (err) {}
+  }
 
-  const MAX_NODES = 600;
-  const MAX_DEPTH = 16;
-  const MAX_IMAGES = 36;
+  // Deep component trees (YouTube nests 60+ levels) lose their leaves under tight caps.
+  const MAX_NODES = 6000;
+  const MAX_DEPTH = 160;
+  const MAX_IMAGES = 600;
+  const MAX_ICON = 160;
+  const ICON_FONT = /icon|symbol|material|awesome|glyph|feather|codicon|lucide|tabler|phosphor|remix/i;
+  const PRIVATE_USE = /[\\uE000-\\uF8FF]|[\\uDB80-\\uDBFF][\\uDC00-\\uDFFF]/;
+  const SVG_PROPS = ['fill', 'fill-opacity', 'fill-rule', 'stroke', 'stroke-width', 'stroke-opacity', 'stroke-linecap', 'stroke-linejoin', 'stroke-dasharray', 'stroke-dashoffset', 'stroke-miterlimit', 'opacity', 'color', 'visibility', 'stop-color', 'stop-opacity', 'clip-rule', 'font-family', 'font-size', 'font-weight'];
   const SKIP = { SCRIPT: 1, STYLE: 1, LINK: 1, META: 1, NOSCRIPT: 1, BR: 1, WBR: 1, TEMPLATE: 1 };
 
   const root = document.createElement('div');
@@ -219,10 +229,24 @@ export const SNAPSHOT_SCRIPT = `
     return boxes;
   };
 
+  /** Border sides that actually paint: width, a real style, and a visible color (transparent spacers don't). */
+  const visibleBorders = (style) => {
+    const out = [];
+    for (const side of ['Top', 'Right', 'Bottom', 'Left']) {
+      const width = parseFloat(style['border' + side + 'Width']) || 0;
+      const kind = style['border' + side + 'Style'];
+      if (width <= 0 || kind === 'none' || kind === 'hidden') continue;
+      const color = parseColor(style['border' + side + 'Color']);
+      if (!color) continue;
+      out.push({ side, width, color });
+    }
+    return out;
+  };
+
   const hasBox = (style) => {
     if (parseColor(style.backgroundColor)) return true;
     if (style.backgroundImage && style.backgroundImage !== 'none') return true;
-    if ((parseFloat(style.borderTopWidth) || 0) > 0) return true;
+    if (visibleBorders(style).length) return true;
     if ((parseFloat(style.borderTopLeftRadius) || 0) > 0) return true;
     if (style.boxShadow && style.boxShadow !== 'none') return true;
     return false;
@@ -268,6 +292,137 @@ export const SNAPSHOT_SCRIPT = `
     return {}
   }
 
+  const hasMask = (style) => {
+    const mask = style.webkitMaskImage || style.maskImage;
+    return Boolean(mask && mask !== 'none');
+  };
+
+  const hasPseudoIcon = (el) => {
+    for (const which of ['::before', '::after']) {
+      const ps = window.getComputedStyle(el, which);
+      const content = ps && ps.content;
+      if (!content || content === 'none' || content === 'normal' || content === '""' || content === "''") continue;
+      if (ICON_FONT.test(fontStack(ps.fontFamily)) || PRIVATE_USE.test(content) || hasMask(ps)) return true;
+      if (ps.backgroundImage && ps.backgroundImage !== 'none') return true;
+    }
+    return false;
+  };
+
+  /** Icon-font glyphs, ::before icons and CSS-mask icons can't be rebuilt as layers, so they're pasted as pixels. */
+  const isIcon = (el, style, rect, kids, text) => {
+    if (rect.width > MAX_ICON || rect.height > MAX_ICON) return false;
+    if (hasMask(style)) return true;
+    if (kids.length) return false;
+    if (text && text.length <= 40 && (ICON_FONT.test(fontStack(style.fontFamily)) || PRIVATE_USE.test(text))) return true;
+    return !text && hasPseudoIcon(el);
+  };
+
+  const boxPad = (style) => ({
+    t: (parseFloat(style.paddingTop) || 0) + (parseFloat(style.borderTopWidth) || 0),
+    r: (parseFloat(style.paddingRight) || 0) + (parseFloat(style.borderRightWidth) || 0),
+    b: (parseFloat(style.paddingBottom) || 0) + (parseFloat(style.borderBottomWidth) || 0),
+    l: (parseFloat(style.paddingLeft) || 0) + (parseFloat(style.borderLeftWidth) || 0)
+  });
+
+  /** CSS flow hints so the importer can rebuild flex / stacked blocks as auto layout. */
+  const flowOf = (style) => {
+    const display = style.display;
+    if (display === 'flex' || display === 'inline-flex') {
+      const dir = String(style.flexDirection || 'row');
+      return {
+        kind: 'flex',
+        dir: dir.indexOf('column') === 0 ? 'column' : 'row',
+        reverse: dir.indexOf('reverse') > 0 || undefined,
+        wrap: (style.flexWrap && style.flexWrap !== 'nowrap') || undefined,
+        justify: style.justifyContent || undefined,
+        pad: boxPad(style)
+      };
+    }
+    if (display === 'grid' || display === 'inline-grid') {
+      return { kind: 'grid', pad: boxPad(style) };
+    }
+    if (display === 'block' || display === 'flow-root' || display === 'list-item' || display === 'inline-block') {
+      return { kind: 'block', pad: boxPad(style) };
+    }
+    return null;
+  };
+
+  const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+  const absUrl = (src) => {
+    try { return new URL(src, location.href).href; } catch (err) { return ''; }
+  };
+
+  const inFixed = (el) => {
+    let cur = el;
+    for (let i = 0; cur && cur !== document.documentElement && i < 60; i++) {
+      const pos = window.getComputedStyle(cur).position;
+      if (pos === 'fixed' || pos === 'sticky') return true;
+      cur = parentEl(cur);
+    }
+    return false;
+  };
+
+  const singleTextNode = (el) => {
+    let found = null;
+    for (const node of Array.from(el.childNodes)) {
+      if (node.nodeType !== 3) continue;
+      if (!String(node.textContent || '').trim()) continue;
+      if (found) return null;
+      found = node;
+    }
+    return found;
+  };
+
+  /** Line-clamped / ellipsized text: keep only what the page actually shows. */
+  const clampText = (el, style, rect, text) => {
+    const clamp = parseInt(style.webkitLineClamp, 10);
+    const clips =
+      clamp > 0 ||
+      style.textOverflow === 'ellipsis' ||
+      style.overflow === 'hidden' ||
+      style.overflowY === 'hidden' ||
+      style.overflowX === 'hidden';
+    if (!clips) return text;
+    if (el.scrollHeight <= el.clientHeight + 1 && el.scrollWidth <= el.clientWidth + 1) return text;
+    const node = singleTextNode(el);
+    if (!node) return text;
+    const full = String(node.textContent || '');
+    const bottom = rect.y + rect.height + 0.5;
+    const right = rect.x + rect.width + 0.5;
+    const range = document.createRange();
+    const fits = (n) => {
+      range.setStart(node, 0);
+      range.setEnd(node, n);
+      const rects = range.getClientRects();
+      const last = rects[rects.length - 1];
+      return !last || (last.bottom <= bottom && last.right <= right);
+    };
+    if (fits(full.length)) return text;
+    let lo = 0;
+    let hi = full.length;
+    while (lo < hi) {
+      const mid = (lo + hi + 1) >> 1;
+      if (fits(mid)) lo = mid;
+      else hi = mid - 1;
+    }
+    const kept = full.slice(0, Math.max(0, lo - 1)).replace(/\\s+/g, ' ').trim();
+    return kept ? kept + '\\u2026' : text;
+  };
+
+  /** Tight box around an element's rendered text (flex-centered button labels etc.). */
+  const textRectOf = (el) => {
+    try {
+      const range = document.createRange();
+      range.selectNodeContents(el);
+      const rect = range.getBoundingClientRect();
+      if (rect.width < 1 || rect.height < 1) return null;
+      return { x: rect.x, y: rect.y, width: rect.width, height: rect.height };
+    } catch (err) {
+      return null;
+    }
+  };
+
   const fillOf = (style) => {
     const image = firstUrl(style.backgroundImage);
     if (image) return { type: 'image', src: image };
@@ -300,25 +455,86 @@ export const SNAPSHOT_SCRIPT = `
       fill: null,
       stroke: null,
       strokeWidth: 0,
-      shadow: parseShadow(style.boxShadow),
+      shadow: (() => {
+        const next = parseShadow(style.boxShadow);
+        return next && next.inset ? next : null;
+      })(),
       layerBlur: blurPx(style.filter) || undefined,
       backgroundBlur: blurPx(style.backdropFilter) || undefined,
+      flow: flowOf(style),
+      abs: style.position === 'absolute' || style.position === 'fixed' || undefined,
+      grow: (parseFloat(style.flexGrow) || 0) > 0 || undefined,
       children: []
     };
   };
 
   const addStroke = (node, style) => {
-    const width = Math.max(
-      parseFloat(style.borderTopWidth) || 0,
-      parseFloat(style.borderRightWidth) || 0,
-      parseFloat(style.borderBottomWidth) || 0,
-      parseFloat(style.borderLeftWidth) || 0
-    );
-    if (width <= 0) return;
-    const color = parseColor(style.borderTopColor) || parseColor(style.borderColor);
-    if (!color) return;
-    node.stroke = color;
-    node.strokeWidth = width;
+    const sides = visibleBorders(style);
+    if (!sides.length) return;
+    const first = sides[0];
+    const uniform =
+      sides.length === 4 &&
+      sides.every((side) => Math.abs(side.width - first.width) < 0.05 && side.color.hex === first.color.hex && Math.abs(side.color.opacity - first.color.opacity) < 0.01);
+    if (uniform) {
+      node.stroke = first.color;
+      node.strokeWidth = first.width;
+      return;
+    }
+    // One-sided borders (dividers, underlines): Vanta strokes are all-around, so draw each side as a bar.
+    for (const side of sides) {
+      const w = side.width;
+      const box =
+        side.side === 'Top' ? { x: node.absX, y: node.absY, width: node.width, height: w }
+          : side.side === 'Bottom' ? { x: node.absX, y: node.absY + node.height - w, width: node.width, height: w }
+            : side.side === 'Left' ? { x: node.absX, y: node.absY, width: w, height: node.height }
+              : { x: node.absX + node.width - w, y: node.absY, width: w, height: node.height };
+      node.children.push({
+        kind: 'frame',
+        tag: 'border',
+        name: 'border-' + side.side.toLowerCase(),
+        absX: box.x,
+        absY: box.y,
+        x: 0,
+        y: 0,
+        width: Math.max(0.5, box.width),
+        height: Math.max(0.5, box.height),
+        fill: { type: 'solid', hex: side.color.hex, opacity: side.color.opacity },
+        stroke: null,
+        strokeWidth: 0,
+        abs: true,
+        flow: null,
+        children: []
+      });
+    }
+  };
+
+  /**
+   * Zero-size wrappers (an inline <span> around a block icon, custom elements with no box)
+   * still paint their children — keep those instead of culling the whole subtree.
+   */
+  const passThrough = (el, style, depth) => {
+    const clips = style.overflow === 'hidden' || style.overflowX === 'hidden' || style.overflowY === 'hidden' || style.overflow === 'clip';
+    if (clips) return null;
+    const built = [];
+    for (const child of childElements(el)) {
+      const node = buildOne(child, depth + 1);
+      if (node) built.push(node);
+    }
+    if (!built.length) return null;
+    if (built.length === 1) return built[0];
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    for (const node of built) {
+      minX = Math.min(minX, node.absX);
+      minY = Math.min(minY, node.absY);
+      maxX = Math.max(maxX, node.absX + node.width);
+      maxY = Math.max(maxY, node.absY + node.height);
+    }
+    count++;
+    const group = baseNode(el, { x: minX, y: minY, width: maxX - minX, height: maxY - minY }, style);
+    group.flow = null;
+    group.name = layerName(el, '');
+    group.children = built;
+    return group;
   };
 
   const buildOne = (el, depth) => {
@@ -326,31 +542,88 @@ export const SNAPSHOT_SCRIPT = `
     const style = window.getComputedStyle(el);
     if (!style || style.display === 'none' || style.visibility === 'hidden') return null;
     if (style.display === 'contents') return null;
+    // Hover / ripple layers (YouTube touch feedback, etc.) sit at opacity 0 over buttons.
+    if (parseFloat(style.opacity) < 0.01) return null;
     const rect = rectOf(el);
-    if (rect.width < 1 || rect.height < 1) return null;
+    if (rect.width < 1 || rect.height < 1) return passThrough(el, style, depth);
     count++;
-    const tag = el.tagName;
+    // SVG elements keep a lowercase tagName in HTML documents.
+    const tag = String(el.tagName || '').toUpperCase();
     const node = baseNode(el, rect, style);
     addStroke(node, style);
 
+    if (tag === 'SVG') {
+      node.kind = 'image';
+      node.name = layerName(el, 'icon');
+      let xml = null;
+      try {
+        xml = vectorSvg(el, rect.width, rect.height);
+      } catch (err) {
+        xml = null;
+      }
+      if (xml) {
+        node.svg = xml;
+        node.fill = { type: 'image', dataUrl: svgDataUrl(xml) };
+        node.flow = null;
+        return node;
+      }
+    }
+
     if (tag === 'IMG' || tag === 'CANVAS' || tag === 'SVG' || tag === 'VIDEO') {
       node.kind = 'image';
-      node.name = layerName(el, el.alt || '');
+      node.name = layerName(el, el.alt || (tag === 'SVG' ? 'icon' : ''));
       const src = tag === 'IMG' ? (el.currentSrc || el.src || '') : tag === 'VIDEO' ? (el.poster || '') : '';
-      rasters.push({ node, el: tag === 'VIDEO' ? null : el, src, w: rect.width, h: rect.height });
+      rasters.push({ node, el: tag === 'VIDEO' ? null : el, host: el, src, w: rect.width, h: rect.height });
       return node;
     }
 
     const kids = childElements(el);
     const text = leafText(el);
+    if (isIcon(el, style, rect, kids, text)) {
+      node.name = layerName(el, 'icon');
+      node.flow = null;
+      const iconFamily = text && !kids.length ? loadableIconFont(fontStack(style.fontFamily)) : '';
+      if (iconFamily) {
+        // Live glyph in the same icon font — recolor/resize like any icon.
+        node.kind = 'text';
+        node.text = text;
+        node.fill = null;
+        node.stroke = null;
+        node.strokeWidth = 0;
+        Object.assign(node, textStyle(style, text), {
+          fontFamily: iconFamily,
+          fontVariationSettings: style.fontVariationSettings && style.fontVariationSettings !== 'normal' ? style.fontVariationSettings : undefined,
+          lineHeight: Math.max(1, Math.round(rect.height)),
+          textAlign: 'center',
+          textAlignVertical: 'middle',
+          iconGlyph: true
+        });
+        return node;
+      }
+      const maskSrc = firstUrl(style.webkitMaskImage || style.maskImage);
+      const maskColor = parseColor(style.backgroundColor) || parseColor(style.color);
+      node.kind = 'image';
+      node.fill = null;
+      node.stroke = null;
+      node.strokeWidth = 0;
+      if (maskSrc && maskColor && !kids.length) {
+        node.maskSrc = absUrl(maskSrc) || maskSrc;
+        node.maskColor = maskColor;
+        node.maskFit = /contain|cover/.test(String(style.webkitMaskSize || style.maskSize || '')) ? 'meet' : 'none';
+      }
+      rasters.push({ node, el: null, host: el, src: '', w: rect.width, h: rect.height, icon: true });
+      return node;
+    }
     node.name = layerName(el, text);
     node.fill = fillOf(style);
 
     if (!kids.length && text) {
-      const styled = textStyle(style, text);
+      const shown = clampText(el, style, rect, text);
+      const styled = textStyle(style, shown);
       if (!hasBox(style) && !node.fill && !(node.strokeWidth > 0)) {
         node.kind = 'text';
-        node.text = text;
+        node.text = shown;
+        node.flow = null;
         Object.assign(node, styled);
         return node;
       }
@@ -358,24 +631,38 @@ export const SNAPSHOT_SCRIPT = `
       const padT = parseFloat(style.paddingTop) || 0;
       const padR = parseFloat(style.paddingRight) || 0;
       const padB = parseFloat(style.paddingBottom) || 0;
+      const content = {
+        x: rect.x + padL,
+        y: rect.y + padT,
+        width: Math.max(1, rect.width - padL - padR),
+        height: Math.max(1, rect.height - padT - padB)
+      };
+      // Use where the label actually renders (flex-centered buttons ignore text-align).
+      const tight = textRectOf(el);
+      const box = tight && tight.width <= content.width + 2 ? tight : content;
+      const centered =
+        tight && Math.abs(tight.x + tight.width / 2 - (content.x + content.width / 2)) <= 2 && tight.width < content.width - 4;
+      if (node.fill && node.fill.type === 'image' && node.fill.src) {
+        rasters.push({ node, el: null, host: el, src: node.fill.src, w: rect.width, h: rect.height, background: true });
+      }
       node.children.push(Object.assign({
         kind: 'text',
         tag: 'span',
-        name: text.slice(0, 64),
-        absX: rect.x + padL,
-        absY: rect.y + padT,
+        name: shown.slice(0, 64),
+        absX: box.x,
+        absY: box.y,
         x: 0,
         y: 0,
-        width: Math.max(1, rect.width - padL - padR),
-        height: Math.max(1, rect.height - padT - padB),
-        text,
+        width: box.width,
+        height: box.height,
+        text: shown,
         children: []
-      }, styled));
+      }, styled, centered ? { textAlign: 'center' } : null));
       return node;
     }
 
     if (node.fill && node.fill.type === 'image' && node.fill.src) {
-      rasters.push({ node, el: null, src: node.fill.src, w: rect.width, h: rect.height, background: true });
+      rasters.push({ node, el: null, host: el, src: node.fill.src, w: rect.width, h: rect.height, background: true });
     }
 
     for (const child of kids) {
@@ -408,7 +695,10 @@ export const SNAPSHOT_SCRIPT = `
         }, styleForText, { textAlignVertical: 'top' }));
       }
     }
-    if (!node.children.length && !node.fill && !(node.strokeWidth > 0) && !node.shadow) return null;
+    const formField = tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT';
+    // Empty fields still take up space in their row (e.g. Google's search box) — keep them as frames.
+    if (!node.children.length && !node.fill && !(node.strokeWidth > 0) && !node.shadow && !formField) return null;
+    if (formField) node.flow = null;
     return node;
   };
 
@@ -417,12 +707,37 @@ export const SNAPSHOT_SCRIPT = `
     const absY = node.absY;
     node.x = Math.round(absX - parentX);
     node.y = Math.round(absY - parentY);
-    node.width = Math.round(node.width);
-    node.height = Math.round(node.height);
+    // Rounding text down makes the last word wrap onto a hidden line.
+    node.width = node.kind === 'text' ? Math.ceil(node.width) + 1 : Math.round(node.width);
+    node.height = node.kind === 'text' ? Math.ceil(node.height) : Math.round(node.height);
     delete node.absX;
     delete node.absY;
-    if (node.fill && node.fill.src) delete node.fill.src;
+    if (node.fill && node.fill.type === 'image' && !node.fill.dataUrl) node.fill = null;
+    if (!node.flow) delete node.flow;
+    if (!node.abs) delete node.abs;
+    if (!node.grow) delete node.grow;
     for (const child of node.children || []) finalize(child, absX, absY);
+  };
+
+  /** Drop invisible single-child wrappers so the layer tree reads like a design file. */
+  const isPlain = (node) =>
+    node.kind === 'frame' &&
+    !node.fill &&
+    !(node.strokeWidth > 0) &&
+    !node.shadow &&
+    node.opacity == null &&
+    !node.layerBlur &&
+    !node.backgroundBlur &&
+    !node.fetchSrc;
+  const GENERIC = /^(div|span|a|section|article|main|header|footer|nav|aside|li|ul|ol|p|figure|picture)$/;
+  const collapse = (node) => {
+    node.children = (node.children || []).map(collapse);
+    if (!isPlain(node) || node.children.length !== 1) return node;
+    const only = node.children[0];
+    if (GENERIC.test(only.name) && !GENERIC.test(node.name)) only.name = node.name;
+    if (node.abs) only.abs = true;
+    if (node.grow && !only.grow) only.grow = true;
+    return only;
   };
 
   const blobToData = (blob) => new Promise((resolve, reject) => {
@@ -432,57 +747,175 @@ export const SNAPSHOT_SCRIPT = `
     reader.readAsDataURL(blob);
   });
 
+  /** Only same-document data is read here; cross-origin images are fetched by the app (no CORS, no timeouts per tile). */
   const urlToData = async (url) => {
     if (!url) return null;
     if (url.indexOf('data:') === 0) return url;
-    const ctrl = new AbortController();
-    const timer = setTimeout(() => ctrl.abort(), 2500);
-    try {
-      const res = await fetch(url, { signal: ctrl.signal });
-      if (!res.ok) return null;
-      return await blobToData(await res.blob());
-    } catch (err) {
-      return null;
-    } finally {
-      clearTimeout(timer);
+    if (url.indexOf('blob:') === 0) {
+      try {
+        const res = await fetch(url);
+        return res.ok ? await blobToData(await res.blob()) : null;
+      } catch (err) {
+        return null;
+      }
     }
+    return null;
   };
 
-  const drawToData = (drawable, width, height) => {
+  /** PNG keeps transparency (icons, logos); small things are drawn at 2–3x so they stay crisp when zoomed. */
+  const drawToData = (drawable, width, height, png) => {
     try {
       const maxEdge = 1100;
-      const scale = Math.min(1, maxEdge / Math.max(width, height, 1));
+      const side = Math.max(width, height, 1);
+      const density = side <= 256 ? 3 : Math.max(1, window.devicePixelRatio || 1);
+      const scale = Math.min(density, maxEdge / side);
       const canvas = document.createElement('canvas');
       canvas.width = Math.max(1, Math.round(width * scale));
       canvas.height = Math.max(1, Math.round(height * scale));
       const ctx = canvas.getContext('2d');
       ctx.drawImage(drawable, 0, 0, canvas.width, canvas.height);
-      return canvas.toDataURL('image/jpeg', 0.84);
+      return png ? canvas.toDataURL('image/png') : canvas.toDataURL('image/jpeg', 0.84);
     } catch (err) {
       return null;
     }
   };
 
+  const mayBeTransparent = (src) => !src || /^data:image\\/(png|gif|webp|svg)|\\.(png|gif|webp|svg|ico)(\\?|#|$)/i.test(src);
+
+  const SVG_ID = 'vs' + Math.random().toString(36).slice(2, 7);
+  let svgSeq = 0;
+  const URL_REF = /url\\((['"]?)[^'")]*#([^'")]+)\\1\\)/g;
+
+  /** Vector copy that is safe to inline into Vanta: no scripts/styles/handlers, unique ids, scales with its box. */
+  const vectorSvg = (svg, width, height) => {
+    // Work on the detached clone: sites with Trusted Types (YouTube) block DOMParser.
+    const root = svgClone(svg, width, height, true);
+    if (!root) return null;
+    for (const bad of Array.from(root.querySelectorAll('script, style, foreignObject, iframe, object, embed'))) bad.remove();
+    const seq = SVG_ID + '-' + (svgSeq++) + '-';
+    const ids = new Map();
+    for (const el of [root].concat(Array.from(root.querySelectorAll('[id]')))) {
+      const id = el.getAttribute('id');
+      if (!id) continue;
+      ids.set(id, seq + id);
+      el.setAttribute('id', seq + id);
+    }
+    for (const el of [root].concat(Array.from(root.querySelectorAll('*')))) {
+      for (const attr of Array.from(el.attributes)) {
+        const name = attr.name.toLowerCase();
+        const value = attr.value;
+        if (name.indexOf('on') === 0) { el.removeAttribute(attr.name); continue; }
+        if (name === 'href' || name === 'xlink:href') {
+          if (/^\\s*javascript:/i.test(value)) { el.removeAttribute(attr.name); continue; }
+          if (value.charAt(0) === '#' && ids.has(value.slice(1))) el.setAttribute(attr.name, '#' + ids.get(value.slice(1)));
+          continue;
+        }
+        if (value.indexOf('url(') >= 0) {
+          el.setAttribute(attr.name, value.replace(URL_REF, (match, quote, id) => (ids.has(id) ? 'url(#' + ids.get(id) + ')' : match)));
+        }
+      }
+    }
+    return new XMLSerializer().serializeToString(root);
+  };
+
+  const svgDataUrl = (xml) => {
+    try {
+      return 'data:image/svg+xml;base64,' + btoa(unescape(encodeURIComponent(xml)));
+    } catch (err) {
+      return 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(xml);
+    }
+  };
+
+  /** Material / Google icon fonts that Vanta can load, so glyphs stay live icons instead of pixels. */
+  const ICON_FONT_MAP = [
+    [/^google symbols$/i, 'Material Symbols Outlined'],
+    [/^material symbols (outlined|rounded|sharp)$/i, null],
+    [/^google material icons$/i, 'Material Icons'],
+    [/^material icons( (outlined|round|sharp|two tone))?$/i, null]
+  ];
+  const loadableIconFont = (family) => {
+    for (const [pattern, mapped] of ICON_FONT_MAP) {
+      if (pattern.test(family)) return mapped || family;
+    }
+    return '';
+  };
+
+  /** Standalone copy of an inline <svg>: computed colors baked in (currentColor, CSS classes) and <use> sprites inlined. */
+  const serializeSvg = (svg, width, height) => {
+    const clone = svgClone(svg, width, height, false);
+    return clone ? new XMLSerializer().serializeToString(clone) : null;
+  };
+
+  const svgClone = (svg, width, height, scalable) => {
+    const clone = svg.cloneNode(true);
+    const sources = [svg].concat(Array.from(svg.querySelectorAll('*')));
+    const targets = [clone].concat(Array.from(clone.querySelectorAll('*')));
+    sources.forEach((source, index) => {
+      const target = targets[index];
+      if (!target || !target.setAttribute) return;
+      const cs = window.getComputedStyle(source);
+      let css = '';
+      for (const prop of SVG_PROPS) {
+        const value = cs.getPropertyValue(prop);
+        if (value) css += prop + ':' + value + ';';
+      }
+      target.setAttribute('style', css);
+    });
+    const defs = document.createElementNS('http://www.w3.org/2000/svg', 'defs');
+    const inlined = new Set();
+    for (const use of Array.from(clone.querySelectorAll('use'))) {
+      const href = use.getAttribute('href') || use.getAttribute('xlink:href') || '';
+      if (!href) continue;
+      if (href.charAt(0) !== '#') return null;
+      const id = href.slice(1);
+      if (inlined.has(id) || clone.querySelector('[id="' + id.replace(/"/g, '') + '"]')) continue;
+      const scope = svg.getRootNode && svg.getRootNode();
+      const ref = (scope && scope.getElementById && scope.getElementById(id)) || document.getElementById(id);
+      if (!ref) return null;
+      defs.appendChild(ref.cloneNode(true));
+      inlined.add(id);
+    }
+    if (defs.childNodes.length) clone.insertBefore(defs, clone.firstChild);
+    clone.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
+    clone.setAttribute('xmlns:xlink', 'http://www.w3.org/1999/xlink');
+    if (scalable) {
+      // Keep the page's coordinate space so the vector scales with its layer.
+      if (!clone.getAttribute('viewBox')) {
+        const vb = svg.viewBox && svg.viewBox.baseVal;
+        const w = vb && vb.width ? vb.width : Math.max(1, width);
+        const h = vb && vb.height ? vb.height : Math.max(1, height);
+        clone.setAttribute('viewBox', (vb ? vb.x : 0) + ' ' + (vb ? vb.y : 0) + ' ' + w + ' ' + h);
+      }
+      clone.setAttribute('width', '100%');
+      clone.setAttribute('height', '100%');
+      const style = clone.getAttribute('style') || '';
+      clone.setAttribute('style', style + 'display:block;overflow:visible;');
+    } else {
+      clone.setAttribute('width', String(Math.max(1, Math.round(width))));
+      clone.setAttribute('height', String(Math.max(1, Math.round(height))));
+    }
+    return clone;
+  };
+
   const rasterize = async (entry) => {
     const el = entry.el;
-    if (el && el.tagName === 'CANVAS') {
-      try { return el.toDataURL('image/jpeg', 0.84); } catch (err) { return null; }
+    const tag = el ? String(el.tagName || '').toUpperCase() : '';
+    if (tag === 'CANVAS') {
+      try { return el.toDataURL('image/png'); } catch (err) { return null; }
     }
-    if (el && el.tagName === 'IMG') {
-      const drawn = drawToData(el, entry.w, entry.h);
+    if (tag === 'IMG') {
+      if (!el.complete || !el.naturalWidth) return null;
+      const drawn = drawToData(el, entry.w, entry.h, mayBeTransparent(entry.src));
       if (drawn) return drawn;
     }
-    if (el && el.tagName === 'SVG') {
+    if (tag === 'SVG') {
       try {
-        const clone = el.cloneNode(true);
-        clone.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
-        clone.setAttribute('width', String(Math.max(1, Math.round(entry.w))));
-        clone.setAttribute('height', String(Math.max(1, Math.round(entry.h))));
-        const xml = new XMLSerializer().serializeToString(clone);
+        const xml = serializeSvg(el, entry.w, entry.h);
+        if (!xml) return null;
         const img = new Image();
         const href = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(xml);
         await new Promise((resolve, reject) => { img.onload = resolve; img.onerror = reject; img.src = href; });
-        return drawToData(img, entry.w, entry.h);
+        return drawToData(img, entry.w, entry.h, true);
       } catch (err) {
         return null;
       }
@@ -490,8 +923,22 @@ export const SNAPSHOT_SCRIPT = `
     return urlToData(entry.src);
   };
 
+  /** Viewport rect plus scroll, so the app can scroll to below-the-fold crops. */
+  const shotOf = (entry) => ({
+    x: Math.round(entry.node.absX),
+    y: Math.round(entry.node.absY),
+    width: Math.round(entry.w),
+    height: Math.round(entry.h),
+    sx: window.scrollX,
+    sy: window.scrollY,
+    fixed: entry.host ? inFixed(entry.host) : false
+  });
+
   const resolveImages = async (gen) => {
     const jobs = rasters.slice(0, MAX_IMAGES);
+    for (const entry of rasters.slice(MAX_IMAGES)) {
+      if (!entry.background) entry.node.shot = shotOf(entry);
+    }
     let cursor = 0;
     const worker = async () => {
       while (cursor < jobs.length) {
@@ -500,22 +947,55 @@ export const SNAPSHOT_SCRIPT = `
         const data = await rasterize(entry);
         if (gen !== state.generation) return;
         if (data) {
-          if (entry.background) entry.node.fill = { type: 'image', dataUrl: data };
-          else {
-            entry.node.kind = 'image';
-            entry.node.fill = { type: 'image', dataUrl: data };
-          }
-        } else if (!entry.background) {
-          entry.node.shot = {
-            x: Math.round(entry.node.absX),
-            y: Math.round(entry.node.absY),
-            width: Math.round(entry.w),
-            height: Math.round(entry.h)
-          };
+          if (!entry.background) entry.node.kind = 'image';
+          entry.node.fill = { type: 'image', dataUrl: data };
+          continue;
         }
+        const remote = entry.src && /^https?:/i.test(absUrl(entry.src)) ? absUrl(entry.src) : '';
+        if (remote) {
+          entry.node.fetchSrc = remote;
+          if (entry.background) entry.node.fetchBg = true;
+        }
+        if (!entry.background) entry.node.shot = shotOf(entry);
       }
     };
     await Promise.all([worker(), worker(), worker(), worker()]);
+  };
+
+  /** Lazy images and IntersectionObserver content only load once scrolled into view. */
+  const prime = async (el) => {
+    const imgs = el.querySelectorAll ? Array.from(el.querySelectorAll('img')) : [];
+    if (el.tagName === 'IMG') imgs.push(el);
+    for (const img of imgs) {
+      if (img.loading === 'lazy') img.loading = 'eager';
+    }
+    const rect = rectOf(el);
+    const vh = window.innerHeight || 800;
+    const startX = window.scrollX;
+    const startY = window.scrollY;
+    const scroller = document.scrollingElement || document.documentElement;
+    const canScroll = scroller && scroller.scrollHeight > vh + 4;
+    const offscreen = rect.y + rect.height > vh + 4 || rect.y < -4;
+    if (canScroll && offscreen) {
+      hud.textContent = 'Loading page…';
+      const top = Math.max(0, rect.y + startY - 40);
+      const bottom = rect.y + startY + rect.height;
+      let y = top;
+      for (let step = 0; y < bottom && step < 16; step++) {
+        window.scrollTo(startX, y);
+        await sleep(90);
+        y += vh * 0.85;
+      }
+      window.scrollTo(startX, startY);
+      await sleep(80);
+    }
+    const pending = imgs.filter((img) => (img.currentSrc || img.src) && (!img.complete || !img.naturalWidth));
+    if (pending.length) {
+      await Promise.race([
+        Promise.all(pending.map((img) => (img.decode ? img.decode().catch(() => undefined) : undefined))),
+        sleep(offscreen ? 1200 : 450)
+      ]);
+    }
   };
 
   const chain = (el) => {
@@ -578,11 +1058,19 @@ export const SNAPSHOT_SCRIPT = `
     count = 0;
     rasters.length = 0;
     try {
+      box.style.display = 'none';
+      label.style.display = 'none';
+      await prime(el);
+      if (gen !== state.generation) return;
+      hud.textContent = 'Capturing…';
       const tree = buildOne(el, 0);
       if (!tree) throw new Error('Nothing visible to snapshot');
       await resolveImages(gen);
       if (gen !== state.generation) return;
+      tree.children = (tree.children || []).map(collapse);
       finalize(tree, tree.absX, tree.absY);
+      // Screenshot fallbacks are cropped from the live page, so the highlight must not be in them.
+      root.style.display = 'none';
       state.result = tree;
     } catch (err) {
       if (gen === state.generation) state.error = (err && err.message) || 'Snapshot failed';
@@ -647,11 +1135,13 @@ export const SNAPSHOT_SCRIPT = `
 
   window[NS] = {
     ready: true,
+    version: VERSION,
     enable() {
       state.enabled = true;
       state.cancel = false;
       state.result = null;
       state.error = '';
+      root.style.display = '';
       mount();
       document.documentElement.style.cursor = 'crosshair';
       if (window.__vantaMesurer && window.__vantaMesurer.disable) window.__vantaMesurer.disable();
@@ -676,6 +1166,14 @@ export const SNAPSHOT_SCRIPT = `
       box.style.display = 'none';
       label.style.display = 'none';
       if (root.parentNode) root.parentNode.removeChild(root);
+      if (state.bound) {
+        window.removeEventListener('mousemove', onMove, true);
+        window.removeEventListener('pointerdown', onPointerDown, true);
+        window.removeEventListener('mousedown', onPointerDown, true);
+        window.removeEventListener('click', onPointerDown, true);
+        window.removeEventListener('keydown', onKey, true);
+        state.bound = false;
+      }
     },
     consume() {
       if (state.cancel) {
@@ -693,7 +1191,137 @@ export const SNAPSHOT_SCRIPT = `
         return { status: 'ready', tree, cssWidth: window.innerWidth, cssHeight: window.innerHeight };
       }
       return null;
+    },
+    /** Programmatic capture for MCP / agents (same pipeline as click Snapshot). */
+    async captureSelector(selector, allowFallback) {
+      const list = Array.isArray(selector) ? selector : [selector];
+      const isSnapshotable = (node) => {
+        if (!node || node === root || (node.closest && node.closest('[data-vanta-snapshot]'))) return false;
+        if (SKIP[node.tagName]) return false;
+        const style = window.getComputedStyle(node);
+        if (!style || style.display === 'none' || style.visibility === 'hidden') return false;
+        if (style.display === 'contents') return false;
+        const rect = rectOf(node);
+        return rect.width >= 1 && rect.height >= 1;
+      };
+      // Prefer tall rails/panels over wide short bars (mastheads) when auto-picking.
+      const snapScore = (node) => {
+        const r = rectOf(node);
+        const h = Math.max(0, r.height);
+        const w = Math.max(0, r.width);
+        return h * h * Math.min(w, 420);
+      };
+      const largestVisible = (rootEl) => {
+        if (!rootEl) return null;
+        let best = isSnapshotable(rootEl) ? rootEl : null;
+        let bestScore = best ? snapScore(best) : 0;
+        const kids = rootEl.children ? Array.from(rootEl.children) : [];
+        for (const kid of kids) {
+          if (!isSnapshotable(kid)) continue;
+          const score = snapScore(kid);
+          if (score > bestScore) {
+            best = kid;
+            bestScore = score;
+          }
+        }
+        return best;
+      };
+      let el = null;
+      let used = '';
+      for (const sel of list) {
+        if (!sel || typeof sel !== 'string') continue;
+        let candidate = null;
+        try {
+          candidate = document.querySelector(sel);
+        } catch {
+          candidate = null;
+        }
+        if (!candidate) continue;
+        if (isSnapshotable(candidate)) {
+          el = candidate;
+          used = sel;
+          break;
+        }
+        // Hidden drawers / zero-size shells: prefer the tallest useful descendant.
+        let bestChild = null;
+        let bestScore = 0;
+        const nested = candidate.querySelectorAll('*');
+        for (const node of nested) {
+          if (!isSnapshotable(node)) continue;
+          const r = rectOf(node);
+          if (r.width * r.height < 80 * 80) continue;
+          const score = snapScore(node);
+          if (score <= bestScore) continue;
+          bestChild = node;
+          bestScore = score;
+        }
+        if (bestChild) {
+          el = bestChild;
+          used = sel + ' (visible child)';
+          break;
+        }
+      }
+      if (!el && allowFallback) {
+        el = largestVisible(document.body) || largestVisible(document.documentElement);
+        used = el ? 'auto:largest-visible' : '';
+      }
+      if (!el) {
+        return {
+          status: 'error',
+          message:
+            'No visible element to snapshot (page may still be loading, or the target is hidden)'
+        };
+      }
+      state.cancel = false;
+      state.error = '';
+      state.result = null;
+      await capture(el);
+      if (state.error) {
+        const message = state.error;
+        state.error = '';
+        return { status: 'error', message };
+      }
+      if (!state.result) return { status: 'error', message: 'Snapshot produced nothing' };
+      const tree = state.result;
+      state.result = null;
+      return {
+        status: 'ready',
+        tree,
+        selector: used,
+        cssWidth: window.innerWidth,
+        cssHeight: window.innerHeight
+      };
+    },
+    async capturePoint(x, y) {
+      const el = pick(Number(x) || 0, Number(y) || 0);
+      if (!el) return { status: 'error', message: 'No element at point' };
+      state.cancel = false;
+      state.error = '';
+      state.result = null;
+      await capture(el);
+      if (state.error) {
+        const message = state.error;
+        state.error = '';
+        return { status: 'error', message };
+      }
+      if (!state.result) return { status: 'error', message: 'Snapshot produced nothing' };
+      const tree = state.result;
+      state.result = null;
+      return {
+        status: 'ready',
+        tree,
+        cssWidth: window.innerWidth,
+        cssHeight: window.innerHeight
+      };
     }
   };
 })();
 `
+
+const hashText = (text: string): string => {
+  let hash = 5381
+  for (let i = 0; i < text.length; i++) hash = ((hash << 5) + hash + text.charCodeAt(i)) | 0
+  return (hash >>> 0).toString(36)
+}
+
+export const SNAPSHOT_SCRIPT = SNAPSHOT_SOURCE.replace('__SNAPSHOT_VERSION__', hashText(SNAPSHOT_SOURCE))

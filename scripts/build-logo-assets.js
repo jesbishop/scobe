@@ -119,6 +119,34 @@ function placeOnSquare(inkPng, size, { bg = [0, 0, 0, 255], ink = [255, 255, 255
   return out
 }
 
+/** Squircle-ish app-icon corners: fades alpha outside a rounded square, antialiased with 4×4 supersampling. */
+function roundCorners(png, radiusRatio = 0.225) {
+  const size = png.width
+  const r = size * radiusRatio
+  const coverage = (px, py) => {
+    let inside = 0
+    for (let sy = 0; sy < 4; sy++) {
+      for (let sx = 0; sx < 4; sx++) {
+        const x = px + (sx + 0.5) / 4
+        const y = py + (sy + 0.5) / 4
+        const cx = Math.min(Math.max(x, r), size - r)
+        const cy = Math.min(Math.max(y, r), size - r)
+        if ((x - cx) ** 2 + (y - cy) ** 2 <= r * r) inside++
+      }
+    }
+    return inside / 16
+  }
+  for (let y = 0; y < png.height; y++) {
+    for (let x = 0; x < png.width; x++) {
+      const nearCorner = (x < r || x >= size - r) && (y < r || y >= size - r)
+      if (!nearCorner) continue
+      const idx = (png.width * y + x) << 2
+      png.data[idx + 3] = Math.round(png.data[idx + 3] * coverage(x, y))
+    }
+  }
+  return png
+}
+
 function pngToDataUri(png) {
   return `data:image/png;base64,${PNG.sync.write(png).toString('base64')}`
 }
@@ -161,8 +189,8 @@ writePng(path.join(assets, 'vanta-logo-white.png'), wordmarkWhite)
 writePng(path.join(assets, 'vanta-mark.png'), mark)
 writePng(path.join(assets, 'vanta-mark-white.png'), markWhite)
 
-const icon256 = placeOnSquare(markWhite, 256, { bg: [0, 0, 0, 255], ink: [255, 255, 255, 255], margin: 0.2 })
-const icon32 = placeOnSquare(markWhite, 32, { bg: [0, 0, 0, 255], ink: [255, 255, 255, 255], margin: 0.18 })
+const icon256 = roundCorners(placeOnSquare(markWhite, 256, { bg: [0, 0, 0, 255], ink: [255, 255, 255, 255], margin: 0.2 }))
+const icon32 = roundCorners(placeOnSquare(markWhite, 32, { bg: [0, 0, 0, 255], ink: [255, 255, 255, 255], margin: 0.18 }))
 writePng(path.join(resources, 'icon.png'), icon256)
 writePng(path.join(pub, 'favicon.png'), icon256)
 writePng(path.join(pub, 'favicon-32.png'), icon32)

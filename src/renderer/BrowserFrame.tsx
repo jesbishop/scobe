@@ -1,14 +1,15 @@
 import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react'
 import { FRAME_CHROME_HEIGHT, MIN_VIEWPORT, type BrowserFrame as Frame, type BrowserTab } from '../shared/types'
-import { normalizeUrl } from '../shared/url'
 import { TabFavicon } from './tabFavicon'
+import { UrlOmnibox } from './UrlOmnibox'
+import { recordVisit } from './urlHistory'
 
 type Handle = 'n' | 's' | 'e' | 'w' | 'ne' | 'nw' | 'se' | 'sw'
 
 type Props = {
   frame: Frame
   selected: boolean
-  onSelect: () => void
+  onSelect: (additive?: boolean) => void
   onChange: (patch: Partial<Frame>) => void
   onNavigate: (tabId: string, url: string) => void
   onBack: (tabId: string) => void
@@ -20,6 +21,8 @@ type Props = {
   onCloseTab: (tabId: string) => void
   onHole: (el: HTMLDivElement | null) => void
   onInteractEnd: () => void
+  allTabs?: Array<{ id: string; windowId: string; title: string; url: string; favicon: string }>
+  onSwitchTab?: (windowId: string, tabId: string) => void
 }
 
 function nextRect(frame: Frame, handle: Handle, dx: number, dy: number): Partial<Frame> {
@@ -69,13 +72,25 @@ export function BrowserFrame({
   onActivateTab,
   onCloseTab,
   onHole,
-  onInteractEnd
+  onInteractEnd,
+  allTabs,
+  onSwitchTab
 }: Props) {
   const active = frame.tabs.find((tab) => tab.id === frame.activeTabId) || frame.tabs[0]
   const [draft, setDraft] = useState(active?.url || '')
   const live = useRef(frame)
   const dragging = useRef<{ kind: 'move' | Handle; x: number; y: number } | null>(null)
   live.current = frame
+  const openTabs = (allTabs && allTabs.length
+    ? allTabs
+    : frame.tabs.map((tab) => ({
+        id: tab.id,
+        windowId: frame.id,
+        title: tab.title,
+        url: tab.url,
+        favicon: tab.favicon
+      }))
+  ).filter((tab) => tab.id !== active?.id)
 
   useEffect(() => {
     setDraft(active?.url || '')
@@ -85,7 +100,7 @@ export function BrowserFrame({
     if (event.button !== 0) return
     event.stopPropagation()
     event.preventDefault()
-    onSelect()
+    onSelect(event.shiftKey)
     dragging.current = { kind, x: event.clientX, y: event.clientY }
     event.currentTarget.setPointerCapture(event.pointerId)
   }
@@ -122,7 +137,7 @@ export function BrowserFrame({
         height: frame.height + FRAME_CHROME_HEIGHT
       }}
       onPointerDown={(event) => {
-        if (event.button === 0) onSelect()
+        if (event.button === 0) onSelect(event.shiftKey)
       }}
     >
       <div className="tab-strip" onPointerDown={onPointerDown('move')} onPointerMove={onPointerMove} onPointerUp={onPointerUp}>
@@ -134,7 +149,7 @@ export function BrowserFrame({
             title={tab.url}
             onPointerDown={(event) => {
               event.stopPropagation()
-              onSelect()
+              onSelect(event.shiftKey)
               onActivateTab(tab.id)
             }}
           >
@@ -188,23 +203,33 @@ export function BrowserFrame({
         <button type="button" onPointerDown={(event) => event.stopPropagation()} onClick={() => onReload(active.id)}>
           ↻
         </button>
-        <input
+        <UrlOmnibox
           value={draft}
-          spellCheck={false}
-          onPointerDown={(event) => {
-            event.stopPropagation()
-            void window.vanta.focusShell()
+          onChange={setDraft}
+          openTabs={openTabs}
+          onSubmit={(url) => {
+            recordVisit({ url, title: '' })
+            onNavigate(active.id, url)
           }}
-          onMouseDown={(event) => event.stopPropagation()}
-          onChange={(event) => setDraft(event.target.value)}
-          onFocus={() => {
+          onSwitchTab={({ tabId, windowId }) => {
+            if (windowId && onSwitchTab) {
+              onSwitchTab(windowId, tabId)
+              return
+            }
+            onActivateTab(tabId)
+            const next = frame.tabs.find((tab) => tab.id === tabId)
+            if (next) setDraft(next.url)
+            void window.vanta.focus(tabId)
+          }}
+          onInputFocus={() => {
             onSelect()
             void window.vanta.focusShell()
           }}
-          onKeyDown={(event) => {
+          onInputPointerDown={(event) => {
             event.stopPropagation()
-            if (event.key === 'Enter') onNavigate(active.id, normalizeUrl(draft))
+            void window.vanta.focusShell()
           }}
+          onInputMouseDown={(event) => event.stopPropagation()}
         />
         <button type="button" title="Close window" onPointerDown={(event) => event.stopPropagation()} onClick={onCloseWindow}>
           ×

@@ -284,6 +284,11 @@ export type PadBand = {
   y: number
   width: number
   height: number
+  /** Padding on the two perpendicular sides, so the inner-edge line can span the whole frame. */
+  lead: number
+  trail: number
+  /** The frame hugs on this side's axis, so more padding pushes the outer edge out instead of the content in. */
+  grows: boolean
 }
 
 /** Padding strips for the selected auto-layout frame. The hit target stays on the inner edge so border resize handles stay usable. */
@@ -293,6 +298,14 @@ export function measurePaddingBands(nodes: DesignNode[], selectedIds: string[]):
   if (!frame || !isAutoLayout(frame)) return []
   const box = resolveWorldRect(frame, nodes)
   const pad = normalizePadding(frame.layout?.padding)
+  const kids = flowKids(nodes, frame.id)
+  const grid = Boolean(frame.layout?.grid)
+  const hugH =
+    frame.layout?.sizingH === 'hug' &&
+    (grid || !kids.some((kid) => kid.layoutSizingH === 'fill' || kid.layoutSizingH === 'relative'))
+  const hugV =
+    frame.layout?.sizingV === 'hug' &&
+    (grid || !kids.some((kid) => kid.layoutSizingV === 'fill' || kid.layoutSizingV === 'relative'))
   const top = box.y + pad.t
   const left = box.x + pad.l
   const right = box.x + box.width - pad.r
@@ -300,10 +313,10 @@ export function measurePaddingBands(nodes: DesignNode[], selectedIds: string[]):
   const innerW = Math.max(1, right - left)
   const innerH = Math.max(1, bottom - top)
   return [
-    { side: 't', value: pad.t, x: left, y: box.y, width: innerW, height: Math.max(0, pad.t) },
-    { side: 'r', value: pad.r, x: right, y: top, width: Math.max(0, pad.r), height: innerH },
-    { side: 'b', value: pad.b, x: left, y: bottom, width: innerW, height: Math.max(0, pad.b) },
-    { side: 'l', value: pad.l, x: box.x, y: top, width: Math.max(0, pad.l), height: innerH }
+    { side: 't', value: pad.t, x: left, y: box.y, width: innerW, height: Math.max(0, pad.t), lead: pad.l, trail: pad.r, grows: hugV },
+    { side: 'r', value: pad.r, x: right, y: top, width: Math.max(0, pad.r), height: innerH, lead: pad.t, trail: pad.b, grows: hugH },
+    { side: 'b', value: pad.b, x: left, y: bottom, width: innerW, height: Math.max(0, pad.b), lead: pad.l, trail: pad.r, grows: hugV },
+    { side: 'l', value: pad.l, x: box.x, y: top, width: Math.max(0, pad.l), height: innerH, lead: pad.t, trail: pad.b, grows: hugH }
   ]
 }
 

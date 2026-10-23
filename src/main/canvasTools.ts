@@ -1,10 +1,12 @@
 import { randomUUID } from 'node:crypto'
 import type { AutoLayout, DesignNode } from '../shared/types'
 import { DEFAULT_PAGE } from '../shared/types'
+import { importSnapshot } from '../shared/snapshot'
 import { chromeHost } from './chrome'
 import { addDesign, deleteDesign, getDesign, setDesign, updateDesign } from './designStore'
 import {
   defaultFrameLayout,
+  duplicateSelection,
   findContainingParent,
   resolveWorldRect,
   toRelative
@@ -23,6 +25,8 @@ export type BrowserGeometry = {
 export type CanvasToolContext = {
   openBrowser: (url: string) => Promise<string>
   resolveBrowserGeometry?: (browserId: string) => BrowserGeometry | null
+  /** Map window id / tab id → chrome page id (tab id). */
+  resolveChromeTabId?: (browserId: string) => string | null
   listBrowsers?: () => unknown
 }
 
@@ -231,7 +235,7 @@ export async function runCanvasTool(
         fill: String(input.fill || '#FFFFFF'),
         clipsContent: true,
         pageId: DEFAULT_PAGE.id,
-        layout: layout ?? (input.autoLayout === false ? { mode: 'none' } : defaultFrameLayout())
+        layout: layout ?? { mode: 'none' }
       },
       input.parentId != null ? String(input.parentId) : undefined
     )
@@ -406,55 +410,58 @@ export async function runCanvasTool(
     const nodes = getDesign()
     const source = nodes.find((item) => item.id === id)
     if (!source) throw new Error('Node not found')
-    const world = resolveWorldRect(source, nodes)
-    const copy: DesignNode = {
-      ...source,
-      id: randomUUID(),
-      x: world.x + 24,
-      y: world.y + 24,
-      parentId: undefined,
-      name: `${source.name || source.type} copy`
-    }
-    addDesign(copy)
-    return stage([copy.id], { content: JSON.stringify(copy) })
+    const result = duplicateSelection(nodes, [id])
+    if (!result) throw new Error('Duplicate failed')
+    setDesign(result.nodes)
+    const copy = result.nodes.find((item) => item.id === result.newIds[0])
+    return stage(result.newIds, { content: JSON.stringify(copy || null) })
   }
 
-  if (name === 'snapshot_browser_to_frame') {
-    const browserId = String(input.browserId || '')
-    const shot = await chromeHost.screenshot(browserId, { skipIdle: true })
-    const geom = ctx.resolveBrowserGeometry?.(browserId)
-    const width = Math.max(8, Number(input.width) || geom?.width || shot.width || 320)
-    const height = Math.max(8, Number(input.height) || geom?.height || shot.height || 200)
-    const x = input.x != null ? Number(input.x) : (geom?.x ?? 0) + (geom?.width ?? width) + 48
-    const y = input.y != null ? Number(input.y) : geom?.y ?? 0
-    const frameId = randomUUID()
-    const imageId = randomUUID()
-    const title = String(input.name || geom?.title || 'Screenshot')
-    const frame: DesignNode = {
-      id: frameId,
-      type: 'frame',
-      x,
-      y,
-      width,
-      height,
-      name: title,
-      fill: '#FFFFFF',
-      clipsContent: true,
-      layout: defaultFrameLayout()
+  if (name === 'snapshot_browser_to_frame' || name === 'snapshot_to_canvas') {
+    const rawId = String(input.browserId || input.id || '')
+    const tabId = ctx.resolveChromeTabId?.(rawId) || rawId
+    if (!tabId) throw new Error('Browser is not available')
+    const geom = ctx.resolveBrowserGeometry?.(rawId) || ctx.resolveBrowserGeometry?.(tabId)
+    const selectorInput = input.selector
+    const selectors =
+      typeof selectorInput === 'string'
+        ? [selectorInput]
+        : Array.isArray(selectorInput)
+          ? selectorInput.map(String)
+          : undefined
+    const captured = await chromeHost.captureSnapshot(tabId, {
+      selector: selectors,
+      x: input.pointX != null ? Number(input.pointX) : undefined,
+      y: input.pointY != null ? Number(input.pointY) : undefined
+    })
+    const placeX =
+      input.x != null
+        ? Number(input.x)
+        : (geom?.x ?? 0) + (geom?.width ?? (captured.tree.width || 320)) + 48
+    const placeY = input.y != null ? Number(input.y) : geom?.y ?? 0
+    if (input.name && typeof input.name === 'string' && input.name.trim()) {
+      captured.tree.name = input.name.trim().slice(0, 64)
     }
-    const image: DesignNode = {
-      id: imageId,
-      type: 'image',
-      x: 0,
-      y: 0,
-      width,
-      height,
-      parentId: frameId,
-      name: title,
-      imageDataUrl: shot.dataUrl
+    const imported = importSnapshot(
+      captured.tree,
+      { x: placeX, y: placeY, pageId: DEFAULT_PAGE.id },
+      () => randomUUID()
+    )
+    if (!imported.nodes.length || !imported.rootId) {
+      throw new Error('Snapshot had nothing to paste onto the canvas')
     }
-    setDesign([...getDesign(), frame, image])
-    return stage([frameId, imageId], { content: JSON.stringify({ frame, imageId }) })
+    setDesign([...getDesign(), ...imported.nodes])
+    emitBuild({ type: 'ui:set-page', pageId: DEFAULT_PAGE.id })
+    return stage(imported.nodes.map((node) => node.id), {
+      content: JSON.stringify({
+        rootId: imported.rootId,
+        nodeCount: imported.nodes.length,
+        selector: captured.selector || null,
+        name: captured.tree.name,
+        x: placeX,
+        y: placeY
+      })
+    })
   }
 
   if (name === 'finish_working_on_nodes') {

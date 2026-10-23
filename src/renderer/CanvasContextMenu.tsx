@@ -184,11 +184,14 @@ export function CanvasContextMenu({
                 <span>Copy as PNG</span>
                 <kbd>Ctrl + Shift + C</kbd>
               </button>
+              <div className="ctx-divider" role="separator" />
               <button type="button" className="ctx-item" onClick={run(onCopyAsTailwind)}>
                 <span>Copy as Tailwind</span>
+                <kbd>Alt + T</kbd>
               </button>
               <button type="button" className="ctx-item" onClick={run(onCopyAsReact)}>
                 <span>Copy as React CSS</span>
+                <kbd>Alt + R</kbd>
               </button>
             </div>
           )}

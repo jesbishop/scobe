@@ -1,9 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import KeyboardArrowDownIcon from '@mui/icons-material/KeyboardArrowDown'
-import StraightenIcon from '@mui/icons-material/Straighten'
-import CenterFocusStrongIcon from '@mui/icons-material/CenterFocusStrong'
-import GridOnIcon from '@mui/icons-material/GridOn'
-import PhotoCameraOutlinedIcon from '@mui/icons-material/PhotoCameraOutlined'
+import { CenterFocusStrongIcon, FullscreenExitIcon, FullscreenIcon, GridOnIcon, KeyboardArrowDownIcon, PhotoCameraOutlinedIcon, StraightenIcon } from './lucideIcons'
 import { ALL_FRAME_PRESETS, DEVICE_PRESETS } from '../shared/framePresets'
 import { IconCode, IconDesktop, IconMenu, IconPhone, IconSparkle, IconTablet } from './icons'
 
@@ -48,7 +44,9 @@ export function FrameActionBar({
   onConvert,
   onResize,
   snapshot,
-  measure
+  measure,
+  dock,
+  onChromeChange
 }: {
   id: string
   width: number
@@ -75,6 +73,11 @@ export function FrameActionBar({
     onInspect: () => void
     onXray: () => void
   }
+  dock?: {
+    active: boolean
+    onToggle: () => void
+  }
+  onChromeChange?: () => void
 }) {
   const [open, setOpen] = useState(false)
   const [editing, setEditing] = useState(false)
@@ -100,10 +103,28 @@ export function FrameActionBar({
     return () => window.removeEventListener('mousedown', onDown)
   }, [open])
 
+  useEffect(() => {
+    onChromeChange?.()
+    const frame = requestAnimationFrame(() => onChromeChange?.())
+    return () => cancelAnimationFrame(frame)
+  }, [open, anchor, onChromeChange])
+
   if (!anchor || anchor.width < 8) return null
 
-  const top = anchor.top - offset
-  const left = anchor.left + anchor.width / 2
+  const topRaw = anchor.top - offset
+  const leftRaw = anchor.left + anchor.width / 2
+  // Keep the bar in the canvas band so it never covers sidebars or file tabs.
+  const leftPanel = document.querySelector('.leftbar-panel:not(.is-collapsed)')?.getBoundingClientRect()
+  const leftRail = document.querySelector('.leftbar')?.getBoundingClientRect()
+  const rightPane = document.querySelector('.rightbar:not(.is-collapsed)')?.getBoundingClientRect()
+  const tabs = document.querySelector('.file-tabs')?.getBoundingClientRect()
+  const half = 180
+  const minLeft = (leftPanel && leftPanel.width > 2 ? leftPanel.right : leftRail?.right ?? 0) + half + 8
+  const maxLeft =
+    (rightPane && rightPane.width > 2 ? rightPane.left : window.innerWidth) - half - 8
+  const minTop = (tabs?.bottom ?? 0) + 4
+  const left = maxLeft > minLeft ? Math.min(maxLeft, Math.max(minLeft, leftRaw)) : leftRaw
+  const top = Math.max(minTop, topRaw)
   const categories = Array.from(new Set(presets.map((preset) => preset.category)))
 
   const sizeMenu = open && showDevice && (
@@ -268,6 +289,26 @@ export function FrameActionBar({
             >
               <PhotoCameraOutlinedIcon sx={{ fontSize: 16 }} />
               <span>Snapshot</span>
+            </button>
+          </>
+        )}
+        {dock && (
+          <>
+            <span className="frame-action-divider" aria-hidden />
+            <button
+              type="button"
+              className={`frame-action-icon${dock.active ? ' is-on' : ''}`}
+              title={dock.active ? 'Close left panel' : 'Open on left'}
+              aria-label={dock.active ? 'Close left panel' : 'Open tab on left'}
+              aria-pressed={dock.active}
+              onPointerDown={(event) => event.stopPropagation()}
+              onClick={(event) => {
+                event.preventDefault()
+                event.stopPropagation()
+                dock.onToggle()
+              }}
+            >
+              {dock.active ? <FullscreenExitIcon sx={{ fontSize: 18 }} /> : <FullscreenIcon sx={{ fontSize: 18 }} />}
             </button>
           </>
         )}

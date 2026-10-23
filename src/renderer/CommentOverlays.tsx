@@ -1,12 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react'
-import SentimentSatisfiedAltIcon from '@mui/icons-material/SentimentSatisfiedAlt'
-import AlternateEmailIcon from '@mui/icons-material/AlternateEmail'
-import ImageOutlinedIcon from '@mui/icons-material/ImageOutlined'
-import ArrowUpwardIcon from '@mui/icons-material/ArrowUpward'
-import CheckIcon from '@mui/icons-material/Check'
-import CloseIcon from '@mui/icons-material/Close'
-import MoreHorizIcon from '@mui/icons-material/MoreHoriz'
-import SearchIcon from '@mui/icons-material/Search'
+import { AlternateEmailIcon, ArrowUpwardIcon, CheckIcon, CloseIcon, ImageOutlinedIcon, MoreHorizIcon, SearchIcon, SentimentSatisfiedAltIcon } from './lucideIcons'
 import type { Camera, DesignNode } from '../shared/types'
 import {
   COMMENT_PEOPLE,

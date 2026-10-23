@@ -1,19 +1,48 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent } from 'react'
+import { AnimatePresence, motion, useReducedMotion } from 'motion/react'
 import { BrowserFrame } from './BrowserFrame'
 import { CanvasToolbar } from './CanvasToolbar'
 import { DesignLayer } from './DesignLayer'
 import { CommentCursor, CommentResolveToast, CommentThreadCard, CURRENT_USER } from './CommentOverlays'
 import { CommentsPanel } from './CommentsPanel'
-import { MeasureOverlay } from './MeasureOverlay'
+import { MeasureOverlay, type MeasureTitle } from './MeasureOverlay'
 import { AlignGuidesOverlay } from './AlignGuidesOverlay'
 import { alignNodes, snapMove, snapTargets, type AlignAction, type AlignGuide } from './alignGuides'
 import { applyFramePadding, applyLayoutAlignment, applySelectionGap } from './selectionSpace'
-import { distanceMeasurements, hitTestRect, sizeMeasurements } from './measureMath'
+import {
+  distanceMeasurements,
+  edgePoint,
+  hitTestMeasureLine,
+  measurementBetweenAnchors,
+  nearestEdge,
+  offsetMeasureLine,
+  sizeMeasurements,
+  type MeasureAnchor,
+  type MeasureLine
+} from './measureMath'
 import { clampZoom, fitFrames, intersectRects, nodeBounds, rectContains, rectsOverlap, scaleNodeAround, screenToWorld, wheelPan, wheelZoomFactor, worldToScreen, zoomAt } from './canvasMath'
-import { ChatBrowserPanel, ChatWorkspace, createChatSession, type ChatSession } from './ChatView'
-import { FileTabs, HomeScreen, LeftSidebar, RightSidebar, type LayerItem, type ProjectFile, type RailTab } from './shell'
+import { resolvePageFill } from './colorMath'
+import { ChatAgentsPopout, ChatWorkspace, createChatSession, type ChatSession } from './ChatView'
+import { CreateSvgPanel, expandCutoutAlpha, rasterizeToPngDataUrl, sampleImageColors, shrinkImageDataUrl, svgToDataUrl, type CreateSvgMenuAction } from './CreateSvgPanel'
+import { explodeSvgToNodes, fitSvgMarkup, normalizeSvgMarkup } from './svgExplode'
+import type { QuiverGenerateInput, QuiverModelId } from '../shared/quiver'
+
+function isQuiverCancelMessage(message?: string | null): boolean {
+  const text = (message || '').trim().toLowerCase()
+  if (!text) return false
+  return (
+    text === 'cancelled' ||
+    text === 'canceled' ||
+    text === 'aborted' ||
+    text.includes('terminat') ||
+    text.includes('abort')
+  )
+}
+import { useJev } from './useJev'
+import { FileTabs, HomeScreen, LeftSidebar, NewTabScreen, RightSidebar, type LayerItem, type ProjectFile, type RailTab } from './shell'
 import { FrameActionBar } from './FrameBar'
 import { loadCodingAgents, rememberCodingAgent } from './codingAgents'
+import { recordVisit } from './urlHistory'
 import {
   findTextPathTarget,
   isTextOnPath,
@@ -24,6 +53,7 @@ import {
 import {
   DEFAULT_PAGE,
   DEFAULT_VIEWPORT,
+  FRAME_CHROME_HEIGHT,
   MIN_VIEWPORT,
   type AgentEvent,
   type BrowserFrame as Frame,
@@ -40,22 +70,39 @@ import {
   type ShapeKind,
   type SwitchMode
 } from '../shared/types'
-import { CHAT_BROWSER_HOME, CHAT_BROWSER_ID, getCodingAgentMeta, SIDEBAR_BROWSER_ID, type CodingAgentId } from '../shared/codingAgents'
+import { CHAT_BROWSER_ID, AGENT_SIDE_BROWSER_HOME, AGENT_SIDE_BROWSER_IDS, AGENT_SIDE_BROWSER_MAX, getCodingAgentMeta, SIDEBAR_BROWSER_ID, type AgentSideBrowserSlot, type CodingAgentId, type DockedTabRef } from '../shared/codingAgents'
 import { importSnapshot, type SnapshotNode } from '../shared/snapshot'
 import { nextCommentNumber } from '../shared/comments'
 import type { FramePreset } from '../shared/framePresets'
 import { CanvasContextMenu, type ContextMenuState } from './CanvasContextMenu'
-import { copyNodeAsPng } from './exportNode'
+import { LayerSidebarMenu, type LayerMenuState } from './LayerSidebarMenu'
+import { copyNodeAsPng, renderPageThumbnailDataUrl } from './exportNode'
+import {
+  CropBar,
+  aspectRatioOf,
+  containRect,
+  coverRect,
+  scaleToZoom,
+  zoomToScale,
+  type CropAspect,
+  type CropRect
+} from './ImageCrop'
+import { nodesToReact } from './codeExport'
+import { remeasureText } from './textLayout'
 import {
   addOrWrapFlex,
   childrenOf,
-  defaultFrameLayout,
   duplicateSelection,
+  enableAutoLayoutOnFrame,
   expandWithDescendants,
   findContainingParent,
   isAutoLayout,
+  hasWorldPoints,
   layersAtPoint,
+  marqueeSelectIds,
+  nodeIndexOf,
   pickDeepAtPoint,
+  planGrid,
   reflowAutoLayout,
   removeFlexFromSelection,
   reorderFlexByDelta,
@@ -65,6 +112,56 @@ import {
   toRelative,
   wrapSelectionInFrame
 } from '../shared/layoutEngine'
+import { applyConstraintsOnParentResize } from '../shared/constraints'
+import { defaultShader, getNodePaints, legacyFromPaints, SHADER_OPTIONS, type ShaderKind } from '../shared/paint'
+
+function findMeasureAnchorAt(
+  point: { x: number; y: number },
+  nodes: DesignNode[],
+  threshold: number
+): MeasureAnchor | null {
+  let best: { anchor: MeasureAnchor; depth: number; dist: number } | null = null
+  for (const node of nodes) {
+    if (node.type === 'comment') continue
+    const box = resolveWorldRect(node, nodes)
+    const edge = nearestEdge(box, point, threshold)
+    if (!edge) continue
+    const pt = edgePoint(box, edge)
+    let depth = 0
+    let parentId = node.parentId
+    while (parentId) {
+      depth += 1
+      parentId = nodes.find((item) => item.id === parentId)?.parentId
+    }
+    const dist =
+      edge === 'n' || edge === 's' ? Math.abs(point.y - pt.y) : Math.abs(point.x - pt.x)
+    if (
+      !best ||
+      depth > best.depth ||
+      (depth === best.depth && dist < best.dist)
+    ) {
+      best = { anchor: { nodeId: node.id, edge, x: pt.x, y: pt.y }, depth, dist }
+    }
+  }
+  return best?.anchor || null
+}
+
+function freeMeasureAnchor(start: MeasureAnchor, point: { x: number; y: number }): MeasureAnchor {
+  if (start.edge === 'e' || start.edge === 'w') {
+    return {
+      nodeId: '__free__',
+      edge: start.edge === 'e' ? 'w' : 'e',
+      x: point.x,
+      y: start.y
+    }
+  }
+  return {
+    nodeId: '__free__',
+    edge: start.edge === 's' ? 'n' : 's',
+    x: start.x,
+    y: point.y
+  }
+}
 
 function attachToParent(node: DesignNode, nodes: DesignNode[]): DesignNode {
   const width = Math.max(1, node.width || (node.type === 'text' ? 40 : 1))
@@ -77,7 +174,32 @@ function attachToParent(node: DesignNode, nodes: DesignNode[]): DesignNode {
   return { ...node, parentId: parent.id, x: rel.x, y: rel.y }
 }
 
+/** Remap a stroke's world-space points (and bezier handles) from one box onto another. */
+function scalePathPoints(
+  node: DesignNode,
+  from: { x: number; y: number; width: number; height: number },
+  to: { x: number; y: number; width: number; height: number }
+): DesignNode {
+  const sx = from.width > 0 ? to.width / from.width : 1
+  const sy = from.height > 0 ? to.height / from.height : 1
+  const mapX = (value: number) => to.x + (value - from.x) * sx
+  const mapY = (value: number) => to.y + (value - from.y) * sy
+  return {
+    ...node,
+    points: node.points?.map((point) => ({
+      ...point,
+      x: mapX(point.x),
+      y: mapY(point.y),
+      inX: point.inX != null ? mapX(point.inX) : undefined,
+      inY: point.inY != null ? mapY(point.inY) : undefined,
+      outX: point.outX != null ? mapX(point.outX) : undefined,
+      outY: point.outY != null ? mapY(point.outY) : undefined
+    }))
+  }
+}
+
 function reparentMovedNode(node: DesignNode, nodes: DesignNode[], exclude: Set<string>): DesignNode {
+  if (hasWorldPoints(node)) return node
   const world = resolveWorldRect(node, nodes)
   const center = { x: world.x + world.width / 2, y: world.y + world.height / 2 }
   const parent = findContainingParent(center, nodes, exclude)
@@ -91,6 +213,15 @@ function reparentMovedNode(node: DesignNode, nodes: DesignNode[], exclude: Set<s
   return { ...node, parentId: parent.id, x: rel.x, y: rel.y }
 }
 
+// Main may broadcast its own reflow of a design we just sent; that echo must not replace the renderer's layout.
+let designSavesInFlight = 0
+function sendDesignToMain(nodes: DesignNode[]): void {
+  designSavesInFlight += 1
+  void window.vanta.setDesign(nodes).finally(() => {
+    designSavesInFlight -= 1
+  })
+}
+
 function reorderAutoLayoutChildren(nodes: DesignNode[], parentId: string): DesignNode[] {
   const parent = nodes.find((node) => node.id === parentId)
   if (!parent || !isAutoLayout(parent)) return nodes
@@ -100,11 +231,86 @@ function reorderAutoLayoutChildren(nodes: DesignNode[], parentId: string): Desig
   const sorted = [...kids].sort((a, b) => {
     const aw = resolveWorldRect(a, nodes)
     const bw = resolveWorldRect(b, nodes)
+    if (parent.layout?.grid) {
+      // Reading order: rows first, then columns.
+      const dy = aw.y + aw.height / 2 - (bw.y + bw.height / 2)
+      if (Math.abs(dy) > Math.min(aw.height, bw.height) / 2) return dy
+      return aw.x + aw.width / 2 - (bw.x + bw.width / 2)
+    }
     const ac = vertical ? aw.y + aw.height / 2 : aw.x + aw.width / 2
     const bc = vertical ? bw.y + bw.height / 2 : bw.x + bw.width / 2
     return ac - bc
   })
   return spliceChildren(nodes, parentId, sorted)
+}
+
+type CropSession = {
+  nodeId: string
+  paintIndex: number
+  /** Layer + whole design before cropping (Cancel restores, Apply records one undo step). */
+  before: DesignNode
+  designBefore: DesignNode[]
+  natural: { w: number; h: number }
+  src: string
+  aspect: CropAspect
+  frame: CropRect
+  image: CropRect
+}
+
+/** Items in the first line of a wrapping flex frame — cross-axis arrow keys jump a whole line. */
+function flexLineLength(nodes: DesignNode[], parent: DesignNode): number {
+  const vertical = parent.layout?.mode === 'vertical'
+  const kids = childrenOf(nodes, parent.id).filter((node) => !node.layoutAbsolute)
+  if (!kids.length) return 1
+  const cross = (node: DesignNode) => (vertical ? node.x : node.y)
+  const first = cross(kids[0])
+  let count = 0
+  for (const kid of kids) {
+    if (Math.abs(cross(kid) - first) > 1) break
+    count++
+  }
+  return Math.max(1, count)
+}
+
+/** Grid drop: the cell under the pointer becomes the insert index (row-major, Figma). */
+function measureGridDrop(
+  nodes: DesignNode[],
+  parent: DesignNode,
+  movingIds: string[],
+  pointer: { x: number; y: number },
+  dragSize: { width: number; height: number }
+): FlexDropGuide | null {
+  const layout = parent.layout!
+  const siblings = childrenOf(nodes, parent.id).filter((node) => !movingIds.includes(node.id) && !node.layoutAbsolute)
+  const plan = planGrid(layout, childrenOf(nodes, parent.id), parent, {
+    h: (layout.sizingH || 'fixed') !== 'hug',
+    v: (layout.sizingV || 'fixed') !== 'hug'
+  })
+  const world = resolveWorldRect(parent, nodes)
+  const localX = pointer.x - world.x
+  const localY = pointer.y - world.y
+  const trackAt = (starts: number[], sizes: number[], value: number) => {
+    let index = 0
+    for (let i = 0; i < starts.length; i++) if (value >= starts[i]) index = i
+    return { index, after: value > starts[index] + sizes[index] / 2 }
+  }
+  const col = trackAt(plan.colStarts, plan.colSizes, localX)
+  const row = trackAt(plan.rowStarts, plan.rowSizes, localY)
+  const index = Math.max(0, Math.min(siblings.length, row.index * plan.columns + col.index + (col.after ? 1 : 0)))
+  const edgeX = col.after ? plan.colStarts[col.index] + plan.colSizes[col.index] : plan.colStarts[col.index]
+  const cellY = plan.rowStarts[row.index]
+  return {
+    parentId: parent.id,
+    index,
+    axis: 'x',
+    line: { x: world.x + edgeX - 1, y: world.y + cellY, width: 2, height: Math.max(8, plan.rowSizes[row.index]) },
+    slot: {
+      x: world.x + plan.colStarts[col.index],
+      y: world.y + cellY,
+      width: Math.max(8, dragSize.width),
+      height: Math.max(8, dragSize.height)
+    }
+  }
 }
 
 function spliceChildren(nodes: DesignNode[], parentId: string, orderedKids: DesignNode[]): DesignNode[] {
@@ -161,6 +367,7 @@ function measureFlexDrop(
 ): FlexDropGuide | null {
   const parent = nodes.find((node) => node.id === parentId)
   if (!parent || !isAutoLayout(parent)) return null
+  if (parent.layout?.grid) return measureGridDrop(nodes, parent, movingIds, pointer, dragSize)
   const vertical = parent.layout?.mode === 'vertical'
   const siblings = childrenOf(nodes, parentId).filter(
     (node) => !movingIds.includes(node.id) && !node.layoutAbsolute
@@ -212,23 +419,188 @@ function measureFlexDrop(
     width: Math.max(8, dragSize.width),
     height: Math.max(8, dragSize.height)
   }
+  // Center the insert bar in the gap between siblings (or the leading padding at index 0).
+  const lead = vertical ? pad.t || 0 : pad.l || 0
+  const shift = index === 0 ? Math.min(lead, 8) / 2 : gap / 2
+  const along = index < sorted.length ? (vertical ? slot.y : slot.x) - shift : (vertical ? slot.y : slot.x) - gap / 2
   const line = vertical
     ? {
         x: parentWorld.x + (pad.l || 0),
-        y: slot.y,
+        y: along,
         width: Math.max(8, parentWorld.width - (pad.l || 0) - (pad.r || 0)),
-        height: 2
+        height: 0
       }
     : {
-        x: slot.x,
+        x: along,
         y: parentWorld.y + (pad.t || 0),
-        width: 2,
+        width: 0,
         height: Math.max(8, parentWorld.height - (pad.t || 0) - (pad.b || 0))
       }
   return { parentId, index, axis: vertical ? 'y' : 'x', line, slot }
 }
 
+/** Screen-space pixel grid: one cell per canvas pixel, fading in from 600% to 1000%. */
+function paintPixelGrid(el: HTMLDivElement, camera: Camera) {
+  const zoom = camera.zoom
+  const opacity = Math.max(0, Math.min(1, (zoom - 6) / 4))
+  if (!opacity) {
+    el.style.display = 'none'
+    return
+  }
+  el.style.display = 'block'
+  el.style.opacity = String(opacity)
+  el.style.backgroundSize = `${zoom}px ${zoom}px`
+  el.style.backgroundPosition = `${camera.x % zoom}px ${camera.y % zoom}px`
+}
+
 type ScreenRect = { x: number; y: number; width: number; height: number }
+
+/** Toolbar exits fully off-screen before agent fullscreen expands. */
+const TOOLBAR_FS_ENTER = { type: 'spring' as const, stiffness: 560, damping: 42, mass: 0.65 }
+const TOOLBAR_FS_EXIT = { duration: 0.14, ease: [0.4, 0, 1, 1] as [number, number, number, number] }
+/** Pause after agent collapses before the toolbar returns. */
+const TOOLBAR_FS_RETURN_DELAY_MS = 180
+
+/** Inspector popovers and menus that can float over the canvas. */
+const INSPECTOR_POPUP_SELECTOR = [
+  '.fill-picker',
+  '.fill-format-menu',
+  '.fx-pop',
+  '.fx-menu',
+  '.lg-popover',
+  '.lg-menu',
+  '.prop-blend-menu',
+  '.prop-constraint-menu',
+  '.prop-size-mode-menu',
+  '.prop-type-size-menu',
+  '.prop-font-menu',
+  '.prop-font-style-menu',
+  '.export-toast'
+].join(', ')
+
+/** Native BrowserViews paint above HTML — clip them away from these chrome regions. */
+const CHROME_OBSTACLE_SELECTOR = [
+  INSPECTOR_POPUP_SELECTOR,
+  '.file-tabs',
+  '.leftbar',
+  '.leftbar-panel',
+  '.sidebar-ui-chip',
+  '.rightbar',
+  '.sidebar-expand',
+  '.canvas-toolbar-stack',
+  '.canvas-toolbar-shell',
+  '.frame-action-wrap',
+  '.frame-action-menu',
+  '.shape-menu',
+  '.draw-stroke-bar',
+  '.brush-picker',
+  '.ctx-menu',
+  '.comment-overlay-card',
+  '.comment-emoji-picker',
+  '.comment-mention-menu',
+  '.ca-popup-backdrop',
+  '.ca-popup-stage',
+  '.ca-popup',
+  '.chat-agents-popout',
+  '.chat-popout-btn',
+  '.ca-agent-picker',
+  '.ca-agent-rail',
+  '.ca-fs-popup',
+  '.shader-fills-popup',
+  '.chat-suggestion-popup',
+  '[data-chrome-overlay]'
+].join(', ')
+
+function padRect(box: DOMRect | ScreenRect, pad: number): ScreenRect {
+  return {
+    x: box.x - pad,
+    y: box.y - pad,
+    width: box.width + pad * 2,
+    height: box.height + pad * 2
+  }
+}
+
+function sameNodeValue(a: unknown, b: unknown): boolean {
+  if (a === b) return true
+  if (!a || !b || typeof a !== 'object' || typeof b !== 'object') return false
+  return JSON.stringify(a) === JSON.stringify(b)
+}
+
+/**
+ * Design updates from main arrive as fresh IPC copies. Keep the previous object for every
+ * node that didn't change so React (and the dev-mode prop diff) only touch real edits.
+ */
+function reuseUnchangedNodes(prev: DesignNode[], incoming: DesignNode[]): DesignNode[] {
+  const byId = nodeIndexOf(prev)
+  let allSame = prev.length === incoming.length
+  const out = incoming.map((node, index) => {
+    const old = byId.get(node.id)
+    if (!old) {
+      allSame = false
+      return node
+    }
+    const keys = Object.keys(node) as Array<keyof DesignNode>
+    const equal =
+      keys.length === Object.keys(old).length && keys.every((key) => sameNodeValue(node[key], old[key]))
+    if (!equal || prev[index] !== old) allSame = false
+    return equal ? old : node
+  })
+  return allSame ? prev : out
+}
+
+function readChromeObstacles(exclude?: string): ScreenRect[] {
+  const out: ScreenRect[] = []
+  document.querySelectorAll(CHROME_OBSTACLE_SELECTOR).forEach((el) => {
+    if (exclude && el.matches(exclude)) return
+    const box = el.getBoundingClientRect()
+    if (box.width < 2 || box.height < 2) return
+    const pad = el.matches('.canvas-toolbar-stack, .canvas-toolbar-shell, .file-tabs') ? 14 : 6
+    out.push(padRect(box, pad))
+  })
+  return out
+}
+
+/** Comfortable laptop-width column for general browsing (not coding-agent panes). */
+const BROWSER_PANE_MAX_WIDTH = 1280
+
+/**
+ * Native browser framing for docked tabs / add-browser — zoom 1:1 (no inspect device scale).
+ * When the pane is wider than a laptop, letterbox to a centered column so pages
+ * don't render like a wall-sized monitor. Coding-agent holes stay full-bleed separately.
+ */
+function browserPaneFrame(hole: ScreenRect): { hole: ScreenRect; viewport: { width: number; height: number } } {
+  const width = Math.min(BROWSER_PANE_MAX_WIDTH, Math.max(1, Math.round(hole.width)))
+  const height = Math.max(1, Math.round(hole.height))
+  const framed =
+    width >= hole.width - 0.5
+      ? { x: hole.x, y: hole.y, width: hole.width, height: hole.height }
+      : {
+          x: hole.x + (hole.width - width) / 2,
+          y: hole.y,
+          width,
+          height: hole.height
+        }
+  return {
+    hole: framed,
+    viewport: { width: Math.max(1, Math.round(framed.width)), height }
+  }
+}
+
+/** Obstacles that must punch through sidebar BrowserViews (agent / side browser / chat). */
+function readSidebarBrowserObstacles(): ScreenRect[] {
+  const out: ScreenRect[] = []
+  document
+    .querySelectorAll(
+      '.canvas-toolbar-stack, .canvas-toolbar-shell, .frame-action-wrap, .url-omnibox-menu, [data-chrome-overlay]'
+    )
+    .forEach((el) => {
+      const box = el.getBoundingClientRect()
+      if (box.width < 2 || box.height < 2) return
+      const pad = el.matches('.url-omnibox-menu') ? 8 : 12
+      out.push(padRect(box, pad))
+    })
+  return out
+}
 
 /** Largest axis-aligned piece of `source` that does not overlap `block`. */
 function largestRectOutside(source: ScreenRect, block: ScreenRect): ScreenRect {
@@ -256,10 +628,58 @@ function largestRectOutside(source: ScreenRect, block: ScreenRect): ScreenRect {
   return best
 }
 
+function clipAgainstObstacles(source: ScreenRect, obstacles: ScreenRect[]): ScreenRect {
+  let clip = source
+  // Multiple passes — sequential largest-rect can leave remnants that still overlap earlier blocks.
+  for (let pass = 0; pass < 4; pass++) {
+    const before = clip
+    for (const block of obstacles) {
+      if (clip.width < 2 || clip.height < 2) return { x: 0, y: 0, width: 0, height: 0 }
+      clip = largestRectOutside(clip, block)
+    }
+    if (
+      Math.abs(clip.x - before.x) < 0.5 &&
+      Math.abs(clip.y - before.y) < 0.5 &&
+      Math.abs(clip.width - before.width) < 0.5 &&
+      Math.abs(clip.height - before.height) < 0.5
+    ) {
+      break
+    }
+  }
+  return clip
+}
+
+/** Full-height side/top chrome strips so BrowserViews never paint over sidebars or file tabs. */
+function readShellChromeObstacles(): ScreenRect[] {
+  const out: ScreenRect[] = []
+  const fileTabs = document.querySelector('.file-tabs')?.getBoundingClientRect()
+  if (fileTabs && fileTabs.height > 2) {
+    out.push(padRect({ x: 0, y: 0, width: window.innerWidth, height: fileTabs.bottom }, 2))
+  }
+  const leftbar = document.querySelector('.leftbar')?.getBoundingClientRect()
+  const leftPanel = document.querySelector('.leftbar-panel:not(.is-collapsed)')?.getBoundingClientRect()
+  const leftRight = Math.max(leftbar?.right ?? 0, leftPanel && leftPanel.width > 2 ? leftPanel.right : 0)
+  if (leftRight > 2) {
+    out.push({ x: 0, y: 0, width: leftRight + 4, height: window.innerHeight })
+  }
+  const rightbar = document.querySelector('.rightbar:not(.is-collapsed)')?.getBoundingClientRect()
+  if (rightbar && rightbar.width > 2) {
+    out.push({
+      x: Math.max(0, rightbar.left - 4),
+      y: 0,
+      width: window.innerWidth - rightbar.left + 4,
+      height: window.innerHeight
+    })
+  }
+  return out
+}
+
 export function App() {
+  const reduceMotion = useReducedMotion()
   const [camera, setCamera] = useState<Camera>({ x: 80, y: 80, zoom: 1 })
   const [browsers, setBrowsers] = useState<Frame[]>([])
   const [selectedId, setSelectedId] = useState<string | null>(null)
+  const [selectedBrowserIds, setSelectedBrowserIds] = useState<string[]>([])
   const [status, setStatus] = useState<ChromeStatus>({ state: 'starting' })
   const [panning, setPanning] = useState(false)
   const [handMode, setHandMode] = useState(false)
@@ -271,10 +691,52 @@ export function App() {
   const [inspectOn, setInspectOn] = useState(false)
   const [inspect, setInspect] = useState<InspectInfo | null>(null)
   const [measureHoverId, setMeasureHoverId] = useState<string | null>(null)
+  const [measureOffsets, setMeasureOffsets] = useState<Record<string, number>>({})
+  const [measurePins, setMeasurePins] = useState<Array<{ id: string; base: MeasureLine; offset: number }>>([])
+  const [measureEdgeHover, setMeasureEdgeHover] = useState<MeasureAnchor | null>(null)
+  const [measureActiveLineId, setMeasureActiveLineId] = useState<string | null>(null)
+  const [measureDraft, setMeasureDraft] = useState<MeasureLine | null>(null)
+  const measureLinesRef = useRef<MeasureLine[]>([])
+  const measureSlide = useRef<{
+    lineId: string
+    axis: 'h' | 'v'
+    startOffset: number
+    startPointer: number
+    slideMin: number
+    slideMax: number
+    pinned: boolean
+    offsetKey: string
+  } | null>(null)
+  const measureCreate = useRef<{
+    start: MeasureAnchor
+    current: { x: number; y: number }
+    target: MeasureAnchor | null
+  } | null>(null)
   const [altHeld, setAltHeld] = useState(false)
   const [alignGuides, setAlignGuides] = useState<AlignGuide[]>([])
   const [flexDrop, setFlexDrop] = useState<FlexDropGuide | null>(null)
   const flexDropRef = useRef<FlexDropGuide | null>(null)
+  /**
+   * Paper-style reorder: flex children stay in their slot (dimmed) while a floating square
+   * follows the pointer; the layout only changes on drop.
+   */
+  const ghostDragRef = useRef<{
+    ids: string[]
+    parentId: string
+    dx: number
+    dy: number
+    /** Left its flex parent mid-drag: now a free layer under the pointer (siblings closed the gap). */
+    detached?: boolean
+  } | null>(null)
+  /** Figma image crop: the layer box is the crop window, the image moves/zooms behind it. */
+  const [cropSession, setCropSessionState] = useState<CropSession | null>(null)
+  const cropSessionRef = useRef<CropSession | null>(null)
+  const setCropSession = (next: CropSession | null) => {
+    cropSessionRef.current = next
+    setCropSessionState(next)
+  }
+  const [dragGhost, setDragGhost] = useState<{ x: number; y: number; width: number; height: number } | null>(null)
+  const [dragGhostIds, setDragGhostIds] = useState<string[]>([])
   const [dropParentId, setDropParentId] = useState<string | null>(null)
   const dropParentIdRef = useRef<string | null>(null)
   const alignGuideTimer = useRef<number | null>(null)
@@ -284,11 +746,30 @@ export function App() {
   const [snapshotBrowserId, setSnapshotBrowserId] = useState<string | null>(null)
   const [tool, setTool] = useState<DesignTool>('pointer')
   const [switchMode, setSwitchMode] = useState<SwitchMode>('draw')
+  const [chatPoppedOut, setChatPoppedOut] = useState(false)
   const [design, setDesign] = useState<DesignNode[]>([])
   const [designSelectedIds, setDesignSelectedIds] = useState<string[]>([])
   const [snapshotRevealId, setSnapshotRevealId] = useState<string | null>(null)
   const [buildingIds, setBuildingIds] = useState<string[]>([])
   const [revealIds, setRevealIds] = useState<string[]>([])
+  const [createSvgOpen, setCreateSvgOpen] = useState(false)
+  const [createSvgPrompt, setCreateSvgPrompt] = useState('')
+  const [createSvgLastPrompt, setCreateSvgLastPrompt] = useState('')
+  const [createSvgModel, setCreateSvgModel] = useState<QuiverModelId>('arrow-2')
+  const [createSvgBusy, setCreateSvgBusy] = useState(false)
+  const [createSvgStatus, setCreateSvgStatus] = useState<string | null>(null)
+  const [createSvgHiddenRefs, setCreateSvgHiddenRefs] = useState<string[]>([])
+  const [createSvgHiddenChips, setCreateSvgHiddenChips] = useState<string[]>([])
+  /** Frozen composer thumbs while generating — avoids flashing draft SVGs. */
+  const [createSvgPinnedRefs, setCreateSvgPinnedRefs] = useState<Array<{ id: string; dataUrl: string }> | null>(
+    null
+  )
+  const [quiverConfigured, setQuiverConfigured] = useState(false)
+  const createSvgImageId = useRef<string | null>(null)
+  const createSvgFrameId = useRef<string | null>(null)
+  const createSvgSlots = useRef<Array<{ frameId: string; imageId: string }>>([])
+  const createSvgApplyRaf = useRef<number | null>(null)
+  const createSvgPending = useRef<Map<string, string>>(new Map())
   const [mcpStatus, setMcpStatus] = useState<McpStatus | null>(null)
   const [draft, setDraft] = useState<DesignNode | null>(null)
   const [shapeKind, setShapeKind] = useState<ShapeKind>('rect')
@@ -303,9 +784,13 @@ export function App() {
   const [marqueeBox, setMarqueeBox] = useState<{ left: number; top: number; width: number; height: number } | null>(null)
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null)
   const contextMenuRef = useRef<ContextMenuState | null>(null)
+  const [layerMenu, setLayerMenu] = useState<LayerMenuState | null>(null)
+  const [collapseLayersToken, setCollapseLayersToken] = useState(0)
   const designClipboard = useRef<DesignNode[] | null>(null)
   const styleClipboard = useRef<Partial<DesignNode> | null>(null)
   const [rail, setRail] = useState<RailTab>('file')
+  const railRef = useRef<RailTab>('file')
+  railRef.current = rail
   const [theme, setTheme] = useState<'light' | 'dark'>(() => {
     try {
       return localStorage.getItem('vanta-theme') === 'dark' ? 'dark' : 'light'
@@ -313,7 +798,7 @@ export function App() {
       return 'light'
     }
   })
-  const [view, setView] = useState<'canvas' | 'home'>('canvas')
+  const [view, setView] = useState<'canvas' | 'home' | 'new-tab'>('canvas')
   const [files, setFiles] = useState<ProjectFile[]>([{ id: 'file-1', name: 'Untitled', editedAt: Date.now() }])
   const [activeFileId, setActiveFileId] = useState('file-1')
   const [actionAnchor, setActionAnchor] = useState<DOMRect | null>(null)
@@ -321,7 +806,6 @@ export function App() {
   const [chats, setChats] = useState<ChatSession[]>(() => [createChatSession()])
   const [activeChatId, setActiveChatId] = useState<string | null>(null)
   const [agentBusy, setAgentBusy] = useState(false)
-  const [chatBrowserUrl, setChatBrowserUrl] = useState(CHAT_BROWSER_HOME)
   const [pages, setPages] = useState<DesignPage[]>([{ ...DEFAULT_PAGE }])
   const [activePageId, setActivePageId] = useState(DEFAULT_PAGE.id)
   const [pageQuery, setPageQuery] = useState('')
@@ -329,17 +813,33 @@ export function App() {
   const [rightOpen, setRightOpen] = useState(true)
   const [leftWidth, setLeftWidth] = useState(268)
   const [rightWidth, setRightWidth] = useState(241)
-  const [codingActive, setCodingActive] = useState(() => loadCodingAgents().active)
+  // Don't restore an active agent session — MCP gate must run before sidebar access.
+  const [codingActive, setCodingActive] = useState<ReturnType<typeof loadCodingAgents>['active']>(null)
   const [codingRecents, setCodingRecents] = useState(() => loadCodingAgents().recents)
   const [codingPopup, setCodingPopup] = useState(false)
+  const [tabsPopup, setTabsPopup] = useState(false)
   const [codingFullscreen, setCodingFullscreen] = useState(false)
+  const [codingAgentUrl, setCodingAgentUrl] = useState('')
   const codingFullscreenRef = useRef(false)
+  /** Hide toolbar (with exit animation) before / during agent fullscreen. */
+  const [toolbarHiddenForAgentFs, setToolbarHiddenForAgentFs] = useState(false)
+  const agentFsPending = useRef<'enter' | 'side-enter' | 'exit' | null>(null)
+  const agentFsToolbarTimer = useRef<number | null>(null)
+  const rightOpenBeforeAgentFs = useRef(true)
+  const [dockedTab, setDockedTab] = useState<DockedTabRef | null>(null)
+  const dockedTabRef = useRef<DockedTabRef | null>(null)
+  const [sideBrowsers, setSideBrowsers] = useState<AgentSideBrowserSlot[]>([])
+  const sideBrowsersRef = useRef<AgentSideBrowserSlot[]>([])
+  const autoFsForSplitRef = useRef(false)
+  const agentSideHoles = useRef(new Map<string, HTMLDivElement>())
   const [activeCommentId, setActiveCommentId] = useState<string | null>(null)
   const [commentDraftText, setCommentDraftText] = useState('')
   const [commentCursor, setCommentCursor] = useState<{ x: number; y: number } | null>(null)
   const [commentsQuery, setCommentsQuery] = useState('')
   const [commentsShowResolved, setCommentsShowResolved] = useState(false)
   const [resolveToastId, setResolveToastId] = useState<string | null>(null)
+  const [copyToast, setCopyToast] = useState<string | null>(null)
+  const copyToastTimerRef = useRef<number | null>(null)
   const activeCommentIdRef = useRef<string | null>(null)
   const canvasRef = useRef<HTMLDivElement>(null)
   const worldRef = useRef<HTMLDivElement>(null)
@@ -348,32 +848,51 @@ export function App() {
   const agentHole = useRef<HTMLDivElement | null>(null)
   const chatHole = useRef<HTMLDivElement | null>(null)
   const agentVisibleRef = useRef(false)
+  const dockedVisibleRef = useRef(false)
+  const agentSideVisibleRef = useRef(false)
   const chatBrowserVisibleRef = useRef(false)
   const layoutQueued = useRef(false)
   const cameraRaf = useRef<number | null>(null)
+  const zoomSettleTimer = useRef<number | null>(null)
+  const pixelGridRef = useRef<HTMLDivElement | null>(null)
   const pan = useRef<{ x: number; y: number; camX: number; camY: number } | null>(null)
   const space = useRef(false)
   const cameraRef = useRef(camera)
   const browsersRef = useRef(browsers)
   const selectedRef = useRef(selectedId)
+  const selectedBrowserRef = useRef(selectedBrowserIds)
   const toolRef = useRef(tool)
   const designRef = useRef(design)
   const designSelectedRef = useRef(designSelectedIds)
+  const designUndoPastRef = useRef<DesignNode[][]>([])
+  const designUndoFutureRef = useRef<DesignNode[][]>([])
+  const designHistoryLockRef = useRef(false)
+  const designHistoryGestureRef = useRef(false)
+  const createSvgBusyRef = useRef(false)
+  const buildingIdsRef = useRef<string[]>([])
   const pasteSnapshotRef = useRef<(tabId: string, tree: SnapshotNode) => void>(() => {})
+  /** Child to select if a press inside the selected frame ends without dragging. */
+  const pendingClickSelectRef = useRef<string | null>(null)
   const shapeRef = useRef(shapeKind)
   const moveStart = useRef(
     new Map<string, { worldX: number; worldY: number; localX: number; localY: number; points?: PathPoint[] }>()
   )
+  // Flex/grid children only leave the flow once a press turns into a real drag; a plain click must not lift them.
+  const pendingLiftRef = useRef<string[] | null>(null)
   const scaleStart = useRef<DesignNode[]>([])
   const marquee = useRef<{
     x: number
     y: number
     shift: boolean
+    deep: boolean
+    /** Ctrl/Cmd held at press — only then does a plain click deep-pick under the cursor. */
+    pick: boolean
     baseIds: string[]
+    baseBrowserIds: string[]
   } | null>(null)
   const drawRef = useRef<{
     id: string
-    kind: 'box' | 'path' | 'pen' | 'text'
+    kind: 'box' | 'path' | 'pen' | 'text' | 'browser'
     type: DesignNode['type']
     startX: number
     startY: number
@@ -387,6 +906,9 @@ export function App() {
     brushStyle: 'heist' as BrushStyleId
   })
   const persistTimer = useRef<number | null>(null)
+  const thumbTimer = useRef<number | null>(null)
+  const activeFileIdRef = useRef(activeFileId)
+  const designsByFileRef = useRef<Record<string, DesignNode[]>>({ 'file-1': [] })
   const pagesRef = useRef(pages)
   const activePageRef = useRef(activePageId)
   const draftRef = useRef<DesignNode | null>(null)
@@ -397,9 +919,12 @@ export function App() {
   if (cameraRaf.current == null) cameraRef.current = camera
   browsersRef.current = browsers
   selectedRef.current = selectedId
+  selectedBrowserRef.current = selectedBrowserIds
   toolRef.current = tool
   designRef.current = design
   designSelectedRef.current = designSelectedIds
+  createSvgBusyRef.current = createSvgBusy
+  buildingIdsRef.current = buildingIds
   shapeRef.current = shapeKind
   draftRef.current = draft
   strokeRef.current = {
@@ -411,18 +936,349 @@ export function App() {
   }
   pagesRef.current = pages
   activePageRef.current = activePageId
+  activeFileIdRef.current = activeFileId
   const resolvedChatId = activeChatId || chats[0]?.id || ''
   activeChatIdRef.current = resolvedChatId
   onCanvasRef.current = view === 'canvas' && rail !== 'chat'
   codingFullscreenRef.current = codingFullscreen
+  sideBrowsersRef.current = sideBrowsers
+  dockedTabRef.current = dockedTab
   activeCommentIdRef.current = activeCommentId
   agentVisibleRef.current =
     view === 'canvas' &&
     rail === 'coding-agents' &&
     Boolean(codingActive) &&
     !codingPopup &&
+    !tabsPopup &&
     (leftOpen || codingFullscreen)
-  chatBrowserVisibleRef.current = view === 'canvas' && rail === 'chat' && rightOpen
+  dockedVisibleRef.current =
+    view === 'canvas' &&
+    rail === 'tabs' &&
+    Boolean(dockedTab) &&
+    !tabsPopup &&
+    (leftOpen || codingFullscreen)
+  agentSideVisibleRef.current =
+    (agentVisibleRef.current || dockedVisibleRef.current) && sideBrowsers.length > 0
+  chatBrowserVisibleRef.current = false
+
+  const clearAgentFsToolbarTimer = () => {
+    if (agentFsToolbarTimer.current != null) {
+      window.clearTimeout(agentFsToolbarTimer.current)
+      agentFsToolbarTimer.current = null
+    }
+  }
+
+  const dismissCanvasToolbar = () => {
+    clearAgentFsToolbarTimer()
+    setToolbarHiddenForAgentFs(true)
+  }
+
+  const restoreCanvasToolbar = () => {
+    if (codingFullscreenRef.current || sideBrowsersRef.current.length > 0) return
+    clearAgentFsToolbarTimer()
+    const delay = reduceMotion ? 0 : TOOLBAR_FS_RETURN_DELAY_MS
+    agentFsToolbarTimer.current = window.setTimeout(() => {
+      agentFsToolbarTimer.current = null
+      if (!codingFullscreenRef.current && sideBrowsersRef.current.length === 0) {
+        setToolbarHiddenForAgentFs(false)
+      }
+    }, delay)
+  }
+
+  const clearSideBrowserSlots = () => {
+    if (sideBrowsersRef.current.length === 0) return
+    for (const item of sideBrowsersRef.current) {
+      void window.vanta.closeBrowser(item.id).catch(() => undefined)
+    }
+    sideBrowsersRef.current = []
+    setSideBrowsers([])
+    agentSideHoles.current.clear()
+  }
+
+  const collapseAgentWorkspace = () => {
+    clearAgentFsToolbarTimer()
+    agentFsPending.current = null
+    autoFsForSplitRef.current = false
+    clearSideBrowserSlots()
+    if (codingFullscreenRef.current) {
+      codingFullscreenRef.current = false
+      setCodingFullscreen(false)
+      setRightOpen(rightOpenBeforeAgentFs.current)
+    }
+    restoreCanvasToolbar()
+    requestAnimationFrame(() => syncLayout())
+  }
+
+  const enterCodingFullscreen = () => {
+    if (codingFullscreenRef.current || agentFsPending.current === 'enter') return
+    setCodingPopup(false)
+    setTabsPopup(false)
+    rightOpenBeforeAgentFs.current = rightOpen
+    setLeftOpen(true)
+    setRightOpen(false)
+    clearAgentFsToolbarTimer()
+    const toolbarOnScreen = view === 'canvas' && rail !== 'chat' && !toolbarHiddenForAgentFs
+    if (reduceMotion || !toolbarOnScreen) {
+      setToolbarHiddenForAgentFs(true)
+      setCodingFullscreen(true)
+      return
+    }
+    // 1) toolbar exits fully off-screen, 2) then agent expands (onExitComplete)
+    agentFsPending.current = 'enter'
+    setToolbarHiddenForAgentFs(true)
+  }
+
+  const exitCodingFullscreen = () => {
+    clearAgentFsToolbarTimer()
+    // Cancel an in-progress enter / side-open (toolbar still sliding out).
+    if (agentFsPending.current === 'enter' || agentFsPending.current === 'side-enter') {
+      agentFsPending.current = null
+      autoFsForSplitRef.current = false
+      clearSideBrowserSlots()
+      setRightOpen(rightOpenBeforeAgentFs.current)
+      if (codingFullscreenRef.current) {
+        codingFullscreenRef.current = false
+        setCodingFullscreen(false)
+      }
+      setToolbarHiddenForAgentFs(false)
+      requestAnimationFrame(() => syncLayout())
+      return
+    }
+    // Side panes lock split layout — exiting FS must tear them down too,
+    // otherwise Escape leaves dual-fill with no FS control and a hidden toolbar.
+    if (sideBrowsersRef.current.length > 0 || codingFullscreenRef.current) {
+      collapseAgentWorkspace()
+    }
+  }
+
+  const appendSideBrowser = () => {
+    const used = new Set(sideBrowsersRef.current.map((item) => item.id))
+    const id = AGENT_SIDE_BROWSER_IDS.find((slot) => !used.has(slot))
+    if (!id) return
+    const next = [...sideBrowsersRef.current, { id, url: AGENT_SIDE_BROWSER_HOME }]
+    sideBrowsersRef.current = next
+    setSideBrowsers(next)
+    setToolbarHiddenForAgentFs(true)
+    // 2+ panes → auto fullscreen; hide the fullscreen control while split.
+    if (next.length >= 1 && !codingFullscreenRef.current) {
+      autoFsForSplitRef.current = true
+      enterCodingFullscreen()
+    }
+  }
+
+  const openAgentSideBrowser = () => {
+    if (sideBrowsersRef.current.length >= AGENT_SIDE_BROWSER_MAX) return
+    clearAgentFsToolbarTimer()
+
+    const finishOpen = () => {
+      agentFsPending.current = null
+      appendSideBrowser()
+    }
+
+    // Already waiting on toolbar exit — don't stack another pending open.
+    if (agentFsPending.current === 'side-enter') return
+
+    const toolbarOnScreen = view === 'canvas' && rail !== 'chat' && !toolbarHiddenForAgentFs
+    if (reduceMotion || !toolbarOnScreen || sideBrowsersRef.current.length > 0) {
+      finishOpen()
+      return
+    }
+    // 1) toolbar exits fully off-screen, 2) then side browser opens
+    agentFsPending.current = 'side-enter'
+    setToolbarHiddenForAgentFs(true)
+    // Fallback: AnimatePresence onExitComplete can miss if the toolbar wasn't mounted.
+    window.setTimeout(() => {
+      if (agentFsPending.current === 'side-enter') finishOpen()
+    }, 220)
+  }
+
+  const closeSideBrowser = (id: string) => {
+    if (agentFsPending.current === 'side-enter') {
+      agentFsPending.current = null
+      autoFsForSplitRef.current = false
+      setToolbarHiddenForAgentFs(false)
+      return
+    }
+    const next = sideBrowsersRef.current.filter((item) => item.id !== id)
+    sideBrowsersRef.current = next
+    setSideBrowsers(next)
+    agentSideHoles.current.delete(id)
+    void window.vanta.closeBrowser(id).catch(() => undefined)
+    if (next.length === 0) {
+      autoFsForSplitRef.current = false
+      if (codingFullscreenRef.current) {
+        clearAgentFsToolbarTimer()
+        agentFsPending.current = null
+        codingFullscreenRef.current = false
+        setCodingFullscreen(false)
+        setRightOpen(rightOpenBeforeAgentFs.current)
+      }
+      restoreCanvasToolbar()
+    }
+    requestAnimationFrame(() => syncLayout())
+  }
+
+  const closeAllSideBrowsers = () => {
+    collapseAgentWorkspace()
+  }
+
+  const isSidebarBrowserId = (id: string) =>
+    id === SIDEBAR_BROWSER_ID || (AGENT_SIDE_BROWSER_IDS as readonly string[]).includes(id)
+
+  const switchOmniboxTab = (windowId: string, tabId: string) => {
+    // Coding-agent / side-browser panes — just focus that WebContentsView.
+    if (isSidebarBrowserId(tabId) || isSidebarBrowserId(windowId)) {
+      const target = isSidebarBrowserId(tabId) ? tabId : windowId
+      void window.vanta.focus(target)
+      requestAnimationFrame(() => syncLayout())
+      return
+    }
+    // Canvas tab: pull it to the front like Chrome.
+    if (codingFullscreenRef.current) exitCodingFullscreen()
+    selectBrowsers([windowId])
+    setDesignSelectedIds([])
+    patchFrame(windowId, { activeTabId: tabId })
+    void window.vanta.activateTab(windowId, tabId).then(() => {
+      void window.vanta.focus(tabId)
+      syncLayout()
+    })
+  }
+
+  const undockBrowserTab = () => {
+    const wasDocked = Boolean(dockedTabRef.current)
+    dockedTabRef.current = null
+    setDockedTab(null)
+    if (!wasDocked) return
+    dockedVisibleRef.current = false
+    agentSideVisibleRef.current = false
+    collapseAgentWorkspace()
+  }
+
+  const openFileSidebarIfNoTabs = (remaining?: Frame[]) => {
+    const list = remaining ?? browsersRef.current
+    if (list.some((frame) => frame.tabs.length > 0)) return
+    if (dockedTabRef.current) undockBrowserTab()
+    setTabsPopup(false)
+    if (railRef.current === 'tabs') {
+      railRef.current = 'file'
+      setRail('file')
+      setLeftOpen(true)
+      setView('canvas')
+    }
+  }
+
+  const openTabsSidebar = () => {
+    railRef.current = 'tabs'
+    setRail('tabs')
+    setLeftOpen(true)
+    setView('canvas')
+    setTabsPopup(false)
+  }
+
+  const closeBrowserTab = (windowId: string, tabId: string) => {
+    if (dockedTabRef.current?.tabId === tabId) undockBrowserTab()
+    const frame = browsersRef.current.find((item) => item.id === windowId)
+    const closingLastInWindow = Boolean(frame && frame.tabs.length <= 1)
+    const next = closingLastInWindow
+      ? browsersRef.current.filter((item) => item.id !== windowId)
+      : browsersRef.current.map((item) =>
+          item.id !== windowId
+            ? item
+            : {
+                ...item,
+                tabs: item.tabs.filter((tab) => tab.id !== tabId),
+                activeTabId:
+                  item.activeTabId === tabId
+                    ? item.tabs.filter((tab) => tab.id !== tabId).at(-1)?.id || item.activeTabId
+                    : item.activeTabId
+              }
+        )
+    if (closingLastInWindow) {
+      holes.current.delete(windowId)
+      if (selectedBrowserRef.current.includes(windowId)) {
+        selectBrowsers(selectedBrowserRef.current.filter((id) => id !== windowId))
+      }
+    }
+    browsersRef.current = next
+    setBrowsers(next)
+    if (!next.some((frame) => frame.tabs.length > 0)) {
+      if (dockedTabRef.current) undockBrowserTab()
+      setTabsPopup(false)
+      railRef.current = 'file'
+      setRail('file')
+      setLeftOpen(true)
+      setView('canvas')
+    }
+    void window.vanta.closeTab(windowId, tabId)
+  }
+
+  const closeBrowserWindow = (windowId: string) => {
+    holes.current.delete(windowId)
+    if (dockedTabRef.current?.windowId === windowId) undockBrowserTab()
+    const next = browsersRef.current.filter((item) => item.id !== windowId)
+    browsersRef.current = next
+    setBrowsers(next)
+    if (selectedBrowserRef.current.includes(windowId)) {
+      setInspectOn(false)
+      selectBrowsers(selectedBrowserRef.current.filter((id) => id !== windowId))
+    }
+    if (!next.some((frame) => frame.tabs.length > 0)) {
+      if (dockedTabRef.current) undockBrowserTab()
+      setTabsPopup(false)
+      railRef.current = 'file'
+      setRail('file')
+      setLeftOpen(true)
+      setView('canvas')
+    }
+    void window.vanta.closeBrowser(windowId)
+  }
+
+  const closeCodingAgent = () => {
+    if (!codingActive) return
+    agentVisibleRef.current = false
+    agentSideVisibleRef.current = false
+    collapseAgentWorkspace()
+    setCodingActive(null)
+    setCodingAgentUrl('')
+    void window.vanta.closeBrowser(SIDEBAR_BROWSER_ID).catch(() => undefined)
+    setCodingPopup(false)
+    // Return to MCP gate in the coding-agents sidebar (not File).
+    railRef.current = 'coding-agents'
+    setRail('coding-agents')
+    setLeftOpen(true)
+    setView('canvas')
+    requestAnimationFrame(() => syncLayout())
+  }
+
+  const dockBrowserTab = (windowId: string, tabId: string) => {
+    const already = dockedTabRef.current?.tabId === tabId
+    if (already && rail === 'tabs' && (leftOpen || codingFullscreenRef.current)) {
+      undockBrowserTab()
+      return
+    }
+    if (codingFullscreenRef.current && !already) exitCodingFullscreen()
+    const next = { windowId, tabId }
+    dockedTabRef.current = next
+    setDockedTab(next)
+    openTabsSidebar()
+    selectBrowsers([windowId])
+    patchFrame(windowId, { activeTabId: tabId })
+    void window.vanta.activateTab(windowId, tabId)
+    void window.vanta.setTheme?.(theme)
+    requestAnimationFrame(() => syncLayout())
+  }
+
+  // Empty Tabs section is never shown — fall back to File when the last tab goes away.
+  useEffect(() => {
+    const hasTabs = browsers.some((frame) => frame.tabs.length > 0)
+    if (!hasTabs && railRef.current === 'tabs') {
+      openFileSidebarIfNoTabs(browsers)
+    }
+  }, [browsers])
+
+  useEffect(() => {
+    return () => clearAgentFsToolbarTimer()
+  }, [])
 
   const activeChat = chats.find((chat) => chat.id === resolvedChatId) || chats[0]
   const chatLog = activeChat?.messages || []
@@ -472,7 +1328,10 @@ export function App() {
             (node.type === 'frame' ? 'New frame name' : node.type === 'section' ? 'Section' : node.type),
           selected: designSelectedIds.includes(node.id),
           textOnPath: isTextOnPath(node),
-          depth
+          vector: node.type === 'image' && Boolean(node.svgMarkup?.trim()),
+          depth,
+          hidden: node.visible === false,
+          locked: Boolean(node.locked)
         })
         walk(node.id, depth + 1)
       }
@@ -483,22 +1342,1373 @@ export function App() {
         id: frame.id,
         kind: 'browser',
         name: frame.tabs.find((tab) => tab.id === frame.activeTabId)?.title || `Window ${index + 1}`,
-        selected: selectedId === frame.id,
+        selected: selectedBrowserIds.includes(frame.id),
         depth: 0
       })
     }
     return items
   })()
 
-  const persistDesign = (next: DesignNode[], opts?: { skipReflow?: boolean }) => {
+  const selectBrowsers = (ids: string[]) => {
+    selectedBrowserRef.current = ids
+    setSelectedBrowserIds(ids)
+    setSelectedId(ids.length ? ids[ids.length - 1]! : null)
+  }
+
+  const clearBrowserSelection = () => {
+    selectedBrowserRef.current = []
+    setSelectedBrowserIds([])
+    setSelectedId(null)
+  }
+
+  const captureActiveFileThumbnail = useCallback(async (fileId?: string) => {
+    const id = fileId || activeFileIdRef.current
+    if (!id) return
+    try {
+      const page =
+        pagesRef.current.find((item) => item.id === activePageRef.current) || pagesRef.current[0]
+      const design = designsByFileRef.current[id] || designRef.current
+      const pageId = activePageRef.current
+      const lightUrl = await renderPageThumbnailDataUrl(design, pageId, {
+        theme: 'light',
+        pageFill: resolvePageFill(page || { fill: '#EEEEEE' }, 'light')
+      })
+      // Separate tasks so a heavy page never blocks input for both renders at once.
+      await new Promise<void>((resolve) => window.requestIdleCallback(() => resolve(), { timeout: 2000 }))
+      const darkUrl = await renderPageThumbnailDataUrl(design, pageId, {
+        theme: 'dark',
+        pageFill: resolvePageFill(page || { fill: '#EEEEEE', fillDark: '#2C2C2C' }, 'dark')
+      })
+      if (!lightUrl && !darkUrl) return
+      setFiles((current) =>
+        current.map((file) =>
+          file.id === id
+            ? {
+                ...file,
+                thumbnailUrl: lightUrl || file.thumbnailUrl,
+                thumbnailDarkUrl: darkUrl || file.thumbnailDarkUrl
+              }
+            : file
+        )
+      )
+    } catch {
+      // Rasterize can fail on exotic fills; keep the previous thumb.
+    }
+  }, [])
+
+  const scheduleThumbnailCapture = useCallback(
+    (fileId?: string) => {
+      if (thumbTimer.current) window.clearTimeout(thumbTimer.current)
+      // Wait for a pause in editing, then render when the main thread is idle.
+      thumbTimer.current = window.setTimeout(() => {
+        window.requestIdleCallback(() => void captureActiveFileThumbnail(fileId), { timeout: 4000 })
+      }, 1500)
+    },
+    [captureActiveFileThumbnail]
+  )
+
+  // Keep light + dark thumbs fresh so Home swaps instantly on theme toggle.
+  useEffect(() => {
+    void captureActiveFileThumbnail(activeFileIdRef.current)
+    const ids = Object.keys(designsByFileRef.current)
+    for (const id of ids) {
+      if (id === activeFileIdRef.current) continue
+      if ((designsByFileRef.current[id] || []).length) {
+        void captureActiveFileThumbnail(id)
+      }
+    }
+  }, [theme, captureActiveFileThumbnail])
+
+  const pushDesignHistory = (snapshot: DesignNode[]) => {
+    designUndoPastRef.current.push(structuredClone(snapshot))
+    if (designUndoPastRef.current.length > 80) designUndoPastRef.current.shift()
+    designUndoFutureRef.current = []
+  }
+
+  const clearDesignHistory = () => {
+    designUndoPastRef.current = []
+    designUndoFutureRef.current = []
+    designHistoryGestureRef.current = false
+  }
+
+  const isDesignGenerationBusy = () =>
+    createSvgBusyRef.current || buildingIdsRef.current.length > 0
+
+  const applyDesignSnapshot = (nodes: DesignNode[]) => {
+    designHistoryLockRef.current = true
+    designHistoryGestureRef.current = false
+    designRef.current = nodes
+    setDesign(nodes)
+    const fileId = activeFileIdRef.current
+    if (fileId) designsByFileRef.current[fileId] = nodes
+    setDesignSelectedIds((ids) => ids.filter((id) => nodes.some((node) => node.id === id)))
+    if (persistTimer.current) window.clearTimeout(persistTimer.current)
+    sendDesignToMain(nodes)
+    scheduleThumbnailCapture()
+    designHistoryLockRef.current = false
+  }
+
+  const undoDesign = () => {
+    if (isDesignGenerationBusy() || designHistoryLockRef.current) return
+    const prev = designUndoPastRef.current.pop()
+    if (!prev) return
+    designUndoFutureRef.current.push(structuredClone(designRef.current))
+    applyDesignSnapshot(prev)
+  }
+
+  const redoDesign = () => {
+    if (isDesignGenerationBusy() || designHistoryLockRef.current) return
+    const next = designUndoFutureRef.current.pop()
+    if (!next) return
+    designUndoPastRef.current.push(structuredClone(designRef.current))
+    applyDesignSnapshot(next)
+  }
+
+  const persistDesign = (next: DesignNode[], opts?: { skipReflow?: boolean; skipHistory?: boolean }) => {
     const flowed = opts?.skipReflow ? next : reflowAutoLayout(next)
+    if (!opts?.skipHistory && !designHistoryLockRef.current && !isDesignGenerationBusy()) {
+      if (opts?.skipReflow) {
+        // First move/resize tick in a gesture: snapshot the pre-gesture tree once.
+        if (!designHistoryGestureRef.current) {
+          pushDesignHistory(designRef.current)
+          designHistoryGestureRef.current = true
+        }
+      } else if (!designHistoryGestureRef.current) {
+        // Discrete edit. Skip no-op commits that only re-run reflow on the same tree.
+        if (next !== designRef.current) pushDesignHistory(designRef.current)
+      } else {
+        designHistoryGestureRef.current = false
+      }
+    }
     designRef.current = flowed
     setDesign(flowed)
+    const fileId = activeFileIdRef.current
+    if (fileId) designsByFileRef.current[fileId] = flowed
     if (opts?.skipReflow) return
     if (persistTimer.current) window.clearTimeout(persistTimer.current)
     persistTimer.current = window.setTimeout(() => {
-      void window.vanta.setDesign(flowed)
+      sendDesignToMain(flowed)
+      scheduleThumbnailCapture()
     }, 200)
+  }
+
+  const liftPendingFlexChildren = () => {
+    const roots = pendingLiftRef.current
+    if (!roots) return
+    pendingLiftRef.current = null
+    const parentIds = new Set(
+      roots
+        .map((nodeId) => designRef.current.find((item) => item.id === nodeId)?.parentId)
+        .filter((parentId): parentId is string => Boolean(parentId))
+    )
+    let lifted = false
+    let next = designRef.current.map((node) => {
+      if (!roots.includes(node.id) || !node.parentId) return node
+      const parent = designRef.current.find((item) => item.id === node.parentId)
+      if (!parent || !isAutoLayout(parent) || node.layoutAbsolute) return node
+      lifted = true
+      return { ...node, layoutAbsolute: true }
+    })
+    if (!lifted) return
+    for (const parentId of parentIds) {
+      const parent = next.find((node) => node.id === parentId)
+      if (parent && isAutoLayout(parent)) next = reorderAutoLayoutChildren(next, parentId)
+    }
+    persistDesign(next)
+  }
+
+  /** Write the crop window (layer box) and image rect back onto the layer as a Crop-mode image fill. */
+  const applyCropRects = (session: CropSession, frame: CropRect, image: CropRect) => {
+    const nodes = designRef.current
+    const node = nodes.find((item) => item.id === session.nodeId)
+    if (!node) return
+    const parent = node.parentId ? nodes.find((item) => item.id === node.parentId) : null
+    const parentWorld = parent ? resolveWorldRect(parent, nodes) : null
+    const width = Math.max(1, frame.width)
+    const height = Math.max(1, frame.height)
+    const fills = getNodePaints(node).map((paint, index) =>
+      index === session.paintIndex && paint.type === 'image'
+        ? {
+            ...paint,
+            imageDataUrl: paint.imageDataUrl || session.src,
+            scaleMode: 'crop' as const,
+            imageBox: {
+              x: (image.x - frame.x) / width,
+              y: (image.y - frame.y) / height,
+              w: image.width / width,
+              h: image.height / height
+            }
+          }
+        : paint
+    )
+    const patched: DesignNode = {
+      ...node,
+      x: parentWorld ? frame.x - parentWorld.x : frame.x,
+      y: parentWorld ? frame.y - parentWorld.y : frame.y,
+      width,
+      height,
+      fills
+    }
+    persistDesign(
+      nodes.map((item) => (item.id === node.id ? patched : item)),
+      { skipReflow: true, skipHistory: true }
+    )
+    setCropSession({ ...session, frame, image })
+  }
+
+  const startImageCrop = (nodeId: string) => {
+    if (cropSessionRef.current) return
+    const node = designRef.current.find((item) => item.id === nodeId)
+    if (!node || node.locked) return
+    const paints = getNodePaints(node)
+    const paintIndex = paints.findIndex((paint) => paint.type === 'image' && (paint.imageDataUrl || node.imageDataUrl))
+    if (paintIndex < 0) return
+    const paint = paints[paintIndex]
+    if (paint.type !== 'image') return
+    const src = paint.imageDataUrl || node.imageDataUrl || ''
+    const probe = new Image()
+    probe.onload = () => {
+      const latest = designRef.current.find((item) => item.id === nodeId)
+      if (!latest || cropSessionRef.current) return
+      const natural = { w: probe.naturalWidth || 1, h: probe.naturalHeight || 1 }
+      const frame = resolveWorldRect(latest, designRef.current)
+      const current = getNodePaints(latest)[paintIndex]
+      const box = current?.type === 'image' && current.scaleMode === 'crop' ? current.imageBox : undefined
+      const image: CropRect = box
+        ? {
+            x: frame.x + box.x * frame.width,
+            y: frame.y + box.y * frame.height,
+            width: box.w * frame.width,
+            height: box.h * frame.height
+          }
+        : current?.type === 'image' && current.scaleMode === 'fit'
+          ? containRect(frame, natural)
+          : coverRect(frame, natural)
+      const session: CropSession = {
+        nodeId,
+        paintIndex,
+        before: latest,
+        designBefore: designRef.current,
+        natural,
+        src,
+        aspect: 'free',
+        frame,
+        image
+      }
+      setCropSession(session)
+      applyCropRects(session, frame, image)
+    }
+    probe.src = src
+  }
+
+  const finishImageCrop = (apply: boolean) => {
+    const session = cropSessionRef.current
+    if (!session) return
+    setCropSession(null)
+    if (apply) {
+      pushDesignHistory(session.designBefore)
+      persistDesign(designRef.current, { skipHistory: true })
+    } else {
+      persistDesign(
+        designRef.current.map((item) => (item.id === session.nodeId ? session.before : item)),
+        { skipHistory: true }
+      )
+    }
+  }
+
+  const startImageCropRef = useRef(startImageCrop)
+  startImageCropRef.current = startImageCrop
+  const finishImageCropRef = useRef(finishImageCrop)
+  finishImageCropRef.current = finishImageCrop
+
+  // Fill picker "Crop" mode opens the on-canvas crop editor for the selected layer.
+  useEffect(() => {
+    const open = (event: Event) => {
+      const id = (event as CustomEvent<{ id?: string }>).detail?.id
+      if (id) {
+        startImageCropRef.current(id)
+        return
+      }
+      const ids = designSelectedRef.current
+      if (ids.length === 1) startImageCropRef.current(ids[0])
+    }
+    window.addEventListener('vanta:image-crop', open)
+    return () => window.removeEventListener('vanta:image-crop', open)
+  }, [])
+
+  // Selecting something else applies the crop (Figma).
+  useEffect(() => {
+    const session = cropSessionRef.current
+    if (session && !designSelectedIds.includes(session.nodeId)) finishImageCropRef.current(true)
+  }, [designSelectedIds])
+
+  const reorderDesignChildren = (parentId: string, orderedIds: string[], parentPatch?: Partial<DesignNode>) => {
+    const kidIds = new Set(orderedIds)
+    const byId = new Map(designRef.current.map((node) => [node.id, node]))
+    const ordered = orderedIds.map((id) => byId.get(id)).filter((node): node is DesignNode => Boolean(node))
+    let inserted = false
+    const next: DesignNode[] = []
+    for (const node of designRef.current) {
+      if (parentPatch && node.id === parentId) {
+        next.push({ ...node, ...parentPatch })
+        continue
+      }
+      if (!kidIds.has(node.id) || node.parentId !== parentId) {
+        next.push(node)
+        continue
+      }
+      if (!inserted) {
+        next.push(...ordered)
+        inserted = true
+      }
+    }
+    persistDesign(next)
+  }
+
+  const jev = useJev({
+    getCanvas: () => {
+      const canvas = canvasRef.current
+      return {
+        nodes: designRef.current,
+        pageId: activePageRef.current,
+        defaultPageId: DEFAULT_PAGE.id,
+        pointerId: null,
+        selectedIds: designSelectedRef.current,
+        lastTargetId: null,
+        center: canvas
+          ? screenToWorld(cameraRef.current, canvas.clientWidth / 2, canvas.clientHeight / 2)
+          : { x: 120, y: 120 }
+      }
+    },
+    persist: (nodes) => persistDesign(nodes),
+    onOpenSidebar: () => {
+      setRightOpen(true)
+      setRightWidth((width) => Math.max(width, 300))
+    }
+  })
+  const jevComposer = {
+    on: jev.on,
+    onToggle: jev.setOn,
+    micOn: jev.voice.active,
+    onMic: jev.toggleMic,
+    onDraft: jev.preview,
+    onApplyDraft: (text: string) => {
+      setChatInput('')
+      jev.apply(text)
+    },
+    picking: jev.picking,
+    onTogglePick: () => {
+      const next = !jev.picking
+      jev.setPicking(next)
+      if (next) {
+        setTool('pointer')
+        setHandMode(false)
+      }
+    },
+    selectionCount:
+      designSelectedIds.length > 0 ? designSelectedIds.length : jev.pointerId ? 1 : 0,
+    pointerLabel: jev.pointerLabel,
+    locked: jev.locked,
+    voiceState: jev.voice.state,
+    level: jev.voice.level,
+    voiceError: jev.voice.error,
+    model: jev.voice.model,
+    configured: jev.configured,
+    onToggleLock: jev.toggleLock,
+    onClearTarget: () => {
+      jev.clearTarget()
+      designSelectedRef.current = []
+      setDesignSelectedIds([])
+    },
+    onSaveKey: (key: string) => void jev.saveKey(key)
+  }
+
+  useEffect(() => {
+    void window.vanta.quiverStatus().then((status) => setQuiverConfigured(status.configured))
+  }, [])
+
+  useEffect(() => {
+    if (!createSvgOpen) {
+      setCreateSvgHiddenRefs([])
+      setCreateSvgHiddenChips([])
+      setCreateSvgPinnedRefs(null)
+      return
+    }
+    // Warm the cutout model while the composer is open so Remove background is snappy.
+    void window.vanta.warmRemoveBackground?.()
+  }, [createSvgOpen])
+
+  const createSvgContext = (() => {
+    if (!createSvgOpen) {
+      return {
+        references: [] as Array<{ id: string; dataUrl: string }>,
+        textChips: [] as Array<{ id: string; label: string }>,
+        source: null as DesignNode | null,
+        generationPrompt: ''
+      }
+    }
+    // While generating, keep showing the original reference thumbs — not the draft SVG.
+    if (createSvgBusy && createSvgPinnedRefs?.length) {
+      const pinnedIds = new Set(createSvgPinnedRefs.map((ref) => ref.id.split(':')[0]))
+      let generationPrompt = createSvgLastPrompt
+      for (const id of designSelectedIds) {
+        const node = design.find((item) => item.id === id)
+        if (node?.generationPrompt?.trim()) {
+          generationPrompt = node.generationPrompt.trim()
+          break
+        }
+      }
+      return {
+        references: createSvgPinnedRefs,
+        textChips: [] as Array<{ id: string; label: string }>,
+        source: design.find((node) => pinnedIds.has(node.id)) || null,
+        generationPrompt
+      }
+    }
+    const selected = designSelectedIds.length
+      ? designSelectedIds
+      : jev.pointerId
+        ? [jev.pointerId]
+        : []
+    const building = new Set(buildingIds)
+    const tree = selected.length
+      ? design.filter((node) => expandWithDescendants(design, new Set(selected)).has(node.id))
+      : []
+    const hiddenRefs = new Set(createSvgHiddenRefs)
+    const hiddenChips = new Set(createSvgHiddenChips)
+    const references: Array<{ id: string; dataUrl: string }> = []
+    const seenUrls = new Set<string>()
+    // Cap how many refs we surface — huge selections were freezing the composer.
+    const MAX_REFS = 24
+    for (const node of tree) {
+      if (references.length >= MAX_REFS) break
+      // Never show in-progress placeholder SVGs in the composer.
+      if (building.has(node.id)) continue
+      if (node.type === 'image') {
+        const dataUrl =
+          node.imageDataUrl ||
+          (node.svgMarkup?.trim() ? svgToDataUrl(node.svgMarkup) : '')
+        if (dataUrl && !hiddenRefs.has(node.id) && !seenUrls.has(dataUrl)) {
+          seenUrls.add(dataUrl)
+          references.push({ id: node.id, dataUrl })
+        }
+      } else if (
+        (node.type === 'frame' || node.type === 'rect') &&
+        node.svgMarkup?.trim() &&
+        !node.imageDataUrl
+      ) {
+        // Generated SVG sometimes lives on the frame itself (LiveSvg).
+        const dataUrl = svgToDataUrl(node.svgMarkup)
+        if (!hiddenRefs.has(node.id) && !seenUrls.has(dataUrl)) {
+          seenUrls.add(dataUrl)
+          references.push({ id: node.id, dataUrl })
+        }
+      }
+      for (const paint of getNodePaints(node)) {
+        if (references.length >= MAX_REFS) break
+        if (paint.type !== 'image' || !paint.imageDataUrl || paint.visible === false) continue
+        const id = `${node.id}:paint`
+        if (hiddenRefs.has(id) || seenUrls.has(paint.imageDataUrl)) continue
+        seenUrls.add(paint.imageDataUrl)
+        references.push({ id, dataUrl: paint.imageDataUrl })
+      }
+    }
+    const textChips: Array<{ id: string; label: string }> = []
+    const seenLabels = new Set<string>()
+    const pushChip = (id: string, raw: string) => {
+      if (textChips.length >= 60) return
+      const label = raw.replace(/\s+/g, ' ').trim()
+      if (!label) return
+      if (hiddenChips.has(id) || seenLabels.has(label)) return
+      seenLabels.add(label)
+      textChips.push({ id, label })
+    }
+    // Surface selected roots so the composer grows for frames/elements/text —
+    // images already appear as reference thumbs above.
+    for (const id of selected) {
+      const node = design.find((item) => item.id === id)
+      if (!node || node.type === 'comment') continue
+      if (node.type === 'image') {
+        // Generation prompt is shown in the Create SVG header (Paper), not as a chip.
+        if (node.generationPrompt?.trim()) continue
+        if (node.name) pushChip(`name:${node.id}`, node.name)
+        continue
+      }
+      if (node.type === 'text') {
+        pushChip(node.id, node.text || node.name || 'Text')
+        continue
+      }
+      pushChip(
+        `sel:${node.id}`,
+        node.name ||
+          (node.type === 'frame'
+            ? 'Frame'
+            : node.type === 'section'
+              ? 'Section'
+              : `${node.type[0].toUpperCase()}${node.type.slice(1)}`)
+      )
+    }
+    return {
+      references,
+      textChips,
+      source: references[0]
+        ? design.find((node) => node.id === references[0].id.split(':')[0]) || null
+        : selected[0]
+          ? design.find((node) => node.id === selected[0]) || null
+          : null,
+      generationPrompt: (() => {
+        for (const id of selected) {
+          const node = design.find((item) => item.id === id)
+          if (node?.generationPrompt?.trim()) return node.generationPrompt.trim()
+        }
+        for (const ref of references) {
+          const node = design.find((item) => item.id === ref.id.split(':')[0])
+          if (node?.generationPrompt?.trim()) return node.generationPrompt.trim()
+        }
+        return ''
+      })()
+    }
+  })()
+
+  const createSvgHeaderPrompt = createSvgContext.generationPrompt || createSvgLastPrompt
+
+  const selectedImageRef = createSvgContext.source
+    ? {
+        node: createSvgContext.source,
+        dataUrl: createSvgContext.references[0]?.dataUrl || ''
+      }
+    : null
+
+  const runExtractMagicSwatches = async () => {
+    const refs = createSvgContext.references
+    if (!refs.length) {
+      setCreateSvgStatus('Select one or more images to extract colors.')
+      return
+    }
+    const pageId = activePageRef.current
+    const nodes = designRef.current
+    const SWATCH_W = 100
+    const SWATCH_H = 60
+    const SWATCH_GAP = 8
+    const PAD = 16
+    const OUTER_GAP = 28
+    const ROW_GAP = 16
+    type Placed = { dataUrl: string; box: { x: number; y: number; width: number; height: number } }
+    const placed: Placed[] = []
+    for (const ref of refs) {
+      const nodeId = ref.id.split(':')[0]
+      const node = nodes.find((item) => item.id === nodeId)
+      if (!node) continue
+      placed.push({ dataUrl: ref.dataUrl, box: resolveWorldRect(node, nodes) })
+    }
+    if (!placed.length) {
+      setCreateSvgStatus('Select one or more images to extract colors.')
+      return
+    }
+    const minX = Math.min(...placed.map((item) => item.box.x))
+    const minY = Math.min(...placed.map((item) => item.box.y))
+    const maxX = Math.max(...placed.map((item) => item.box.x + item.box.width))
+    const maxY = Math.max(...placed.map((item) => item.box.y + item.box.height))
+    const multi = placed.length > 1
+    const added: DesignNode[] = []
+    const frameIds: string[] = []
+    let cursorY = multi ? minY : maxY + OUTER_GAP
+    let stackX = multi ? maxX + OUTER_GAP : minX
+
+    try {
+      for (let index = 0; index < placed.length; index++) {
+        const item = placed[index]
+        const colors = await sampleImageColors(item.dataUrl, 6)
+        if (!colors.length) continue
+        const frameW = PAD * 2 + colors.length * SWATCH_W + (colors.length - 1) * SWATCH_GAP
+        const frameH = PAD * 2 + SWATCH_H
+        const frameId = crypto.randomUUID()
+        let x: number
+        let y: number
+        if (multi) {
+          x = Math.round(stackX)
+          y = Math.round(cursorY)
+          cursorY += frameH + ROW_GAP
+        } else {
+          x = Math.round(item.box.x + (item.box.width - frameW) / 2)
+          y = Math.round(item.box.y + item.box.height + OUTER_GAP)
+        }
+        added.push({
+          id: frameId,
+          type: 'frame',
+          name: 'Magic Swatches',
+          x,
+          y,
+          width: frameW,
+          height: frameH,
+          pageId,
+          fills: [{ type: 'solid', color: '#FFFFFF', opacity: 1 }],
+          fill: '#FFFFFF',
+          clipsContent: false
+        })
+        colors.forEach((color, colorIndex) => {
+          added.push({
+            id: crypto.randomUUID(),
+            type: 'rect',
+            name: color.toUpperCase(),
+            parentId: frameId,
+            x: PAD + colorIndex * (SWATCH_W + SWATCH_GAP),
+            y: PAD,
+            width: SWATCH_W,
+            height: SWATCH_H,
+            pageId,
+            fills: [{ type: 'solid', color, opacity: 1 }],
+            fill: color,
+            radius: 4
+          })
+        })
+        frameIds.push(frameId)
+      }
+    } catch {
+      setCreateSvgStatus('Couldn’t extract colors from those images.')
+      return
+    }
+
+    if (!added.length) {
+      setCreateSvgStatus('Couldn’t extract colors from those images.')
+      return
+    }
+
+    persistDesign([...designRef.current, ...added])
+    setDesignSelectedIds(frameIds)
+    setSelectedId(null)
+    setCreateSvgStatus(null)
+    const first = added[0]
+    if (first.width && first.height) {
+      nudgeIntoView(first.x, first.y, first.width, first.height)
+    }
+  }
+
+  const createSvgPanel =
+    createSvgOpen ? (
+      <CreateSvgPanel
+        open={createSvgOpen}
+        prompt={createSvgPrompt}
+        onPrompt={setCreateSvgPrompt}
+        lastPrompt={createSvgHeaderPrompt}
+        onCopyPrompt={() => undefined}
+        onStartOverPrompt={() => {
+          const text = createSvgHeaderPrompt.trim()
+          if (!text) return
+          setCreateSvgLastPrompt(text)
+          setCreateSvgPrompt(text)
+
+          // Prefer sources stored on the selected generated SVG.
+          const selected = designSelectedRef.current
+          let sourceIds: string[] = []
+          for (const id of selected) {
+            const node = designRef.current.find((item) => item.id === id)
+            if (node?.generationSourceIds?.length) {
+              sourceIds = node.generationSourceIds.filter((sourceId) =>
+                designRef.current.some((item) => item.id === sourceId)
+              )
+              break
+            }
+          }
+          if (!sourceIds.length) {
+            for (const ref of createSvgContext.references) {
+              const node = designRef.current.find((item) => item.id === ref.id.split(':')[0])
+              if (node?.generationSourceIds?.length) {
+                sourceIds = node.generationSourceIds.filter((sourceId) =>
+                  designRef.current.some((item) => item.id === sourceId)
+                )
+                break
+              }
+            }
+          }
+
+          if (sourceIds.length) {
+            setCreateSvgHiddenRefs((hidden) =>
+              hidden.filter((id) => !sourceIds.some((sourceId) => id === sourceId || id.startsWith(`${sourceId}:`)))
+            )
+            setCreateSvgHiddenChips([])
+            setDesignSelectedIds(sourceIds)
+            setSelectedId(null)
+            const first = designRef.current.find((item) => item.id === sourceIds[0])
+            if (first) {
+              const box = resolveWorldRect(first, designRef.current)
+              nudgeIntoView(box.x, box.y, box.width, box.height)
+            }
+          }
+        }}
+        references={createSvgContext.references}
+        onRemoveReference={(id) => setCreateSvgHiddenRefs((current) => [...current, id])}
+        textChips={createSvgContext.textChips}
+        onRemoveTextChip={(id) => setCreateSvgHiddenChips((current) => [...current, id])}
+        model={createSvgModel}
+        onModel={setCreateSvgModel}
+        busy={createSvgBusy}
+        status={createSvgStatus}
+        configured={quiverConfigured}
+        micOn={jev.voice.active}
+        onMic={jev.toggleMic}
+        hearing={jev.voice.state === 'hearing'}
+        onSaveKey={(key) => {
+          void window.vanta.quiverSetKey(key).then((status) => setQuiverConfigured(status.configured))
+        }}
+        onMenuAction={(action: CreateSvgMenuAction) => {
+          if (action === 'vectorize') {
+            if (!createSvgContext.references.length) return
+            setCreateSvgStatus(null)
+            void runVectorizeImages()
+            return
+          }
+          if (action === 'extract-colors') {
+            void runExtractMagicSwatches()
+            return
+          }
+          if (action === 'remove-background') {
+            if (!createSvgContext.references.length) {
+              setCreateSvgStatus('Select an image to remove its background.')
+              return
+            }
+            void runRemoveBackground()
+          }
+        }}
+        onCreate={(input) => void runCreateSvg(input)}
+        onAbort={() => window.vanta.quiverAbort()}
+        onClose={() => exitCreateSvg()}
+      />
+    ) : null
+
+  const runRemoveBackground = async () => {
+    if (createSvgBusy) return
+    const refs = createSvgContext.references
+    if (!refs.length) {
+      setCreateSvgStatus('Select an image to remove its background.')
+      return
+    }
+    if (typeof window.vanta.removeBackground !== 'function') {
+      window.alert('Restart Vanta to enable Remove background (preload needs a reload).')
+      return
+    }
+
+    const nodeIds = [
+      ...new Set(refs.map((ref) => ref.id.split(':')[0]).filter(Boolean))
+    ]
+    setCreateSvgBusy(true)
+    createSvgBusyRef.current = true
+    setBuildingIds((current) => [...new Set([...current, ...nodeIds])])
+    setCreateSvgStatus('Removing background…')
+
+    const stopProgress = window.vanta.onRemoveBackgroundProgress?.((message) => {
+      if (message?.trim()) setCreateSvgStatus(message)
+    })
+
+    try {
+      void window.vanta.warmRemoveBackground?.()
+
+      let next = designRef.current
+      let done = 0
+      for (const ref of refs) {
+        const nodeId = ref.id.split(':')[0]
+        const paintOnly = ref.id.includes(':paint')
+        const source = next.find((node) => node.id === nodeId)
+        setCreateSvgStatus(
+          refs.length > 1
+            ? `Removing background… ${done + 1}/${refs.length}`
+            : 'Removing background…'
+        )
+        // Cutout model needs a raster PNG — SVG data URLs fail.
+        const world = source ? resolveWorldRect(source, next) : null
+        const raster = await rasterizeToPngDataUrl(ref.dataUrl, {
+          maxEdge: 2048,
+          width: world ? Math.round(world.width) : undefined,
+          height: world ? Math.round(world.height) : undefined
+        })
+        const forModel =
+          raster.length > 1_200_000
+            ? await rasterizeToPngDataUrl(raster, { maxEdge: 1600 })
+            : raster
+        // Transparent pixels decode as black to the model and get kept as "subject";
+        // show it the color the user actually sees behind the image.
+        const parent = source?.parentId ? next.find((node) => node.id === source.parentId) : null
+        const isSolid = (color?: string) =>
+          Boolean(color && color !== 'transparent' && !/^rgba?\([^)]*,\s*0\s*\)$/i.test(color))
+        const backdrop = isSolid(source?.fill)
+          ? source!.fill!
+          : isSolid(parent?.fill)
+            ? parent!.fill!
+            : '#FFFFFF'
+        const modelInput = await rasterizeToPngDataUrl(forModel, { background: backdrop })
+        const result = await window.vanta.removeBackground(modelInput)
+        if (!result.ok) {
+          setCreateSvgStatus(result.error || 'Couldn’t remove background.')
+          return
+        }
+        // Expand the mask so edges aren’t over-trimmed (imgly tends to chew subjects).
+        let cutout = result.dataUrl
+        try {
+          cutout = await expandCutoutAlpha(forModel, result.dataUrl, 5)
+        } catch {
+          cutout = result.dataUrl
+        }
+        const parentId = source?.parentId || null
+
+        next = next.map((node) => {
+          // Paper: drop the solid plate behind a cut-out subject.
+          if (parentId && node.id === parentId && node.type === 'frame') {
+            return {
+              ...node,
+              svgMarkup: undefined,
+              fill: 'transparent',
+              fills: [{ type: 'solid' as const, color: '#FFFFFF', opacity: 0 }]
+            }
+          }
+          if (node.id !== nodeId) return node
+
+          if (paintOnly && node.fills?.length) {
+            let matched = false
+            const fills = node.fills.map((paint) => {
+              if (matched || paint.type !== 'image' || paint.visible === false) return paint
+              if (paint.imageDataUrl === ref.dataUrl) {
+                matched = true
+                return { ...paint, imageDataUrl: cutout }
+              }
+              return paint
+            })
+            if (!matched) {
+              const idx = fills.findIndex((paint) => paint.type === 'image' && paint.visible !== false)
+              if (idx >= 0) {
+                const paint = fills[idx]
+                if (paint.type === 'image') {
+                  fills[idx] = { ...paint, imageDataUrl: cutout }
+                  matched = true
+                }
+              }
+            }
+            return {
+              ...node,
+              fills,
+              ...(node.type === 'image' || node.type === 'frame'
+                ? { imageDataUrl: cutout, svgMarkup: undefined, fill: 'transparent' }
+                : {})
+            }
+          }
+
+          return {
+            ...node,
+            imageDataUrl: cutout,
+            svgMarkup: undefined,
+            fill: 'transparent',
+            fills: [
+              {
+                type: 'image' as const,
+                imageDataUrl: cutout,
+                scaleMode: 'fill' as const,
+                opacity: 1,
+                visible: true
+              }
+            ]
+          }
+        })
+        persistDesign(next)
+        done += 1
+      }
+
+      setDesignSelectedIds(nodeIds)
+      setSelectedId(null)
+      setRevealIds((current) => [...new Set([...current, ...nodeIds])])
+      window.setTimeout(() => {
+        setRevealIds((current) => current.filter((id) => !nodeIds.includes(id)))
+      }, 900)
+      setCreateSvgStatus(null)
+    } catch (error) {
+      setCreateSvgStatus(error instanceof Error ? error.message : String(error))
+    } finally {
+      stopProgress?.()
+      setBuildingIds((current) => current.filter((id) => !nodeIds.includes(id)))
+      setCreateSvgBusy(false)
+      createSvgBusyRef.current = false
+    }
+  }
+
+  const runCreateSvg = async (input: QuiverGenerateInput) => {
+    if (createSvgBusy) return
+    const usedPrompt = input.prompt.trim()
+    if (usedPrompt) {
+      // Paper: keep the used prompt in the header with Copy / Start over icons.
+      setCreateSvgLastPrompt(usedPrompt)
+      setCreateSvgPrompt('')
+    }
+    const sourceIds = [
+      ...new Set(
+        createSvgContext.references
+          .map((ref) => ref.id.split(':')[0])
+          .filter((id) => designRef.current.some((node) => node.id === id))
+      )
+    ]
+    // Freeze composer thumbs on the original reference(s) for the whole build.
+    const pinnedRefs = createSvgContext.references.map((ref) => ({ ...ref }))
+    setCreateSvgPinnedRefs(pinnedRefs.length ? pinnedRefs : null)
+    const source =
+      selectedImageRef?.node ||
+      (sourceIds[0] ? designRef.current.find((node) => node.id === sourceIds[0]) : null) ||
+      null
+    const pageId = activePageRef.current
+    const nodes = designRef.current
+    const sourceWorld = (() => {
+      if (source) return resolveWorldRect(source, nodes)
+      // Multiple refs: place to the right of the selection bounds.
+      const boxes = sourceIds
+        .map((id) => nodes.find((node) => node.id === id))
+        .filter((node): node is DesignNode => Boolean(node))
+        .map((node) => resolveWorldRect(node, nodes))
+      if (!boxes.length) return null
+      const minX = Math.min(...boxes.map((box) => box.x))
+      const minY = Math.min(...boxes.map((box) => box.y))
+      const maxX = Math.max(...boxes.map((box) => box.x + box.width))
+      const maxY = Math.max(...boxes.map((box) => box.y + box.height))
+      return { x: minX, y: minY, width: maxX - minX, height: maxY - minY }
+    })()
+    const width = Math.max(120, Math.round(sourceWorld?.width || source?.width || 512))
+    const height = Math.max(120, Math.round(sourceWorld?.height || source?.height || 512))
+    const gap = 48
+    const count = Math.max(1, Math.min(4, input.n ?? 1))
+    const canvas = canvasRef.current
+    const cam = cameraRef.current
+    const viewCenter = canvas
+      ? screenToWorld(cam, canvas.clientWidth / 2, canvas.clientHeight / 2)
+      : { x: 120, y: 120 }
+    const totalW = count * width + (count - 1) * gap
+    // Spawn to the right of the selected element (Paper). Fall back to viewport center.
+    const originX = sourceWorld
+      ? Math.round(sourceWorld.x + sourceWorld.width + gap)
+      : Math.round(viewCenter.x - totalW / 2)
+    const originY = sourceWorld
+      ? Math.round(sourceWorld.y)
+      : Math.round(viewCenter.y - height / 2)
+    const slots: Array<{ frameId: string; imageId: string }> = []
+    const added: DesignNode[] = []
+    for (let i = 0; i < count; i++) {
+      const imageId = crypto.randomUUID()
+      // Bare SVG node — no parent frame (avoids pulling the SVG out of a box).
+      slots.push({ frameId: imageId, imageId })
+      added.push({
+        id: imageId,
+        type: 'image',
+        name: count > 1 ? `SVG ${i + 1}` : 'SVG',
+        x: originX + i * (width + gap),
+        y: originY,
+        width,
+        height,
+        pageId,
+        svgMarkup: '',
+        imageDataUrl: '',
+        generationPrompt: usedPrompt || undefined,
+        generationSourceIds: sourceIds.length ? sourceIds : undefined,
+        fills: [{ type: 'image', imageDataUrl: '', scaleMode: 'fill', opacity: 1, visible: true }],
+        fill: '#F4F5F7'
+      })
+    }
+    createSvgSlots.current = slots
+    createSvgFrameId.current = slots[0].frameId
+    createSvgImageId.current = slots[0].imageId
+    createSvgPending.current.clear()
+    if (createSvgApplyRaf.current != null) {
+      window.cancelAnimationFrame(createSvgApplyRaf.current)
+      createSvgApplyRaf.current = null
+    }
+
+    persistDesign([...designRef.current, ...added])
+    // Keep the original reference selected so the composer thumb stays stable.
+    if (sourceIds.length) setDesignSelectedIds(sourceIds)
+    setSelectedId(null)
+    setBuildingIds((current) => [...new Set([...current, ...slots.map((slot) => slot.imageId)])])
+    setCreateSvgBusy(true)
+    createSvgBusyRef.current = true
+    setCreateSvgStatus('Starting QuiverAI…')
+
+    if (canvas) {
+      const midX = originX + totalW / 2
+      const midY = originY + height / 2
+      const screen = worldToScreen(cam, midX, midY)
+      applyCamera({
+        ...cam,
+        x: cam.x + (canvas.clientWidth / 2 - screen.x),
+        y: cam.y + (canvas.clientHeight / 2 - screen.y) - 36
+      })
+    }
+
+    const flushPending = (final = false) => {
+      if (!createSvgPending.current.size) return
+      const batch = new Map(createSvgPending.current)
+      createSvgPending.current.clear()
+      persistDesign(
+        designRef.current.map((node) => {
+          const svg = batch.get(node.id)
+          if (!svg) return node
+          const fitted = final
+            ? fitSvgMarkup(svg, width, height, { crop: true })
+            : { markup: normalizeSvgMarkup(svg, width, height), background: null as string | null }
+          if (!fitted.markup) return node
+          const dataUrl = final ? svgToDataUrl(fitted.markup) : node.imageDataUrl || ''
+          return {
+            ...node,
+            svgMarkup: fitted.markup,
+            imageDataUrl: final ? dataUrl : node.imageDataUrl || '',
+            fill: fitted.background || 'transparent',
+            fills: [
+              {
+                type: 'image',
+                imageDataUrl: final ? dataUrl : node.imageDataUrl || '',
+                scaleMode: 'fill',
+                opacity: 1,
+                visible: true
+              }
+            ]
+          }
+        }),
+        { skipReflow: true }
+      )
+      if (final) {
+        sendDesignToMain(designRef.current)
+        scheduleThumbnailCapture()
+      }
+    }
+
+    const pushSvg = (svg: string, index = 0) => {
+      if (!svg?.trim()) return
+      const slot = createSvgSlots.current[index] || createSvgSlots.current[0]
+      if (!slot) return
+      createSvgPending.current.set(slot.imageId, svg)
+      if (createSvgApplyRaf.current != null) return
+      createSvgApplyRaf.current = window.requestAnimationFrame(() => {
+        createSvgApplyRaf.current = null
+        flushPending(false)
+      })
+    }
+
+    const stopListen = window.vanta.onQuiver((event) => {
+      if (event.type === 'status') {
+        if (!isQuiverCancelMessage(event.message)) setCreateSvgStatus(event.message)
+      }
+      if (event.type === 'reasoning') setCreateSvgStatus(event.text.slice(0, 100) || 'Reasoning…')
+      if (event.type === 'draft' || event.type === 'content') {
+        setCreateSvgStatus(null)
+        pushSvg(event.svg, event.index ?? 0)
+      }
+      if (event.type === 'done') {
+        setCreateSvgStatus(null)
+        pushSvg(event.svg, 0)
+      }
+      if (event.type === 'error') {
+        // Never surface cancel/terminate in the composer.
+        if (!isQuiverCancelMessage(event.message)) setCreateSvgStatus(event.message)
+      }
+    })
+
+    try {
+      const referenceList = (
+        input.references?.length
+          ? input.references
+          : [selectedImageRef?.dataUrl || input.referenceBase64 || null]
+      ).filter((item): item is string => Boolean(item?.trim()))
+      const shrunk: string[] = []
+      for (const item of referenceList) {
+        shrunk.push(item.length > 400_000 ? await shrinkImageDataUrl(item, 1024) : item)
+      }
+      const result = await window.vanta.quiverGenerateSvg({
+        ...input,
+        n: count,
+        referenceBase64: shrunk[0] || null,
+        references: shrunk,
+        viewBox: { width, height }
+      })
+      if (createSvgApplyRaf.current != null) {
+        window.cancelAnimationFrame(createSvgApplyRaf.current)
+        createSvgApplyRaf.current = null
+      }
+      if (result.ok) {
+        const slot = createSvgSlots.current[0]
+        if (slot && result.svg) {
+          createSvgPending.current.set(slot.imageId, result.svg)
+        }
+        flushPending(true)
+        const frameIds = createSvgSlots.current.map((slot) => slot.frameId)
+        setRevealIds((current) => [...new Set([...current, ...frameIds])])
+        window.setTimeout(() => {
+          setRevealIds((current) => current.filter((id) => !frameIds.includes(id)))
+        }, 1100)
+        // Done — swap composer to the finished SVG.
+        setCreateSvgPinnedRefs(null)
+        setDesignSelectedIds(frameIds)
+        setCreateSvgStatus(null)
+      } else if (isQuiverCancelMessage(result.error)) {
+        // Stop button: keep whatever draft is on the canvas, no red status.
+        flushPending(true)
+        const frameIds = createSvgSlots.current.map((slot) => slot.frameId)
+        setCreateSvgPinnedRefs(null)
+        if (frameIds.length) setDesignSelectedIds(frameIds)
+        setCreateSvgStatus(null)
+      } else {
+        // Drop empty placeholder SVGs so a failed run doesn't leave a blank box.
+        const drop = new Set(createSvgSlots.current.map((slot) => slot.imageId))
+        const hadPaint = designRef.current.some(
+          (node) => drop.has(node.id) && Boolean(node.svgMarkup?.trim())
+        )
+        if (hadPaint) {
+          flushPending(true)
+          setCreateSvgPinnedRefs(null)
+          setDesignSelectedIds(createSvgSlots.current.map((slot) => slot.frameId))
+          setCreateSvgStatus(result.error)
+        } else {
+          persistDesign(designRef.current.filter((node) => !drop.has(node.id)))
+          setCreateSvgPinnedRefs(null)
+          if (sourceIds.length) setDesignSelectedIds(sourceIds)
+          else setDesignSelectedIds([])
+          setCreateSvgStatus(result.error)
+        }
+      }
+    } finally {
+      stopListen()
+      const frameIds = createSvgSlots.current.map((slot) => slot.frameId)
+      setBuildingIds((current) => current.filter((id) => !frameIds.includes(id)))
+      setCreateSvgBusy(false)
+      createSvgBusyRef.current = false
+      // Safety: never leave pinned thumbs after the run ends.
+      setCreateSvgPinnedRefs(null)
+      createSvgFrameId.current = null
+      createSvgImageId.current = null
+      createSvgSlots.current = []
+      createSvgPending.current.clear()
+    }
+  }
+
+  const runVectorizeImages = async () => {
+    if (createSvgBusy) return
+    const refs = createSvgContext.references
+    if (!refs.length) return
+    if (typeof window.vanta.quiverVectorizeSvg !== 'function') {
+      window.alert('Restart Vanta to enable Vectorize (preload needs a reload).')
+      return
+    }
+
+    const pageId = activePageRef.current
+    const nodes = designRef.current
+    const gap = 48
+    const slots: Array<{
+      frameId: string
+      x: number
+      y: number
+      width: number
+      height: number
+      dataUrl: string
+      name: string
+    }> = []
+    const added: DesignNode[] = []
+    for (const ref of refs) {
+      const nodeId = ref.id.split(':')[0]
+      const node = nodes.find((item) => item.id === nodeId)
+      const world = node
+        ? resolveWorldRect(node, nodes)
+        : { x: 120, y: 120, width: 512, height: 512 }
+      const width = Math.max(120, Math.round(world.width || 512))
+      const height = Math.max(120, Math.round(world.height || 512))
+      const frameId = crypto.randomUUID()
+      const x = Math.round(world.x + world.width + gap)
+      const y = Math.round(world.y)
+      const name = refs.length > 1 ? `Vectorized ${slots.length + 1}` : 'Vectorized'
+      slots.push({ frameId, x, y, width, height, dataUrl: ref.dataUrl, name })
+      added.push({
+        id: frameId,
+        type: 'frame',
+        name,
+        x,
+        y,
+        width,
+        height,
+        pageId,
+        fills: [{ type: 'solid', color: '#F0F0F0', opacity: 1 }],
+        fill: '#F0F0F0',
+        clipsContent: false
+      })
+    }
+
+    createSvgSlots.current = slots.map(({ frameId }) => ({ frameId, imageId: frameId }))
+    createSvgFrameId.current = slots[0].frameId
+    createSvgImageId.current = slots[0].frameId
+    createSvgPending.current.clear()
+    if (createSvgApplyRaf.current != null) {
+      window.cancelAnimationFrame(createSvgApplyRaf.current)
+      createSvgApplyRaf.current = null
+    }
+
+    persistDesign([...designRef.current, ...added])
+    setDesignSelectedIds(slots.map((slot) => slot.frameId))
+    setSelectedId(null)
+    setBuildingIds((current) => [...new Set([...current, ...slots.map((slot) => slot.frameId)])])
+    setCreateSvgBusy(true)
+    createSvgBusyRef.current = true
+    setCreateSvgStatus(null)
+
+    const first = slots[0]
+    nudgeIntoView(first.x, first.y, first.width, first.height)
+
+    const dropSlot = (slot: (typeof slots)[number]) => {
+      persistDesign(designRef.current.filter((node) => node.id !== slot.frameId && node.parentId !== slot.frameId))
+    }
+
+    // Paper vectorize: wait for the finished SVG, then explode into pull-apart
+    // shapes. Painting incomplete drafts made it look stuck (strip at top / black).
+    const commitResult = (slotIndex: number, svg: string) => {
+      const slot = slots[slotIndex]
+      if (!slot || !svg?.trim()) return false
+
+      const exploded = explodeSvgToNodes(svg, {
+        frameId: slot.frameId,
+        pageId,
+        x: slot.x,
+        y: slot.y,
+        width: slot.width,
+        height: slot.height,
+        name: slot.name
+      })
+      if (!exploded.length) return false
+
+      persistDesign([
+        ...designRef.current.filter((node) => node.id !== slot.frameId && node.parentId !== slot.frameId),
+        ...exploded
+      ])
+      return true
+    }
+
+    let lastError: string | null = null
+    const keptIds: string[] = []
+    try {
+      for (let i = 0; i < slots.length; i++) {
+        const slot = slots[i]
+        createSvgFrameId.current = slot.frameId
+        createSvgImageId.current = slot.frameId
+        // Ignore draft/content stream — only commit the final SVG (fast pop + explode).
+        const stopListen = window.vanta.onQuiver(() => {})
+        try {
+          let image = slot.dataUrl
+          // Keep more pixels so Quiver can resolve soft gradients / grain.
+          if (image.length > 900_000) image = await shrinkImageDataUrl(image, 1600)
+          const targetSize = Math.max(
+            512,
+            Math.min(2048, Math.round(Math.max(slot.width, slot.height) * 2))
+          )
+          // Faithful trace: higher effort + Telos when the panel is on Arrow 2
+          // (Telos is Quiver’s detailed SVG model). Pull-apart still happens locally.
+          const vectorModel: QuiverModelId =
+            createSvgModel === 'arrow-2' ? 'arrow-2-telos' : createSvgModel
+          let result = await window.vanta.quiverVectorizeSvg({
+            model: vectorModel,
+            imageBase64: image,
+            autoCrop: true,
+            targetSize,
+            temperature: 0.05,
+            reasoningEffort: 'high'
+          })
+          // Fall back if Telos isn't on this key — still keep high-effort Arrow 2.
+          if (
+            !result.ok &&
+            vectorModel === 'arrow-2-telos' &&
+            /model|telos|not.?found|unauthorized|forbidden/i.test(result.error || '')
+          ) {
+            result = await window.vanta.quiverVectorizeSvg({
+              model: 'arrow-2',
+              imageBase64: image,
+              autoCrop: true,
+              targetSize,
+              temperature: 0.05,
+              reasoningEffort: 'high'
+            })
+          }
+          if (result.ok && result.svg?.trim() && commitResult(i, result.svg)) {
+            keptIds.push(slot.frameId)
+          } else if (!result.ok && isQuiverCancelMessage(result.error)) {
+            dropSlot(slot)
+          } else {
+            dropSlot(slot)
+            lastError = result.ok ? 'Vectorize returned an empty SVG.' : result.error
+          }
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error)
+          dropSlot(slot)
+          if (!isQuiverCancelMessage(message)) lastError = message
+        } finally {
+          stopListen()
+        }
+      }
+      if (keptIds.length) {
+        setRevealIds((current) => [...new Set([...current, ...keptIds])])
+        window.setTimeout(() => {
+          setRevealIds((current) => current.filter((id) => !keptIds.includes(id)))
+        }, 1100)
+        // Select the frame so the user can immediately drill into pull-apart shapes.
+        setDesignSelectedIds(keptIds)
+        setCreateSvgStatus(null)
+        sendDesignToMain(designRef.current)
+        scheduleThumbnailCapture()
+      } else if (lastError && !isQuiverCancelMessage(lastError)) {
+        setCreateSvgStatus(lastError)
+      } else {
+        setCreateSvgStatus(null)
+      }
+    } finally {
+      const frameIds = slots.map((slot) => slot.frameId)
+      setBuildingIds((current) => current.filter((id) => !frameIds.includes(id)))
+      setCreateSvgBusy(false)
+      createSvgBusyRef.current = false
+      createSvgFrameId.current = null
+      createSvgImageId.current = null
+      createSvgSlots.current = []
+      createSvgPending.current.clear()
+    }
+  }
+
+  useEffect(() => {
+    if (createSvgOpen) {
+      jev.bindVoiceHandlers({
+        onPartial: (text) => setCreateSvgPrompt(text),
+        onFinal: (text) => {
+          const next = text.trim()
+          if (!next || createSvgBusy) return
+          setCreateSvgPrompt(next)
+          void runCreateSvg({
+            model: createSvgModel,
+            prompt: next,
+            n: 1,
+            temperature: 0.4,
+            reasoningEffort: 'medium',
+            instructions:
+              'Clean vector illustration, flat shapes, no raster effects. Fill the entire viewBox edge-to-edge — no white margins or padding around the artwork.',
+            referenceBase64: selectedImageRef?.dataUrl || null
+          })
+        }
+      })
+      return
+    }
+    jev.bindDraft(setChatInput)
+  }, [createSvgOpen, createSvgBusy, createSvgModel, jev.bindDraft, jev.bindVoiceHandlers])
+
+  useEffect(() => {
+    jev.syncSelection(designSelectedIds)
+  }, [designSelectedIds, jev.syncSelection])
+
+  const rememberActiveDesign = () => {
+    const fileId = activeFileIdRef.current
+    if (!fileId) return
+    designsByFileRef.current[fileId] = designRef.current
+  }
+
+  const applyFileDesign = (fileId: string, nodes?: DesignNode[]) => {
+    const next = nodes ?? designsByFileRef.current[fileId] ?? []
+    designsByFileRef.current[fileId] = next
+    designRef.current = next
+    setDesign(next)
+    setDesignSelectedIds([])
+    setDraft(null)
+    clearDesignHistory()
+    sendDesignToMain(next)
   }
 
   const flashAlignGuides = (guides: AlignGuide[], hold = 0) => {
@@ -569,41 +2779,205 @@ export function App() {
     persistDesign(removeFlexFromSelection(designRef.current, designSelectedRef.current))
   }
 
+  const moveSelectionZ = (edge: 'front' | 'back') => {
+    const selected = new Set(designSelectedRef.current)
+    if (!selected.size) return
+    const next = [...designRef.current]
+    const parents = new Set(
+      next.filter((node) => selected.has(node.id)).map((node) => node.parentId || null)
+    )
+    for (const parentId of parents) {
+      const indices: number[] = []
+      const ids: string[] = []
+      next.forEach((node, index) => {
+        if ((node.parentId || null) === parentId) {
+          indices.push(index)
+          ids.push(node.id)
+        }
+      })
+      const picked = ids.filter((id) => selected.has(id))
+      const rest = ids.filter((id) => !selected.has(id))
+      const order = edge === 'front' ? [...rest, ...picked] : [...picked, ...rest]
+      const byId = new Map(next.map((node) => [node.id, node]))
+      order.forEach((id, i) => {
+        next[indices[i]] = byId.get(id)!
+      })
+    }
+    persistDesign(next)
+  }
+
+  const ungroupSelected = () => {
+    const ids = designSelectedRef.current
+    if (ids.length !== 1) return
+    const frame = designRef.current.find((node) => node.id === ids[0])
+    if (!frame || (frame.type !== 'frame' && frame.type !== 'section')) return
+    const kids = designRef.current.filter((node) => node.parentId === frame.id)
+    if (!kids.length) return
+    const next = designRef.current
+      .filter((node) => node.id !== frame.id)
+      .map((node) =>
+        node.parentId === frame.id
+          ? {
+              ...node,
+              parentId: frame.parentId || undefined,
+              x: (node.x || 0) + (frame.x || 0),
+              y: (node.y || 0) + (frame.y || 0),
+              pageId: frame.pageId || node.pageId
+            }
+          : node
+      )
+    persistDesign(next)
+    setDesignSelectedIds(kids.map((kid) => kid.id))
+  }
+
+  const toggleSelectionVisible = () => {
+    const ids = new Set(designSelectedRef.current)
+    if (!ids.size) return
+    const primary = designRef.current.find((node) => ids.has(node.id))
+    const hide = primary?.visible !== false
+    persistDesign(
+      designRef.current.map((node) => (ids.has(node.id) ? { ...node, visible: !hide } : node))
+    )
+  }
+
+  const toggleSelectionLock = () => {
+    const ids = new Set(designSelectedRef.current)
+    if (!ids.size) return
+    const primary = designRef.current.find((node) => ids.has(node.id))
+    const lock = !primary?.locked
+    persistDesign(
+      designRef.current.map((node) => (ids.has(node.id) ? { ...node, locked: lock } : node))
+    )
+  }
+
+  const toggleLayerVisible = (id: string) => {
+    const node = designRef.current.find((item) => item.id === id)
+    if (!node) return
+    const hide = node.visible !== false
+    persistDesign(designRef.current.map((item) => (item.id === id ? { ...item, visible: !hide } : item)))
+  }
+
+  const toggleLayerLock = (id: string) => {
+    const node = designRef.current.find((item) => item.id === id)
+    if (!node) return
+    const lock = !node.locked
+    persistDesign(designRef.current.map((item) => (item.id === id ? { ...item, locked: lock } : item)))
+  }
+
   const pasteClipboard = (mode: 'default' | 'on-top' | 'replace' = 'default') => {
     const clip = designClipboard.current
     if (!clip?.length) return
+    const doc = designRef.current
+    const byId = new Map(doc.map((node) => [node.id, node]))
+    const clipIds = new Set(clip.map((node) => node.id))
     const idMap = new Map<string, string>()
     for (const node of clip) idMap.set(node.id, crypto.randomUUID())
     const selected = designSelectedRef.current
-    const target = selected.length === 1 ? designRef.current.find((node) => node.id === selected[0]) : null
-    const offset = mode === 'on-top' ? 0 : 24
-    let next = [...designRef.current]
-    if (mode === 'replace' && selected.length) {
-      const remove = expandWithDescendants(next, new Set(selected))
-      next = next.filter((node) => !remove.has(node.id))
+    const target = selected.length === 1 ? byId.get(selected[0]) || null : null
+    const offset = mode === 'on-top' || mode === 'replace' ? 0 : 24
+    const roots = clip.filter((node) => !node.parentId || !clipIds.has(node.parentId))
+
+    // Figma paste target: selected frame → inside it; selected child → its parent (after it);
+    // nothing selected → back into the original frame when it's on this page.
+    let parentId: string | undefined
+    let afterId: string | undefined
+    if (mode === 'on-top' && target) {
+      parentId = target.id
+    } else if (mode === 'replace' && target) {
+      parentId = target.parentId && byId.has(target.parentId) ? target.parentId : undefined
+      afterId = target.id
+    } else if (target && (target.type === 'frame' || target.type === 'section') && !clipIds.has(target.id)) {
+      parentId = target.id
+    } else if (target?.parentId && byId.has(target.parentId)) {
+      parentId = target.parentId
+      afterId = target.id
+    } else if (!target && roots.length && roots.every((node) => node.parentId === roots[0].parentId)) {
+      const original = roots[0].parentId ? byId.get(roots[0].parentId) : undefined
+      if (original && (original.pageId || DEFAULT_PAGE.id) === activePageRef.current) parentId = original.id
     }
+    const parent = parentId ? byId.get(parentId) : undefined
+    const parentWorld = parent ? resolveWorldRect(parent, doc) : null
+    const parentAuto = Boolean(parent && isAutoLayout(parent))
+
+    const worldOf = (node: DesignNode) =>
+      node.parentId && byId.has(node.parentId) ? resolveWorldRect(node, doc) : { x: node.x, y: node.y, width: node.width || 0, height: node.height || 0 }
+
     const clones = clip.map((node) => {
-      const isRoot = !node.parentId || !idMap.has(node.parentId) || !clip.some((item) => item.id === node.parentId)
-      // roots are those whose parent isn't in the clipboard
-      const parentInClip = Boolean(node.parentId && clip.some((item) => item.id === node.parentId))
+      const parentInClip = Boolean(node.parentId && clipIds.has(node.parentId))
       const clone: DesignNode = {
         ...structuredClone(node),
         id: idMap.get(node.id)!,
-        parentId: parentInClip ? idMap.get(node.parentId!) : mode === 'on-top' && target ? target.id : undefined,
-        pageId: activePageRef.current,
-        x: parentInClip ? node.x : node.x + offset,
-        y: parentInClip ? node.y : node.y + offset
+        pageId: activePageRef.current
       }
-      if (mode === 'on-top' && target && !parentInClip) {
-        clone.parentId = target.id
+      if (parentInClip) {
+        clone.parentId = idMap.get(node.parentId!)
+        return clone
+      }
+      clone.parentId = parentId
+      if (mode === 'on-top' && parent) {
         clone.x = 16
         clone.y = 16
+      } else if (parentAuto) {
+        clone.layoutAbsolute = false
+      } else if (parent && parentWorld) {
+        if (node.parentId === parent.id) {
+          clone.x = node.x + offset
+          clone.y = node.y + offset
+        } else {
+          const world = worldOf(node)
+          let x = world.x - parentWorld.x
+          let y = world.y - parentWorld.y
+          const w = node.width || 0
+          const h = node.height || 0
+          if (x < 0 || y < 0 || x + w > parentWorld.width || y + h > parentWorld.height) {
+            x = (parentWorld.width - w) / 2
+            y = (parentWorld.height - h) / 2
+          }
+          clone.x = x
+          clone.y = y
+        }
+      } else {
+        const world = worldOf(node)
+        clone.x = world.x + offset
+        clone.y = world.y + offset
       }
-      void isRoot
+      const dx = clone.x - node.x
+      const dy = clone.y - node.y
+      if (node.points && (dx || dy) && !clone.parentId) {
+        clone.points = node.points.map((point) => ({
+          ...point,
+          x: point.x + dx,
+          y: point.y + dy,
+          inX: point.inX != null ? point.inX + dx : undefined,
+          inY: point.inY != null ? point.inY + dy : undefined,
+          outX: point.outX != null ? point.outX + dx : undefined,
+          outY: point.outY != null ? point.outY + dy : undefined
+        }))
+      }
       return clone
     })
-    const newRoots = clones.filter((node) => !node.parentId || !clones.some((item) => item.id === node.parentId)).map((node) => node.id)
-    persistDesign([...next, ...clones])
+
+    let next = [...doc]
+    if (mode === 'replace' && selected.length) {
+      const remove = expandWithDescendants(next, new Set(selected))
+      const anchorIndex = afterId ? next.findIndex((node) => node.id === afterId) : -1
+      next = next.filter((node) => !remove.has(node.id))
+      if (anchorIndex >= 0) {
+        next.splice(Math.min(anchorIndex, next.length), 0, ...clones)
+        clones.length = 0
+      }
+    }
+    if (clones.length) {
+      let insertAt = next.length
+      if (afterId) {
+        const subtree = expandWithDescendants(next, new Set([afterId]))
+        const last = next.reduce((index, node, i) => (subtree.has(node.id) ? i : index), -1)
+        if (last >= 0) insertAt = last + 1
+      }
+      next.splice(insertAt, 0, ...clones)
+    }
+    const newRoots = roots.map((node) => idMap.get(node.id)!).filter(Boolean)
+    persistDesign(next)
     setDesignSelectedIds(newRoots)
     setSelectedId(null)
   }
@@ -652,6 +3026,22 @@ export function App() {
   }
 
   const deleteSelected = () => {
+    const browserIds = selectedBrowserRef.current
+    if (browserIds.length) {
+      for (const id of browserIds) {
+        holes.current.delete(id)
+        if (dockedTabRef.current?.windowId === id) undockBrowserTab()
+        void window.vanta.closeBrowser(id)
+      }
+      const next = browsersRef.current.filter((item) => !browserIds.includes(item.id))
+      setBrowsers(next)
+      browsersRef.current = next
+      setInspectOn(false)
+      selectBrowsers([])
+      setBrowserMeasureId(null)
+      setSnapshotBrowserId(null)
+      openFileSidebarIfNoTabs(next)
+    }
     const selected = new Set(designSelectedRef.current)
     if (!selected.size) return
     let ids = new Set(selected)
@@ -684,24 +3074,50 @@ export function App() {
     setDesignSelectedIds(kids.map((node) => node.id))
   }
 
-  const nodeCssSnippet = (node: DesignNode, asTailwind: boolean) => {
-    const w = Math.round(node.width || 0)
-    const h = Math.round(node.height || 0)
-    const radii = node.cornerRadii
-    const radius = Math.round(node.radius || 0)
-    const fill = node.fill || 'transparent'
-    const radiusCss = radii
-      ? `${Math.round(radii.tl)}px ${Math.round(radii.tr)}px ${Math.round(radii.br)}px ${Math.round(radii.bl)}px`
-      : radius
-        ? `${radius}px`
-        : ''
-    if (asTailwind) {
-      if (radii && (radii.tl !== radii.tr || radii.tr !== radii.br || radii.br !== radii.bl)) {
-        return `w-[${w}px] h-[${h}px] rounded-tl-[${Math.round(radii.tl)}px] rounded-tr-[${Math.round(radii.tr)}px] rounded-br-[${Math.round(radii.br)}px] rounded-bl-[${Math.round(radii.bl)}px] bg-[${fill}]`
-      }
-      return `w-[${w}px] h-[${h}px]${radius ? ` rounded-[${radius}px]` : ''} bg-[${fill}]`
-    }
-    return `width: ${w}px;\nheight: ${h}px;\n${radiusCss ? `border-radius: ${radiusCss};\n` : ''}background: ${fill};`
+  const flashCopyToast = (text: string) => {
+    if (copyToastTimerRef.current) window.clearTimeout(copyToastTimerRef.current)
+    setCopyToast(text)
+    copyToastTimerRef.current = window.setTimeout(() => setCopyToast(null), 1800)
+  }
+
+  /** Selected layers minus any whose ancestor is also selected (the ancestor already includes them). */
+  const selectedCopyRoots = () => {
+    const all = designRef.current
+    const ids = new Set(designSelectedRef.current)
+    const byId = new Map(all.map((node) => [node.id, node]))
+    return designSelectedRef.current
+      .map((id) => byId.get(id))
+      .filter((node): node is DesignNode => Boolean(node))
+      .filter((node) => {
+        let parentId = node.parentId
+        const seen = new Set<string>()
+        while (parentId && !seen.has(parentId)) {
+          if (ids.has(parentId)) return false
+          seen.add(parentId)
+          parentId = byId.get(parentId)?.parentId
+        }
+        return true
+      })
+  }
+
+  const copySelectionAsCode = (tailwind: boolean) => {
+    const roots = selectedCopyRoots()
+    if (!roots.length) return
+    const text = nodesToReact(roots, designRef.current, { tailwind })
+    if (!text) return
+    void navigator.clipboard.writeText(text).then(
+      () => flashCopyToast(tailwind ? 'Copied as React with Tailwind' : 'Copied as React'),
+      () => flashCopyToast('Couldn’t copy to clipboard')
+    )
+  }
+
+  const copySelectionAsPng = () => {
+    const node = selectedCopyRoots().at(-1)
+    if (!node) return
+    void copyNodeAsPng(node, designRef.current).then(
+      () => flashCopyToast('Copied as PNG'),
+      () => flashCopyToast('Couldn’t copy PNG')
+    )
   }
 
   const openContextMenu = (event: { preventDefault: () => void; stopPropagation: () => void; clientX: number; clientY: number; shiftKey: boolean }, world: { x: number; y: number }) => {
@@ -766,8 +3182,7 @@ export function App() {
         name: title,
         pageId: activePageRef.current,
         fill: '#FFFFFF',
-        clipsContent: true,
-        layout: defaultFrameLayout()
+        clipsContent: true
       }
       const imageNode: DesignNode = {
         id: imageId,
@@ -849,8 +3264,17 @@ export function App() {
     return screenToWorld(cameraRef.current, event.clientX - rect.left, event.clientY - rect.top)
   }
 
-  /** Figma-style marquee: L→R intersects, R→L requires full containment. */
-  const marqueeHits = (screenBox: { left: number; top: number; width: number; height: number }, dragLeft: boolean) => {
+  /**
+   * Marquee selection (Paper/Figma):
+   * - Default: top-level only; L→R intersects, R→L requires full containment.
+   * - Ctrl/Cmd deep: also hits nested nodes. Frames/sections are only selected when
+   *   fully enclosed — partial overlap picks children inside, not the parent.
+   */
+  const marqueeHits = (
+    screenBox: { left: number; top: number; width: number; height: number },
+    dragLeft: boolean,
+    deep: boolean
+  ) => {
     const cam = cameraRef.current
     const world = {
       ...screenToWorld(cam, screenBox.left, screenBox.top),
@@ -858,17 +3282,21 @@ export function App() {
       height: screenBox.height / cam.zoom
     }
     const nodes = designRef.current.filter(
-      (node) =>
-        (node.pageId || DEFAULT_PAGE.id) === activePageRef.current &&
-        node.type !== 'comment' &&
-        !node.drafting
+      (node) => (node.pageId || DEFAULT_PAGE.id) === activePageRef.current
     )
-    return nodes
-      .filter((node) => {
-        const bounds = resolveWorldRect(node, designRef.current)
+    const nodeIds = marqueeSelectIds(nodes, world, { dragLeft, deep })
+    const browserIds = browsersRef.current
+      .filter((frame) => {
+        const bounds = {
+          x: frame.x,
+          y: frame.y,
+          width: frame.width,
+          height: frame.height + FRAME_CHROME_HEIGHT
+        }
         return dragLeft ? rectContains(world, bounds) : rectsOverlap(world, bounds)
       })
-      .map((node) => node.id)
+      .map((frame) => frame.id)
+    return { nodeIds, browserIds }
   }
 
   const syncLayout = useCallback(() => {
@@ -903,6 +3331,20 @@ export function App() {
           }
         }
       }
+      // Sidebars, toolbars, and popups must stay above native BrowserViews (z-index can't help).
+      const chromeObstacles = onCanvasRef.current
+        ? [...readShellChromeObstacles(), ...readChromeObstacles()]
+        : []
+      const omniboxEl = document.querySelector('.url-omnibox-menu')
+      const omniboxBox = omniboxEl?.getBoundingClientRect()
+      const omniboxRect =
+        omniboxBox && omniboxBox.width > 2 && omniboxBox.height > 2
+          ? padRect(omniboxBox, 4)
+          : null
+      const rectsOverlap = (a: ScreenRect, b: ScreenRect) =>
+        a.x < b.x + b.width && a.x + a.width > b.x && a.y < b.y + b.height && a.y + a.height > b.y
+      const docked = dockedTabRef.current
+      const dockedId = dockedVisibleRef.current && docked ? docked.tabId : null
       const items = browsersRef.current.flatMap((frame, index) => {
         const hole = holes.current.get(frame.id)
         const box = hole?.getBoundingClientRect()
@@ -913,16 +3355,36 @@ export function App() {
         if (clip && protect && frame.id !== selectedRef.current) {
           clip = largestRectOutside(clip, protect)
         }
+        if (clip && chromeObstacles.length) {
+          clip = clipAgainstObstacles(clip, chromeObstacles)
+        }
+        // Omnibox sits over the page; largest-rect clipping often still leaves the view
+        // covering the menu. Hide the native view while the menu is open over this hole.
+        const omniboxBlocks = Boolean(omniboxRect && holeRect.width > 2 && rectsOverlap(holeRect, omniboxRect))
+        if (omniboxBlocks) {
+          clip = { x: 0, y: 0, width: 0, height: 0 }
+        }
         const visibleHole = Boolean(clip && clip.width > 2 && clip.height > 2)
         const z = frame.id === selectedRef.current ? 10_000 + index : index
         return frame.tabs.map((tab) => {
           const active = tab.id === frame.activeTabId
+          // Docked tabs paint in the left panel hole — hide their canvas placement.
+          if (dockedId && tab.id === dockedId) {
+            return {
+              id: tab.id,
+              hole: { x: 0, y: 0, width: 0, height: 0 },
+              clip: { x: 0, y: 0, width: 0, height: 0 },
+              viewport: { width: frame.width, height: frame.height },
+              visible: false,
+              z
+            }
+          }
           return {
             id: tab.id,
             hole: holeRect,
             clip: active && clip ? clip : { x: 0, y: 0, width: 0, height: 0 },
             viewport: { width: frame.width, height: frame.height },
-            visible: active && visibleHole,
+            visible: active && visibleHole && !omniboxBlocks,
             z
           }
         })
@@ -931,36 +3393,94 @@ export function App() {
       const agentRect = agentBox
         ? { x: agentBox.left, y: agentBox.top, width: agentBox.width, height: agentBox.height }
         : { x: 0, y: 0, width: 0, height: 0 }
-      // Keep a bottom strip free in fullscreen so the exit chip stays clickable above BrowserView.
-      if (codingFullscreenRef.current && agentRect.height > 56) {
-        agentRect.height -= 52
-      }
       const agentOn = agentVisibleRef.current && agentRect.width > 2 && agentRect.height > 2
+      const dockedOn = Boolean(dockedId) && agentRect.width > 2 && agentRect.height > 2
+      let agentClip = agentRect
+      if (agentOn || dockedOn) {
+        // Sidebar BrowserViews paint above HTML — only carve out the floating toolbar
+        // (and similar overlays). Do not clip against the right sidebar / agent rail or
+        // the view shrinks into a small inset inside the pane.
+        const agentObstacles = readSidebarBrowserObstacles()
+        if (agentObstacles.length) agentClip = clipAgainstObstacles(agentRect, agentObstacles)
+      }
+      const agentClipOn = agentOn && agentClip.width > 2 && agentClip.height > 2
+      const dockedClipOn = dockedOn && agentClip.width > 2 && agentClip.height > 2
+      const agentOmniboxBlocks = Boolean(omniboxRect && agentRect.width > 2 && rectsOverlap(agentRect, omniboxRect))
       items.push({
         id: SIDEBAR_BROWSER_ID,
         hole: agentRect,
-        clip: agentRect,
+        clip: agentClipOn && !agentOmniboxBlocks ? agentClip : { x: 0, y: 0, width: 0, height: 0 },
         viewport: {
           width: Math.max(1, Math.round(agentRect.width)),
           height: Math.max(1, Math.round(agentRect.height))
         },
-        visible: agentOn,
+        visible: agentClipOn && !agentOmniboxBlocks,
         z: 50_000
       })
+      if (dockedId) {
+        const dockIdx = items.findIndex((item) => item.id === dockedId)
+        const dockFrame = browserPaneFrame(agentRect)
+        const dockClip = dockedClipOn
+          ? intersectRects(agentClip, dockFrame.hole) || { x: 0, y: 0, width: 0, height: 0 }
+          : { x: 0, y: 0, width: 0, height: 0 }
+        const dockClipOn = dockClip.width > 2 && dockClip.height > 2 && !agentOmniboxBlocks
+        const dockLayout = {
+          id: dockedId,
+          hole: dockFrame.hole,
+          clip: dockClipOn ? dockClip : { x: 0, y: 0, width: 0, height: 0 },
+          viewport: dockFrame.viewport,
+          visible: dockClipOn,
+          z: 50_000
+        }
+        if (dockIdx >= 0) items[dockIdx] = dockLayout
+        else items.push(dockLayout)
+      }
+      const sideObstacles = agentSideVisibleRef.current ? readSidebarBrowserObstacles() : []
+      for (const [index, slot] of sideBrowsersRef.current.entries()) {
+        const sideEl = agentSideHoles.current.get(slot.id)
+        const sideBox = sideEl?.getBoundingClientRect()
+        const sideRect = sideBox
+          ? { x: sideBox.left, y: sideBox.top, width: sideBox.width, height: sideBox.height }
+          : { x: 0, y: 0, width: 0, height: 0 }
+        const sideOn = agentSideVisibleRef.current && sideRect.width > 2 && sideRect.height > 2
+        let sideClip = sideRect
+        if (sideOn && sideObstacles.length) sideClip = clipAgainstObstacles(sideRect, sideObstacles)
+        const sideOmniboxBlocks = Boolean(omniboxRect && sideRect.width > 2 && rectsOverlap(sideRect, omniboxRect))
+        const sideClipOn = sideOn && sideClip.width > 2 && sideClip.height > 2 && !sideOmniboxBlocks
+        const sideFrame = browserPaneFrame(sideRect)
+        const sidePaint = sideClipOn
+          ? intersectRects(sideClip, sideFrame.hole) || { x: 0, y: 0, width: 0, height: 0 }
+          : { x: 0, y: 0, width: 0, height: 0 }
+        const sidePaintOn = sidePaint.width > 2 && sidePaint.height > 2
+        items.push({
+          id: slot.id,
+          hole: sideFrame.hole,
+          clip: sidePaintOn ? sidePaint : { x: 0, y: 0, width: 0, height: 0 },
+          viewport: sideFrame.viewport,
+          visible: sidePaintOn,
+          z: 50_050 + index
+        })
+      }
       const chatBox = chatHole.current?.getBoundingClientRect()
       const chatRect = chatBox
         ? { x: chatBox.left, y: chatBox.top, width: chatBox.width, height: chatBox.height }
         : { x: 0, y: 0, width: 0, height: 0 }
       const chatOn = chatBrowserVisibleRef.current && chatRect.width > 2 && chatRect.height > 2
+      let chatClip = chatRect
+      if (chatOn) {
+        const chatObstacles = readChromeObstacles('.rightbar')
+        if (chatObstacles.length) chatClip = clipAgainstObstacles(chatRect, chatObstacles)
+      }
+      const chatClipOn = chatOn && chatClip.width > 2 && chatClip.height > 2
       items.push({
         id: CHAT_BROWSER_ID,
         hole: chatRect,
-        clip: chatRect,
+        clip: chatClipOn ? chatClip : { x: 0, y: 0, width: 0, height: 0 },
         viewport: {
           width: Math.max(1, Math.round(chatRect.width)),
           height: Math.max(1, Math.round(chatRect.height))
         },
-        visible: chatOn,
+        visible: chatClipOn,
         z: 50_100
       })
       void window.vanta.syncLayout(items)
@@ -1000,36 +3520,34 @@ export function App() {
       publish(holes.current.get(browserId)?.parentElement?.getBoundingClientRect() ?? null)
       return
     }
-    const ids = designSelectedRef.current
-    if (ids.length !== 1) {
-      publish(null)
-      return
-    }
-    const node = designRef.current.find((item) => item.id === ids[0])
-    if (!node || node.type !== 'frame' || (node.pageId || DEFAULT_PAGE.id) !== activePageRef.current) {
-      publish(null)
-      return
-    }
-    if (node.parentId) {
-      const parent = designRef.current.find((item) => item.id === node.parentId)
-      if (parent?.type !== 'section') {
-        publish(null)
-        return
-      }
-    }
-    const el = worldRef.current?.querySelector(`[data-node-id="${CSS.escape(node.id)}"]`)
-    publish(el?.getBoundingClientRect() ?? null)
+    publish(null)
   }, [])
 
   const applyCamera = useCallback(
     (next: Camera) => {
+      const zoomChanged = cameraRef.current.zoom !== next.zoom
       cameraRef.current = next
+      if (pixelGridRef.current) paintPixelGrid(pixelGridRef.current, next)
       const world = worldRef.current
       if (world) {
         // Imperative transform only — React style must not overwrite this on unrelated re-renders.
         world.style.transform = `translate(${next.x}px, ${next.y}px) scale(${next.zoom})`
         world.style.setProperty('--zoom', String(next.zoom))
         world.setAttribute('data-zoom', String(next.zoom))
+        if (zoomChanged) {
+          // will-change layers keep their old raster scale; briefly dropping it once
+          // zooming settles re-rasterizes crisply at the new zoom (matters up to 25600%).
+          if (zoomSettleTimer.current != null) window.clearTimeout(zoomSettleTimer.current)
+          zoomSettleTimer.current = window.setTimeout(() => {
+            zoomSettleTimer.current = null
+            world.style.willChange = 'auto'
+            window.requestAnimationFrame(() => {
+              window.requestAnimationFrame(() => {
+                world.style.willChange = ''
+              })
+            })
+          }, 160)
+        }
       }
       syncLayout()
       measureActionAnchor()
@@ -1045,23 +3563,39 @@ export function App() {
   useEffect(() => {
     void window.vanta.getStatus().then(setStatus)
     const offBrowsers = window.vanta.onBrowsers((next) => {
-      setBrowsers((current) =>
-        next.map((frame) => {
+      for (const frame of next) {
+        for (const tab of frame.tabs) {
+          if (tab.url && tab.url !== 'about:blank') {
+            recordVisit({ url: tab.url, title: tab.title, favicon: tab.favicon })
+          }
+        }
+      }
+      setBrowsers((current) => {
+        const merged = next.map((frame) => {
           const local = current.find((item) => item.id === frame.id)
           return local
             ? { ...frame, x: local.x, y: local.y, width: local.width, height: local.height }
             : frame
         })
-      )
+        browsersRef.current = merged
+        return merged
+      })
     })
     void window.vanta.getBrowsers().then(setBrowsers)
     void window.vanta.getWorkspace().then((workspace) => {
+      const nextDesign = workspace.design || []
       setCamera(workspace.camera)
-      setDesign(workspace.design || [])
+      designRef.current = nextDesign
+      setDesign(nextDesign)
+      designsByFileRef.current[activeFileIdRef.current] = nextDesign
       if (workspace.pages?.length) {
+        pagesRef.current = workspace.pages
         setPages(workspace.pages)
-        setActivePageId(workspace.activePageId || workspace.pages[0].id)
+        const pageId = workspace.activePageId || workspace.pages[0].id
+        setActivePageId(pageId)
+        activePageRef.current = pageId
       }
+      void captureActiveFileThumbnail(activeFileIdRef.current)
     })
     const offStatus = window.vanta.onStatus(setStatus)
     const offLayout = window.vanta.onNeedLayout(() => {
@@ -1069,7 +3603,10 @@ export function App() {
     })
     const offWorkspace = window.vanta.onWorkspace((workspace) => {
       setCamera(workspace.camera)
-      setDesign(workspace.design || [])
+      const nextDesign = workspace.design || []
+      designRef.current = nextDesign
+      setDesign(nextDesign)
+      designsByFileRef.current[activeFileIdRef.current] = nextDesign
       if (workspace.pages?.length) {
         setPages(workspace.pages)
         setActivePageId(workspace.activePageId || workspace.pages[0].id)
@@ -1081,7 +3618,15 @@ export function App() {
       else if ('error' in event) window.alert(event.error)
       setSnapshotBrowserId(null)
     })
-    const offDesign = window.vanta.onDesign(setDesign)
+    const offDesign = window.vanta.onDesign((incoming) => {
+      if (designSavesInFlight > 0) return
+      const nodes = reuseUnchangedNodes(designRef.current, incoming)
+      if (nodes === designRef.current) return
+      designRef.current = nodes
+      setDesign(nodes)
+      const fileId = activeFileIdRef.current
+      if (fileId) designsByFileRef.current[fileId] = nodes
+    })
     const offBuild = window.vanta.onBuild((event: BuildUiEvent) => {
       if (event.type === 'mcp:status') {
         setMcpStatus({ running: event.running, url: event.url, port: event.port })
@@ -1115,6 +3660,7 @@ export function App() {
           return stored.recents
         })
         setCodingPopup(false)
+        setTabsPopup(false)
         setRail('coding-agents')
         setLeftOpen(true)
         setView('canvas')
@@ -1200,15 +3746,14 @@ export function App() {
   useLayoutEffect(() => {
     syncLayout()
     measureActionAnchor()
-  }, [camera, browsers, design, designSelectedIds, selectedId, activePageId, view, rail, leftOpen, rightOpen, leftWidth, rightWidth, codingActive, codingPopup, codingFullscreen, syncLayout, measureActionAnchor])
+    // Intentionally omit `design` — svgMarkup / content edits were re-clipping every
+    // BrowserView on each Quiver draft and freezing the UI. Geometry changes still
+    // sync via camera, selection, browser, and chrome deps below.
+  }, [camera, browsers, designSelectedIds, selectedId, activePageId, view, rail, leftOpen, rightOpen, leftWidth, rightWidth, codingActive, codingPopup, tabsPopup, codingFullscreen, sideBrowsers, dockedTab, syncLayout, measureActionAnchor])
 
   useEffect(() => {
-    if (rail !== 'chat') return
-    void window.vanta.openSidebarBrowser(CHAT_BROWSER_ID, CHAT_BROWSER_HOME).then(() => {
-      setChatBrowserUrl(CHAT_BROWSER_HOME)
-      syncLayout()
-    })
-  }, [rail, syncLayout])
+    void window.vanta.closeBrowser(CHAT_BROWSER_ID).catch(() => undefined)
+  }, [rail])
 
   useEffect(() => {
     void window.vanta.setInspect(inspectOn && !browserMeasureId && !snapshotBrowserId ? activeTabId : null)
@@ -1248,8 +3793,18 @@ export function App() {
   useEffect(() => {
     const canvas = canvasRef.current
     if (!canvas) return
-    const onWheel = (event: WheelEvent) => {
-      event.preventDefault()
+    const applyWheel = (event: {
+      preventDefault?: () => void
+      clientX: number
+      clientY: number
+      deltaX: number
+      deltaY: number
+      deltaMode: number
+      ctrlKey: boolean
+      metaKey: boolean
+      shiftKey: boolean
+    }) => {
+      event.preventDefault?.()
       const rect = canvas.getBoundingClientRect()
       const current = cameraRef.current
       const sx = event.clientX - rect.left
@@ -1259,19 +3814,105 @@ export function App() {
         applyCamera(zoomAt(current, sx, sy, current.zoom * wheelZoomFactor(event.deltaY)))
         return
       }
+      // Shift+scroll pans horizontally (map vertical wheel to X)
+      if (event.shiftKey) {
+        const delta = wheelPan(event.deltaY || event.deltaX, 0, event.deltaMode)
+        applyCamera({ ...current, x: current.x + delta.x, y: current.y + delta.y })
+        return
+      }
       const delta = wheelPan(event.deltaX, event.deltaY, event.deltaMode)
       applyCamera({ ...current, x: current.x + delta.x, y: current.y + delta.y })
     }
+    const onWheel = (event: WheelEvent) => applyWheel(event)
     canvas.addEventListener('wheel', onWheel, { passive: false, capture: true })
+    const offBrowserWheel = window.vanta.onCanvasWheel?.(applyWheel)
+    const offZoomKey = window.vanta.onCanvasZoomKey?.((event) => {
+      const el = canvasRef.current
+      if (!el) return
+      const current = cameraRef.current
+      const cx = el.clientWidth / 2
+      const cy = el.clientHeight / 2
+      if (event.key === '0') applyCamera(zoomAt(current, cx, cy, 1))
+      else if (event.key === '-' || event.key === '_') applyCamera(zoomAt(current, cx, cy, current.zoom / 1.12))
+      else applyCamera(zoomAt(current, cx, cy, current.zoom * 1.12))
+    })
     const observer = new ResizeObserver(() => syncLayout())
     observer.observe(canvas)
     // Seed transform in case React unmounted/remounted the world node
     applyCamera(cameraRef.current)
     return () => {
       canvas.removeEventListener('wheel', onWheel, true)
+      offBrowserWheel?.()
+      offZoomKey?.()
       observer.disconnect()
     }
   }, [applyCamera, syncLayout, view])
+
+  // Re-clip BrowserViews when persistent chrome boxes resize (menus call syncLayout via onChromeChange).
+  useEffect(() => {
+    if (view !== 'canvas') return
+    const ro = new ResizeObserver(() => syncLayout())
+    const els = [
+      document.querySelector('.leftbar'),
+      document.querySelector('.leftbar-panel'),
+      document.querySelector('.rightbar'),
+      document.querySelector('.canvas-toolbar-shell'),
+      document.querySelector('.frame-action-wrap'),
+      document.querySelector('.file-tabs')
+    ].filter((el): el is Element => Boolean(el))
+    for (const el of els) ro.observe(el)
+
+    let moTimer: number | null = null
+    const schedule = () => {
+      if (moTimer != null) return
+      moTimer = window.setTimeout(() => {
+        moTimer = null
+        syncLayout()
+      }, 16)
+    }
+    const overlaySelector = `[data-chrome-overlay], .ca-popup-backdrop, .ca-popup, .ca-agent-picker, .ca-agent-rail, .ca-fs-popup, .shape-menu, .frame-action-menu, .ctx-menu, .layer-menu, .brush-picker, ${INSPECTOR_POPUP_SELECTOR}`
+    const isOverlay = (node: Node) => {
+      if (!(node instanceof Element)) return false
+      return Boolean(node.matches?.(overlaySelector) || node.querySelector?.(overlaySelector))
+    }
+    const observeOverlays = (node: Element) => {
+      if (node.matches(INSPECTOR_POPUP_SELECTOR)) ro.observe(node)
+      node.querySelectorAll(INSPECTOR_POPUP_SELECTOR).forEach((el) => ro.observe(el))
+    }
+    document.querySelectorAll(INSPECTOR_POPUP_SELECTOR).forEach((el) => ro.observe(el))
+    const mo = new MutationObserver((records) => {
+      for (const record of records) {
+        if (record.type !== 'childList') continue
+        for (const node of record.addedNodes) {
+          if (isOverlay(node)) {
+            if (node instanceof Element) observeOverlays(node)
+            schedule()
+            return
+          }
+        }
+        for (const node of record.removedNodes) {
+          if (isOverlay(node)) {
+            schedule()
+            return
+          }
+        }
+      }
+    })
+    mo.observe(document.body, { childList: true, subtree: true })
+
+    const onOmniboxLayout = () => {
+      // Hide overlapping BrowserViews immediately so suggestion clicks hit HTML.
+      syncLayout()
+    }
+    window.addEventListener('vanta:chrome-layout', onOmniboxLayout)
+
+    return () => {
+      ro.disconnect()
+      mo.disconnect()
+      window.removeEventListener('vanta:chrome-layout', onOmniboxLayout)
+      if (moTimer != null) window.clearTimeout(moTimer)
+    }
+  }, [syncLayout, view, leftOpen, rightOpen, selectedId, designSelectedIds, actionAnchor, codingPopup, tabsPopup, codingFullscreen])
 
   const fitView = useCallback(() => {
     const canvas = canvasRef.current
@@ -1293,20 +3934,29 @@ export function App() {
     applyCamera(zoomAt(cameraRef.current, canvas.clientWidth / 2, canvas.clientHeight / 2, zoom))
   }
 
+  const pendingAgentOpenUrl = useRef<string | null>(null)
+
   const openCodingAgent = useCallback(
-    (agentId: CodingAgentId, projectName?: string, id?: string) => {
+    (agentId: CodingAgentId, projectName?: string, id?: string, openUrl?: string) => {
       const fileName = files.find((file) => file.id === activeFileId)?.name || 'Untitled'
       const stored = rememberCodingAgent(codingRecents, {
         agentId,
         projectName: projectName || fileName,
         id
       })
+      if (sideBrowsersRef.current.length) closeAllSideBrowsers()
+      dockedTabRef.current = null
+      setDockedTab(null)
+      pendingAgentOpenUrl.current = openUrl?.trim() || null
       setCodingActive(stored.active)
       setCodingRecents(stored.recents)
       setCodingPopup(false)
+      setTabsPopup(false)
       setRail('coding-agents')
       setLeftOpen(true)
       setView('canvas')
+      // Paper-style: agent browser fills the left sidebar after MCP setup.
+      requestAnimationFrame(() => enterCodingFullscreen())
     },
     [activeFileId, codingRecents, files]
   )
@@ -1314,8 +3964,73 @@ export function App() {
   useEffect(() => {
     if (!codingActive) return
     const meta = getCodingAgentMeta(codingActive.agentId)
-    void window.vanta.openSidebarBrowser(SIDEBAR_BROWSER_ID, meta.webAppUrl).then(() => syncLayout())
+    let cancelled = false
+    void (async () => {
+      // Prefer the install / tunnel URL from Connect → Done so Cursor registers Vanta MCP.
+      let startUrl = pendingAgentOpenUrl.current || meta.webAppUrl
+      pendingAgentOpenUrl.current = null
+      if (!startUrl || startUrl === meta.webAppUrl) {
+        try {
+          const link = await window.vanta.getAgentMcpLink(codingActive.agentId)
+          if (cancelled) return
+          if (link.openUrl) startUrl = link.openUrl
+          else if (link.installUrl && codingActive.agentId === 'cursor') startUrl = link.installUrl
+        } catch {
+          /* keep default */
+        }
+      }
+      if (cancelled) return
+      setCodingAgentUrl(startUrl)
+      await window.vanta.openSidebarBrowser(SIDEBAR_BROWSER_ID, startUrl)
+      if (!cancelled) syncLayout()
+    })()
+    return () => {
+      cancelled = true
+    }
   }, [codingActive, syncLayout])
+
+  useEffect(() => {
+    const openIds = new Set(sideBrowsers.map((item) => item.id))
+    for (const id of AGENT_SIDE_BROWSER_IDS) {
+      if (!openIds.has(id) || (!codingActive && !dockedTab)) {
+        void window.vanta.closeBrowser(id).catch(() => undefined)
+      }
+    }
+    if ((!codingActive && !dockedTab) || sideBrowsers.length === 0) return
+    let cancelled = false
+    for (const slot of sideBrowsers) {
+      void window.vanta.openSidebarBrowser(slot.id, slot.url).then(() => {
+        if (cancelled) return
+        syncLayout()
+        requestAnimationFrame(() => {
+          syncLayout()
+          requestAnimationFrame(() => syncLayout())
+        })
+      })
+    }
+    return () => {
+      cancelled = true
+    }
+  }, [sideBrowsers, codingActive, dockedTab, syncLayout])
+
+  useEffect(() => {
+    if (!dockedTab) return
+    const frame = browsers.find((item) => item.id === dockedTab.windowId)
+    if (!frame?.tabs.some((tab) => tab.id === dockedTab.tabId)) {
+      dockedTabRef.current = null
+      setDockedTab(null)
+    }
+  }, [browsers, dockedTab])
+
+  useEffect(() => {
+    if (codingActive || dockedTab) return
+    if (sideBrowsersRef.current.length || codingFullscreenRef.current) {
+      collapseAgentWorkspace()
+    } else {
+      clearAgentFsToolbarTimer()
+      setToolbarHiddenForAgentFs(false)
+    }
+  }, [codingActive, dockedTab])
 
   useEffect(() => {
     const down = async (event: KeyboardEvent) => {
@@ -1340,7 +4055,28 @@ export function App() {
         deepSelectHeldRef.current = true
         setDeepSelectHeld(true)
       }
+      const meta = event.ctrlKey || event.metaKey
+      // Canvas undo/redo — always, except while typing in fields or during SVG/vectorize generation.
+      if (meta && event.key.toLowerCase() === 'z' && !typing) {
+        event.preventDefault()
+        if (isDesignGenerationBusy()) return
+        if (event.shiftKey) redoDesign()
+        else undoDesign()
+        return
+      }
       if (typing) return
+      if (cropSessionRef.current) {
+        // While cropping: Enter applies, Esc cancels; don't let other shortcuts touch the layer.
+        if (event.key === 'Enter' || event.key === 'Escape') {
+          event.preventDefault()
+          finishImageCropRef.current(event.key === 'Enter')
+          return
+        }
+        if (event.key === 'Delete' || event.key === 'Backspace' || event.key.startsWith('Arrow') || event.key === 'Tab') {
+          event.preventDefault()
+          return
+        }
+      }
       if (designRef.current.some((node) => node.editing)) {
         // While editing text, only allow Escape to finish — never tool/layer shortcuts.
         if (event.key === 'Escape') {
@@ -1349,7 +4085,6 @@ export function App() {
         }
         return
       }
-      const meta = event.ctrlKey || event.metaKey
       if (meta && event.key === '0') {
         event.preventDefault()
         zoomTo(1)
@@ -1372,11 +4107,14 @@ export function App() {
         if (!frame) return
         if (frame.tabs.length <= 1) {
           holes.current.delete(frame.id)
-          setBrowsers((current) => current.filter((item) => item.id !== frame.id))
+          const next = browsersRef.current.filter((item) => item.id !== frame.id)
+          setBrowsers(next)
+          browsersRef.current = next
           setSelectedId(null)
           void window.vanta.closeBrowser(frame.id)
+          openFileSidebarIfNoTabs(next)
         } else {
-          void window.vanta.closeTab(frame.id, frame.activeTabId)
+          closeBrowserTab(frame.id, frame.activeTabId)
         }
       } else if (meta && event.key.toLowerCase() === 'l') {
         event.preventDefault()
@@ -1388,13 +4126,23 @@ export function App() {
         setTool((current) => (current === 'scale' ? 'pointer' : 'scale'))
         setHandMode(false)
       } else if (!meta && event.key === 'Escape') {
+        if (jev.picking) {
+          jev.setPicking(false)
+          designSelectedRef.current = []
+          setDesignSelectedIds([])
+          return
+        }
+        if (jev.on && jev.locked) {
+          jev.clearTarget()
+          return
+        }
         if (contextMenuRef.current) {
           setContextMenu(null)
           contextMenuRef.current = null
           return
         }
         if (codingFullscreenRef.current) {
-          setCodingFullscreen(false)
+          exitCodingFullscreen()
           return
         }
         const drafting = designRef.current.find((node) => node.type === 'comment' && node.drafting)
@@ -1437,6 +4185,16 @@ export function App() {
         }
       } else if (!meta && event.key === 'Enter' && designSelectedRef.current.length) {
         event.preventDefault()
+        // Enter on a lone image layer opens Crop (Figma); otherwise it selects children.
+        const only = designSelectedRef.current.length === 1 ? designRef.current.find((node) => node.id === designSelectedRef.current[0]) : null
+        const isImage =
+          only &&
+          !designRef.current.some((node) => node.parentId === only.id) &&
+          getNodePaints(only).some((paint) => paint.type === 'image' && (paint.imageDataUrl || only.imageDataUrl))
+        if (only && isImage) {
+          startImageCropRef.current(only.id)
+          return
+        }
         selectChildrenOfSelection()
       } else if (!meta && event.key.toLowerCase() === 'v') {
         setTool('pointer')
@@ -1452,6 +4210,9 @@ export function App() {
           return
         }
         wrapFlexSelected()
+      } else if ((meta || event.ctrlKey) && event.shiftKey && (event.code === 'Backslash' || event.key === '\\')) {
+        event.preventDefault()
+        setLeftOpen((value) => !value)
       } else if (!meta && event.key.toLowerCase() === 'f' && event.shiftKey) {
         event.preventDefault()
         if (designSelectedRef.current.length) frameSelected()
@@ -1480,6 +4241,12 @@ export function App() {
       } else if (meta && event.key.toLowerCase() === 'v' && event.altKey) {
         event.preventDefault()
         pasteStylesToSelection()
+      } else if (meta && event.shiftKey && !event.altKey && event.code === 'KeyC') {
+        event.preventDefault()
+        copySelectionAsPng()
+      } else if (!meta && event.altKey && !event.shiftKey && (event.code === 'KeyT' || event.code === 'KeyR')) {
+        event.preventDefault()
+        copySelectionAsCode(event.code === 'KeyT')
       } else if (!meta && event.key.toLowerCase() === 's' && event.shiftKey) {
         setTool('section')
       } else if (!meta && event.key.toLowerCase() === 'b') {
@@ -1502,31 +4269,76 @@ export function App() {
       } else if (!meta && event.key.toLowerCase() === 'l') {
         setShapeKind(event.shiftKey ? 'arrow' : 'line')
         setTool('shape')
-      } else if ((event.key === 'Delete' || event.key === 'Backspace') && designSelectedRef.current.length) {
+      } else if (
+        (event.key === 'Delete' || event.key === 'Backspace') &&
+        (designSelectedRef.current.length || selectedBrowserRef.current.length)
+      ) {
         event.preventDefault()
-        const selected = new Set(designSelectedRef.current)
-        const keepChildren = meta
-        if (keepChildren) {
-          persistDesign(
-            designRef.current
-              .filter((node) => !selected.has(node.id))
-              .map((node) => (node.parentId && selected.has(node.parentId) ? { ...node, parentId: null } : node))
-          )
-        } else {
-          let ids = new Set(selected)
-          let changed = true
-          while (changed) {
-            changed = false
-            for (const node of designRef.current) {
-              if (node.parentId && ids.has(node.parentId) && !ids.has(node.id)) {
-                ids.add(node.id)
-                changed = true
+        const browserIds = [...selectedBrowserRef.current]
+        if (browserIds.length) {
+          if (dockedTabRef.current && browserIds.includes(dockedTabRef.current.windowId)) {
+            dockedTabRef.current = null
+            setDockedTab(null)
+            dockedVisibleRef.current = false
+            agentSideVisibleRef.current = false
+            collapseAgentWorkspace()
+          }
+          for (const id of browserIds) {
+            holes.current.delete(id)
+            void window.vanta.closeBrowser(id)
+          }
+          const next = browsersRef.current.filter((item) => !browserIds.includes(item.id))
+          setBrowsers(next)
+          browsersRef.current = next
+          setInspectOn(false)
+          selectBrowsers([])
+          setBrowserMeasureId(null)
+          setSnapshotBrowserId(null)
+          openFileSidebarIfNoTabs(next)
+        }
+        if (designSelectedRef.current.length) {
+          const selected = new Set(designSelectedRef.current)
+          const keepChildren = meta
+          if (keepChildren) {
+            persistDesign(
+              designRef.current
+                .filter((node) => !selected.has(node.id))
+                .map((node) => (node.parentId && selected.has(node.parentId) ? { ...node, parentId: null } : node))
+            )
+          } else {
+            let ids = new Set(selected)
+            let changed = true
+            while (changed) {
+              changed = false
+              for (const node of designRef.current) {
+                if (node.parentId && ids.has(node.parentId) && !ids.has(node.id)) {
+                  ids.add(node.id)
+                  changed = true
+                }
               }
             }
+            persistDesign(designRef.current.filter((node) => !ids.has(node.id)))
           }
-          persistDesign(designRef.current.filter((node) => !ids.has(node.id)))
+          setDesignSelectedIds([])
         }
-        setDesignSelectedIds([])
+      } else if (!meta && event.key === 'Tab' && designSelectedRef.current.length) {
+        // Tab / Shift+Tab: select the next / previous sibling (layer order = flex order).
+        event.preventDefault()
+        const nodes = designRef.current
+        const current = nodes.find((node) => node.id === designSelectedRef.current[designSelectedRef.current.length - 1])
+        if (!current) return
+        const siblings = nodes.filter(
+          (node) =>
+            node.parentId === current.parentId &&
+            node.type !== 'comment' &&
+            node.visible !== false &&
+            (current.parentId || (node.pageId || DEFAULT_PAGE.id) === activePageRef.current)
+        )
+        const index = siblings.findIndex((node) => node.id === current.id)
+        if (siblings.length < 2 || index < 0) return
+        const next = siblings[(index + (event.shiftKey ? -1 : 1) + siblings.length) % siblings.length]
+        designSelectedRef.current = [next.id]
+        setDesignSelectedIds([next.id])
       } else if (
         !meta &&
         (event.key === 'ArrowLeft' ||
@@ -1549,18 +4361,33 @@ export function App() {
         const parentId = roots[0]?.parentId
         const parent = parentId ? nodes.find((node) => node.id === parentId) : null
         const flexParent = parent && isAutoLayout(parent) ? parent : null
-        const vertical = flexParent?.layout?.mode === 'vertical'
-        const alongMain =
-          Boolean(flexParent) &&
-          roots.every((node) => node.parentId === parentId && !node.layoutAbsolute) &&
-          (vertical ? dy !== 0 : dx !== 0)
-        if (alongMain && flexParent && parentId) {
-          const delta = (vertical ? dy : dx) > 0 ? 1 : -1
-          const reordered = reorderFlexByDelta(nodes, ids, delta)
-          if (reordered) persistDesign(reordered)
+        const inFlow =
+          Boolean(flexParent) && roots.every((node) => node.parentId === parentId && !node.layoutAbsolute)
+        if (flexParent && inFlow) {
+          // Flex children reorder instead of nudging (Paper/Figma):
+          // main-axis arrows move one slot, grid/wrap cross-axis arrows move a whole row,
+          // Shift jumps to the start or end.
+          const layout = flexParent.layout!
+          const vertical = layout.mode === 'vertical'
+          const horizontalKey = dx !== 0
+          const sign = (horizontalKey ? dx : dy) > 0 ? 1 : -1
+          const onMain = horizontalKey !== vertical
+          let delta = 0
+          if (layout.grid) {
+            const columns = Math.max(1, Math.round(layout.grid.columns || 1))
+            delta = horizontalKey ? sign : sign * columns
+          } else if (onMain) {
+            delta = sign
+          } else if (layout.wrap) {
+            delta = sign * flexLineLength(nodes, flexParent)
+          }
+          if (delta && event.shiftKey) delta = sign * Number.MAX_SAFE_INTEGER
+          if (delta) {
+            const reordered = reorderFlexByDelta(nodes, ids, delta)
+            if (reordered) persistDesign(reordered)
+          }
           return
         }
-        if (flexParent && roots.every((node) => !node.layoutAbsolute)) return
         const selectedRoots = new Set(roots.map((node) => node.id))
         persistDesign(
           nodes.map((node) => {
@@ -1595,7 +4422,6 @@ export function App() {
     const canvas = canvasRef.current
     const rect = canvas?.getBoundingClientRect()
     const current = cameraRef.current
-    const origin = rect ? screenToWorld(current, 80, 80) : { x: 80, y: 80 }
     const width = input?.width
       ? Math.round(input.width)
       : rect
@@ -1606,9 +4432,12 @@ export function App() {
       : rect
         ? Math.round(Math.max(MIN_VIEWPORT.height, Math.min(DEFAULT_VIEWPORT.height, (rect.height / current.zoom) * 0.58)))
         : DEFAULT_VIEWPORT.height
-    const offset = input?.x == null ? browsersRef.current.length * 40 : 0
-    const x = Math.round(input?.x ?? origin.x + offset)
-    const y = Math.round(input?.y ?? origin.y + offset)
+    const center = canvas
+      ? screenToWorld(current, canvas.clientWidth / 2, canvas.clientHeight / 2)
+      : { x: 80, y: 80 }
+    const cascade = input?.x == null ? browsersRef.current.length * 40 : 0
+    const x = Math.round(input?.x ?? center.x - width / 2 + cascade)
+    const y = Math.round(input?.y ?? center.y - height / 2 + cascade)
     const created = await window.vanta.createBrowser({
       url: input?.url,
       x,
@@ -1620,10 +4449,31 @@ export function App() {
       ...currentFrames.filter((item) => item.id !== created.id),
       { ...created, x, y, width, height }
     ])
+    browsersRef.current = [
+      ...browsersRef.current.filter((item) => item.id !== created.id),
+      { ...created, x, y, width, height }
+    ]
     setSelectedId(created.id)
+    setSelectedBrowserIds([created.id])
+    selectedBrowserRef.current = [created.id]
     setDesignSelectedIds([])
+    openTabsSidebar()
     await window.vanta.updateFrame({ id: created.id, x, y, width, height })
     return created
+  }
+
+  const openTabInCanvas = async () => {
+    setTabsPopup(false)
+    setCodingPopup(false)
+    await addBrowser()
+  }
+
+  const openTabToLeft = async () => {
+    setTabsPopup(false)
+    setCodingPopup(false)
+    const created = await addBrowser()
+    const tabId = created.activeTabId || created.tabs[0]?.id
+    if (tabId) dockBrowserTab(created.id, tabId)
   }
 
   const patchFrame = (id: string, patch: Partial<Frame>) => {
@@ -1631,14 +4481,32 @@ export function App() {
     void window.vanta.updateFrame({ id, ...patch })
   }
 
+  const exitCreateSvg = () => {
+    if (!createSvgOpen) return
+    // Dismissing the panel must NOT abort Quiver — the canvas build keeps
+    // running and finishes on its own. Only the Stop button cancels.
+    setCreateSvgOpen(false)
+    if (!createSvgBusy) setCreateSvgStatus(null)
+  }
+
   const chooseTool = (next: DesignTool) => {
+    exitCreateSvg()
     if (toolRef.current === 'pen' && next !== 'pen') finishPen()
     setTool(next)
     setHandMode(false)
     setPenHover(null)
     setPathHoverId(null)
     setDrawCursor(null)
-    if (next !== 'measure') setMeasureHoverId(null)
+    if (next !== 'measure') {
+      setMeasureHoverId(null)
+      setMeasureOffsets({})
+      setMeasurePins([])
+      setMeasureEdgeHover(null)
+      setMeasureActiveLineId(null)
+      setMeasureDraft(null)
+      measureSlide.current = null
+      measureCreate.current = null
+    }
     if (next !== 'pointer' && next !== 'hand' && next !== 'scale' && next !== 'measure') {
       if (next === 'pen' || next === 'pencil' || next === 'brush') setSwitchMode('draw')
       setInspectOn(false)
@@ -1681,12 +4549,13 @@ export function App() {
       name,
       pageId: activePageRef.current,
       fill: '#FFFFFF',
-      clipsContent: true,
-      layout: defaultFrameLayout()
+      clipsContent: true
     }
     persistDesign([...designRef.current, node])
     setDesignSelectedIds([id])
     setSelectedId(null)
+    setTool('pointer')
+    setDrawCursor(null)
   }
 
   const spawnBrowserPreset = (preset: FramePreset) => {
@@ -1701,6 +4570,8 @@ export function App() {
       width: preset.width,
       height: preset.height
     })
+    setTool('pointer')
+    setDrawCursor(null)
   }
 
   const openCommentThread = (id: string) => {
@@ -1720,23 +4591,28 @@ export function App() {
   }
 
   const chooseMode = (next: SwitchMode) => {
+    exitCreateSvg()
     setSwitchMode(next)
     setInspectOn(false)
     if (next === 'chat') {
+      // Hide native BrowserViews before React swaps the page — they paint above HTML
+      // and otherwise sit over chat until the next layout pass.
+      onCanvasRef.current = false
+      syncLayout()
+      clearAgentFsToolbarTimer()
+      agentFsPending.current = null
+      setToolbarHiddenForAgentFs(false)
+      setChatPoppedOut(false)
       setTool('pointer')
       setHandMode(false)
-      window.setTimeout(() => {
-        setView('canvas')
-        setRail('chat')
-        setLeftOpen(true)
-        setRightOpen(true)
-        setRightWidth((width) => Math.max(width, 420))
-      }, 220)
+      setView('canvas')
+      setRail('chat')
+      setLeftOpen(true)
       return
     }
     if (rail === 'chat') {
       setRail('file')
-      setRightWidth((width) => Math.min(width, 280))
+      setChatPoppedOut(false)
     }
     if (next === 'draw') {
       if (toolRef.current === 'pointer' || toolRef.current === 'hand' || toolRef.current === 'scale') {
@@ -1749,6 +4625,38 @@ export function App() {
         setTool('pointer')
       }
     }
+  }
+
+  const popOutAgentsPanel = () => {
+    setChatPoppedOut(true)
+    setSwitchMode('design')
+    setInspectOn(false)
+    setHandMode(false)
+    setView('canvas')
+    setRail('file')
+    setLeftOpen(true)
+    if (
+      toolRef.current === 'pen' ||
+      toolRef.current === 'pencil' ||
+      toolRef.current === 'brush' ||
+      (toolRef.current !== 'pointer' && toolRef.current !== 'hand' && toolRef.current !== 'scale')
+    ) {
+      setTool('pointer')
+    }
+  }
+
+  /** Drawing-bar edits also restyle the strokes that are currently selected. */
+  const patchSelectedInk = (patch: Partial<DesignNode>) => {
+    const ids = new Set(designSelectedRef.current)
+    if (!ids.size) return
+    let changed = false
+    const next = designRef.current.map((node) => {
+      if (!ids.has(node.id) || !hasWorldPoints(node)) return node
+      if (patch.brushStyle && node.pathTool === 'pen') return node
+      changed = true
+      return { ...node, ...patch }
+    })
+    if (changed) persistDesign(next, { skipReflow: true })
   }
 
   const finishPen = () => {
@@ -1797,6 +4705,19 @@ export function App() {
       setDesignSelectedIds([node.id])
       return
     }
+    if (gesture.kind === 'browser') {
+      const width = Math.max(MIN_VIEWPORT.width, Math.round(current.width || 0))
+      const height = Math.max(MIN_VIEWPORT.height, Math.round(current.height || 0))
+      if (Math.min(current.width || 0, current.height || 0) < 8) return
+      void addBrowser({
+        x: Math.round(current.x),
+        y: Math.round(current.y),
+        width,
+        height
+      })
+      setTool('pointer')
+      return
+    }
     if (gesture.type === 'line' || gesture.type === 'arrow') {
       const length = Math.hypot(current.width || 0, current.height || 0)
       if (length < 8) return
@@ -1831,7 +4752,7 @@ export function App() {
       // Section first so it paints under contained nodes.
       next = [current, ...next]
     } else {
-      const placed = attachToParent(current, next)
+      const placed = hasWorldPoints(current) ? current : attachToParent(current, next)
       next = [...next, placed]
     }
 
@@ -1845,8 +4766,25 @@ export function App() {
     if (currentTool === 'pointer' || currentTool === 'hand' || currentTool === 'scale') return
     const point = worldFromEvent(event)
     if (currentTool === 'browser') {
-      void addBrowser({ x: point.x, y: point.y })
-      setTool('pointer')
+      const id = crypto.randomUUID()
+      drawRef.current = { id, kind: 'browser', type: 'frame', startX: point.x, startY: point.y }
+      setDraft({
+        id,
+        type: 'frame',
+        x: point.x,
+        y: point.y,
+        width: 1,
+        height: 1,
+        name: 'Browser',
+        pageId: activePageRef.current,
+        fill: '#FFFFFF',
+        fillOpacity: 1,
+        opacity: 1,
+        clipsContent: true
+      })
+      setDesignSelectedIds([])
+      setSelectedId(null)
+      event.currentTarget.setPointerCapture(event.pointerId)
       return
     }
     const id = crypto.randomUUID()
@@ -2042,13 +4980,18 @@ export function App() {
 
   const sendChat = async () => {
     const text = chatInput.trim()
+    if (text && jev.on) {
+      setChatInput('')
+      jev.apply(text)
+      return
+    }
     if (!text || agentBusy || !activeChat) return
-    if (rail !== 'chat') {
+    if (rail !== 'chat' && !chatPoppedOut) {
+      onCanvasRef.current = false
+      syncLayout()
       setSwitchMode('chat')
       setRail('chat')
       setLeftOpen(true)
-      setRightOpen(true)
-      setRightWidth((width) => Math.max(width, 420))
     }
     setChatInput('')
     const chatId = activeChat.id
@@ -2107,42 +5050,57 @@ export function App() {
   }
 
   const openFile = (id: string) => {
-    setActiveFileId(id)
+    if (id !== activeFileIdRef.current) {
+      void captureActiveFileThumbnail(activeFileIdRef.current)
+      rememberActiveDesign()
+      setActiveFileId(id)
+      applyFileDesign(id)
+    } else {
+      setActiveFileId(id)
+    }
     setFiles((current) => current.map((file) => (file.id === id ? { ...file, editedAt: Date.now() } : file)))
     setView('canvas')
   }
 
   const addFile = (name?: string) => {
+    rememberActiveDesign()
     const id = crypto.randomUUID()
     const nextName = name?.trim() || `File ${files.length + 1}`
+    designsByFileRef.current[id] = []
     setFiles((current) => [...current, { id, name: nextName.slice(0, 48), editedAt: Date.now() }])
     setActiveFileId(id)
+    applyFileDesign(id, [])
     setView('canvas')
   }
 
   const closeFile = (id: string) => {
+    rememberActiveDesign()
     setFiles((current) => {
-      const next = current.filter((file) => file.id !== id)
-      const remaining = next.length ? next : [{ id: crypto.randomUUID(), name: 'Untitled', editedAt: Date.now() }]
-      const fallback = remaining.find((file) => file.id === activeFileId) || remaining[0]
-      setActiveFileId(fallback.id)
+      const filtered = current.filter((file) => file.id !== id)
+      const remaining = filtered.length
+        ? filtered
+        : [{ id: crypto.randomUUID(), name: 'Untitled', editedAt: Date.now() }]
+      delete designsByFileRef.current[id]
+      if (!filtered.length) {
+        designsByFileRef.current[remaining[0]!.id] = []
+      }
+      const closingActive = id === activeFileIdRef.current
+      const fallback =
+        remaining.find((file) => file.id === activeFileIdRef.current) || remaining[0]!
+      if (closingActive) {
+        setActiveFileId(fallback.id)
+        queueMicrotask(() => applyFileDesign(fallback.id))
+      }
       setView('canvas')
       return remaining
     })
   }
 
-  const selectedDesignFrame =
-    designSelectedIds.length === 1
-      ? (() => {
-          const node = pageNodes.find((item) => item.id === designSelectedId && item.type === 'frame')
-          if (!node) return null
-          // Only top-level artboards get the floating toolbar — not nested flex/frames.
-          if (!node.parentId) return node
-          const parent = pageNodes.find((item) => item.id === node.parentId)
-          return parent?.type === 'section' ? node : null
-        })()
-      : null
   const selectedNode = pageNodes.find((node) => node.id === designSelectedId) || null
+  const selectedInk =
+    designSelectedIds.length === 1 && selectedNode && hasWorldPoints(selectedNode) && selectedNode.pathTool !== 'pen' && !draft
+      ? selectedNode
+      : null
   const measurePrimary =
     (tool === 'measure' || altHeld) && designSelectedId
       ? pageNodes.find((node) => node.id === designSelectedId) || null
@@ -2151,19 +5109,77 @@ export function App() {
     measurePrimary && measureHoverId && measureHoverId !== measurePrimary.id
       ? pageNodes.find((node) => node.id === measureHoverId) || null
       : null
-  const measureLines = measurePrimary
+  const measureOffsetKey = `${measurePrimary?.id || ''}|${measureTarget?.id || '_'}`
+  const autoMeasureLines = measurePrimary
     ? measureTarget
-      ? distanceMeasurements(nodeBounds(measurePrimary), nodeBounds(measureTarget))
+      ? distanceMeasurements(resolveWorldRect(measurePrimary, pageNodes), resolveWorldRect(measureTarget, pageNodes))
       : tool === 'measure'
-        ? sizeMeasurements(nodeBounds(measurePrimary))
+        ? sizeMeasurements(resolveWorldRect(measurePrimary, pageNodes))
         : []
     : []
-  const measureSelectedRect = measurePrimary ? nodeBounds(measurePrimary) : null
-  const measureHoverRect = measureTarget ? nodeBounds(measureTarget) : null
+  const pinnedMeasureLines: MeasureLine[] = measurePins.map((pin) =>
+    offsetMeasureLine(pin.base, pin.offset)
+  )
+  const measureLines = [
+    ...autoMeasureLines.map((line) => {
+      const key = `${measureOffsetKey}|${line.id}`
+      const offset = measureOffsets[key]
+      return offset == null ? line : offsetMeasureLine(line, offset)
+    }),
+    ...pinnedMeasureLines,
+    ...(measureDraft ? [measureDraft] : [])
+  ]
+  measureLinesRef.current = measureLines
+  const measureSelectedRect = measurePrimary ? resolveWorldRect(measurePrimary, pageNodes) : null
+  const measureHoverRect = measureTarget ? resolveWorldRect(measureTarget, pageNodes) : null
+  const measureEdgeHighlight = measureEdgeHover
+    ? (() => {
+        const node = pageNodes.find((item) => item.id === measureEdgeHover.nodeId)
+        if (!node) return null
+        const box = resolveWorldRect(node, pageNodes)
+        if (measureEdgeHover.edge === 'n') return { x1: box.x, y1: box.y, x2: box.x + box.width, y2: box.y }
+        if (measureEdgeHover.edge === 's')
+          return { x1: box.x, y1: box.y + box.height, x2: box.x + box.width, y2: box.y + box.height }
+        if (measureEdgeHover.edge === 'w') return { x1: box.x, y1: box.y, x2: box.x, y2: box.y + box.height }
+        return { x1: box.x + box.width, y1: box.y, x2: box.x + box.width, y2: box.y + box.height }
+      })()
+    : null
+  const measureTitles: MeasureTitle[] = (() => {
+    if (!(tool === 'measure' || altHeld)) return []
+    const titles: MeasureTitle[] = []
+    const seen = new Set<string>()
+    const push = (node: DesignNode | null) => {
+      if (!node || seen.has(node.id) || node.type === 'comment') return
+      // Top-level frames/sections already show their canvas name label.
+      const parent = node.parentId ? pageNodes.find((item) => item.id === node.parentId) : null
+      const isArtboard =
+        (node.type === 'frame' || node.type === 'section') &&
+        (!node.parentId || parent?.type === 'section')
+      if (isArtboard) return
+      seen.add(node.id)
+      const box = resolveWorldRect(node, pageNodes)
+      titles.push({
+        id: node.id,
+        name:
+          node.name ||
+          node.text ||
+          (node.type === 'frame'
+            ? 'Frame'
+            : node.type === 'rect'
+              ? 'Rectangle'
+              : `${node.type[0].toUpperCase()}${node.type.slice(1)}`),
+        kind: node.type,
+        x: box.x,
+        y: box.y,
+        width: box.width,
+        height: box.height
+      })
+    }
+    push(measurePrimary)
+    return titles
+  })()
   const activePage = pages.find((page) => page.id === activePageId) || pages[0] || DEFAULT_PAGE
-  const pageFill = activePage.fill?.trim() || ''
-  const customCanvasFill =
-    pageFill && !/^#(?:eee(?:eee)?|2c2c2c)$/i.test(pageFill) ? pageFill : null
+  const canvasFill = resolvePageFill(activePage, theme)
   const selectedTab = selected?.tabs.find((tab) => tab.id === selected.activeTabId) || selected?.tabs[0]
   const actionBar = selected
     ? {
@@ -2186,7 +5202,7 @@ export function App() {
           inspect: browserMeasureInspect,
           xray: browserMeasureXray,
           onToggle: () => {
-            setSelectedId(selected.id)
+            selectBrowsers([selected.id])
             setDesignSelectedIds([])
             setInspectOn(false)
             setBrowserMeasureId((current) => (current === selected.id ? null : selected.id))
@@ -2203,114 +5219,135 @@ export function App() {
               window.alert('Snapshot needs a restart. Quit and reopen Vanta, then try again.')
               return
             }
-            setSelectedId(selected.id)
+            selectBrowsers([selected.id])
             setDesignSelectedIds([])
             setInspectOn(false)
             setBrowserMeasureId(null)
             setSnapshotBrowserId((current) => (current === selected.id ? null : selected.id))
           }
-        }
-      }
-    : selectedDesignFrame
-      ? {
-          id: selectedDesignFrame.id,
-          width: Math.round(selectedDesignFrame.width || 0),
-          height: Math.round(selectedDesignFrame.height || 0),
-          title: selectedDesignFrame.name || 'New frame name',
-          offset: 52,
-          showDevice: true,
-          sizeCatalog: 'all' as const,
-          renameable: true,
-          onRename: (name: string) => {
-            persistDesign(
-              designRef.current.map((node) => (node.id === selectedDesignFrame.id ? { ...node, name } : node))
-            )
-          },
-          onConvert: undefined as undefined | (() => void),
-          snapshot: undefined,
-          measure: undefined,
-          onResize: (size: { width: number; height: number; name?: string }) => {
-            const baseName = size.name
-            let nextName = selectedDesignFrame.name
-            if (baseName) {
-              const siblings = designRef.current.filter(
-                (node) =>
-                  node.id !== selectedDesignFrame.id &&
-                  node.type === 'frame' &&
-                  (node.pageId || DEFAULT_PAGE.id) === activePageRef.current &&
-                  (node.name === baseName || node.name?.startsWith(`${baseName} -`))
-              ).length
-              nextName = `${baseName} - ${siblings + 1}`
+        },
+        dock: selectedTab
+          ? {
+              active: dockedTab?.tabId === selectedTab.id,
+              onToggle: () => dockBrowserTab(selected.id, selectedTab.id)
             }
-            persistDesign(
-              designRef.current.map((node) =>
-                node.id === selectedDesignFrame.id
-                  ? { ...node, width: size.width, height: size.height, name: nextName }
-                  : node
-              )
-            )
-          }
-        }
-      : null
+          : undefined
+      }
+    : null
 
   return (
     <div className="app" data-theme={theme}>
-      {mcpStatus?.running && (
-        <div className="mcp-status-pill" title="Connect Cursor / Claude Code to this URL">
-          <span className="mcp-status-dot" />
-          <strong>MCP live</strong>
-          <code>{mcpStatus.url}</code>
-        </div>
-      )}
       <FileTabs
         files={files}
-        activeId={view === 'home' ? '' : activeFileId}
+        activeId={view === 'home' || view === 'new-tab' ? '' : activeFileId}
+        newTabActive={view === 'new-tab'}
         onHome={() => {
-          setCodingFullscreen(false)
+          exitCodingFullscreen()
+          void captureActiveFileThumbnail()
           setView('home')
         }}
         onSelect={openFile}
         onClose={closeFile}
-        onNew={addFile}
+        onNew={() => {
+          exitCodingFullscreen()
+          void captureActiveFileThumbnail()
+          setView('new-tab')
+        }}
+        onCloseNewTab={() => {
+          setView(activeFileId ? 'canvas' : 'home')
+        }}
         onRename={(id, name) => setFiles((current) => current.map((file) => (file.id === id ? { ...file, name } : file)))}
       />
-      <div className="workspace">
-        {view !== 'home' && (
+      <div className={`workspace${codingFullscreen ? ' is-agent-full' : ''}`}>
+        {view === 'canvas' && (
         <LeftSidebar
           tab={rail}
           onTab={(next) => {
             setRail(next)
+            setLayerMenu(null)
+            setContextMenu(null)
             setView('canvas')
-            if (next !== 'coding-agents') setCodingFullscreen(false)
+            if (next === 'coding-agents') {
+              if (dockedTabRef.current) undockBrowserTab()
+              setLeftOpen(true)
+              // Re-open fullscreen agent browser if a session is already unlocked.
+              if (codingActive && !codingFullscreenRef.current) {
+                requestAnimationFrame(() => enterCodingFullscreen())
+              }
+            } else if (!(next === 'tabs' && dockedTabRef.current)) {
+              // Leaving the docked browser surface — drop side panes / FS so they
+              // can't linger as ghost layout after Escape or a rail switch.
+              if (sideBrowsersRef.current.length || codingFullscreenRef.current) {
+                collapseAgentWorkspace()
+              }
+            }
             if (next === 'chat') {
+              onCanvasRef.current = false
+              syncLayout()
+              clearAgentFsToolbarTimer()
+              agentFsPending.current = null
+              setToolbarHiddenForAgentFs(false)
               setSwitchMode('chat')
               setLeftOpen(true)
-              setRightOpen(true)
-              setRightWidth((width) => Math.max(width, 420))
             } else if (rail === 'chat') {
               setSwitchMode((current) => (current === 'chat' ? 'design' : current))
-              setRightWidth((width) => Math.min(width, 280))
+              setChatPoppedOut(false)
             }
           }}
           theme={theme}
           onToggleTheme={() => setTheme((current) => (current === 'dark' ? 'light' : 'dark'))}
           fileName={activeFile?.name || 'Untitled'}
+          onRenameFile={(name) => {
+            if (!activeFileId) return
+            setFiles((current) => current.map((file) => (file.id === activeFileId ? { ...file, name } : file)))
+          }}
           browsers={browsers}
-          onAddBrowser={() => void addBrowser()}
+          dockedTab={dockedTab}
+          onDockTab={dockBrowserTab}
+          onUndockTab={undockBrowserTab}
+          onDockedTabNavigate={(url) => {
+            const docked = dockedTabRef.current
+            if (!docked) return
+            setBrowsers((current) =>
+              current.map((item) =>
+                item.id === docked.windowId
+                  ? {
+                      ...item,
+                      tabs: item.tabs.map((tab) => (tab.id === docked.tabId ? { ...tab, url } : tab))
+                    }
+                  : item
+              )
+            )
+            void window.vanta.navigate(docked.tabId, url)
+          }}
+          onDockedTabBack={() => {
+            const docked = dockedTabRef.current
+            if (docked) void window.vanta.back(docked.tabId)
+          }}
+          onDockedTabForward={() => {
+            const docked = dockedTabRef.current
+            if (docked) void window.vanta.forward(docked.tabId)
+          }}
+          onDockedTabReload={() => {
+            const docked = dockedTabRef.current
+            if (docked) void window.vanta.reload(docked.tabId)
+          }}
           onFocusWindow={(id) => {
-            setSelectedId(id)
+            selectBrowsers([id])
             const frame = browsers.find((item) => item.id === id)
             if (frame) void window.vanta.focus(frame.activeTabId)
           }}
           onActivateTab={(windowId, tabId) => {
-            setSelectedId(windowId)
-            patchFrame(windowId, { activeTabId: tabId })
-            void window.vanta.activateTab(windowId, tabId)
+            switchOmniboxTab(windowId, tabId)
           }}
           onCloseTab={(windowId, tabId) => {
-            void window.vanta.closeTab(windowId, tabId)
+            closeBrowserTab(windowId, tabId)
           }}
-          chats={chats.map((chat) => ({ id: chat.id, title: chat.title }))}
+          chats={chats.map((chat) => ({
+            id: chat.id,
+            title: chat.title,
+            prompt: chat.messages.find((message) => message.role === 'user')?.text || ''
+          }))}
           activeChatId={resolvedChatId}
           onSelectChat={selectChat}
           onNewChat={newChat}
@@ -2320,7 +5357,7 @@ export function App() {
           onPageQuery={setPageQuery}
           onSelectPage={(id) => persistPages(pages, id)}
           onAddPage={() => {
-            const page = { id: crypto.randomUUID(), name: `Page ${pages.length + 1}` }
+            const page = { id: crypto.randomUUID(), name: `Page ${pages.length + 1}`, fill: '#EEEEEE', fillDark: '#2C2C2C' }
             persistPages([...pages, page], page.id)
           }}
           onRenamePage={(id, name) => persistPages(pages.map((page) => (page.id === id ? { ...page, name } : page)))}
@@ -2328,7 +5365,7 @@ export function App() {
           onSelectLayer={(id, kind) => {
             if (kind === 'browser') {
               setDesignSelectedIds([])
-              setSelectedId(id)
+              selectBrowsers([id])
               const frame = browsers.find((item) => item.id === id)
               if (frame) void window.vanta.focus(frame.activeTabId)
               return
@@ -2338,35 +5375,97 @@ export function App() {
               return
             }
             setActiveCommentId(null)
-            setSelectedId(null)
+            clearBrowserSelection()
             setDesignSelectedIds([id])
           }}
           onRenameLayer={(id, name) => {
             persistDesign(designRef.current.map((node) => (node.id === id ? { ...node, name } : node)))
           }}
+          onOpenLayerMenu={(id, kind, rect) => {
+            if (kind === 'browser' || kind === 'comment') return
+            setLayerMenu({
+              layerId: id,
+              x: Math.round(rect.right + 6),
+              y: Math.round(rect.top)
+            })
+          }}
+          onToggleLayerVisible={toggleLayerVisible}
+          onToggleLayerLock={toggleLayerLock}
+          onCollapseLayersToken={collapseLayersToken}
           panelOpen={leftOpen}
           panelWidth={leftWidth}
           onTogglePanel={() => setLeftOpen((value) => !value)}
           onResizePanel={setLeftWidth}
+          rightOpen={rightOpen}
+          rightWidth={rightWidth}
           codingActive={codingActive}
+          codingAgentUrl={codingAgentUrl}
           codingRecents={codingRecents}
           codingPopup={codingPopup}
           codingFullscreen={codingFullscreen}
+          sideBrowsers={sideBrowsers}
+          hideFullscreenControl={sideBrowsers.length > 0}
+          tabsPopup={tabsPopup}
+          onTabsPopup={(open) => {
+            setTabsPopup(open)
+            if (open) {
+              // Leave any existing coding-agent popup underneath so Open tab overlays it.
+              exitCodingFullscreen()
+            }
+          }}
+          onOpenTabInCanvas={() => {
+            void openTabInCanvas()
+          }}
+          onOpenTabToLeft={() => {
+            void openTabToLeft()
+          }}
           onCodingPopup={(open) => {
             setCodingPopup(open)
-            if (open) setCodingFullscreen(false)
+            if (open) {
+              setTabsPopup(false)
+              exitCodingFullscreen()
+            }
           }}
-          onCodingChoose={(agentId) => openCodingAgent(agentId)}
+          onCodingChoose={(agentId, openUrl) => openCodingAgent(agentId, undefined, undefined, openUrl)}
           onCodingResume={(id) => {
+            // Resume only after MCP gate — same unlock path as Connect → Done.
             const found = codingRecents.find((item) => item.id === id)
-            if (found) openCodingAgent(found.agentId, found.projectName, found.id)
+            if (found) {
+              setCodingPopup(true)
+            }
           }}
           onCodingFullscreen={() => {
-            setCodingPopup(false)
-            setCodingFullscreen((value) => !value)
+            if (codingFullscreen) exitCodingFullscreen()
+            else enterCodingFullscreen()
           }}
+          onCodingAgentNavigate={(url) => {
+            setCodingAgentUrl(url)
+            void window.vanta.navigate(SIDEBAR_BROWSER_ID, url)
+          }}
+          onCodingAgentBack={() => void window.vanta.back(SIDEBAR_BROWSER_ID)}
+          onCodingAgentForward={() => void window.vanta.forward(SIDEBAR_BROWSER_ID)}
+          onCodingAgentReload={() => void window.vanta.reload(SIDEBAR_BROWSER_ID)}
+          onAddAgentSideBrowser={openAgentSideBrowser}
+          onCloseSideBrowser={closeSideBrowser}
+          onCloseCodingAgent={closeCodingAgent}
+          onChromeLayout={syncLayout}
+          onSideBrowserUrl={(id, url) => {
+            setSideBrowsers((current) => current.map((item) => (item.id === id ? { ...item, url } : item)))
+          }}
+          onSideBrowserNavigate={(id, url) => {
+            setSideBrowsers((current) => current.map((item) => (item.id === id ? { ...item, url } : item)))
+            void window.vanta.navigate(id, url)
+          }}
+          onSideBrowserBack={(id) => void window.vanta.back(id)}
+          onSideBrowserForward={(id) => void window.vanta.forward(id)}
+          onSideBrowserReload={(id) => void window.vanta.reload(id)}
           onAgentHole={(el) => {
             agentHole.current = el
+            syncLayout()
+          }}
+          onSideBrowserHole={(id, el) => {
+            if (el) agentSideHoles.current.set(id, el)
+            else agentSideHoles.current.delete(id)
             syncLayout()
           }}
         />
@@ -2381,28 +5480,97 @@ export function App() {
               addFile(title)
               setChatInput(prompt)
             }}
+            theme={theme}
+            onToggleTheme={() => setTheme((current) => (current === 'dark' ? 'light' : 'dark'))}
           />
-        ) : rail === 'chat' ? (
-          <ChatWorkspace
-            messages={chatLog}
-            input={chatInput}
-            onInput={setChatInput}
-            onSend={() => void sendChat()}
-            busy={agentBusy}
-            mode="chat"
-            onMode={chooseMode}
+        ) : view === 'new-tab' ? (
+          <NewTabScreen
+            files={files}
+            theme={theme}
+            onNewFile={() => addFile()}
+            onBrowse={() => setView('home')}
+            onOpen={openFile}
           />
         ) : (
+          <>
+            {/* Keep canvas mounted while in chat — remounting DesignLayer freezes the switch. */}
+            <div
+              className="workspace-page"
+              hidden={rail === 'chat'}
+              aria-hidden={rail === 'chat'}
+              style={rail === 'chat' ? { display: 'none' } : undefined}
+            >
           <div
             ref={canvasRef}
-            className={`canvas${panning ? ' is-panning' : ''}${tool === 'hand' || handMode || spaceHeld ? ' is-hand' : ''}${deepSelectHeld ? ' is-deep-select' : ''}${['frame', 'section', 'browser', 'shape', 'pen', 'pencil', 'brush', 'text', 'text-on-path', 'comment', 'widget'].includes(tool) ? ' is-design' : ''}${pathHoverId && (tool === 'text' || tool === 'text-on-path') ? ' is-text-path' : ''}`}
+            className={`canvas${panning ? ' is-panning' : ''}${tool === 'hand' || handMode || spaceHeld ? ' is-hand' : ''}${deepSelectHeld ? ' is-deep-select' : ''}${['frame', 'section', 'browser', 'shape', 'pen', 'pencil', 'brush', 'text', 'text-on-path', 'comment', 'widget'].includes(tool) ? ' is-design' : ''}${pathHoverId && (tool === 'text' || tool === 'text-on-path') ? ' is-text-path' : ''}${jev.picking ? ' is-jev-point' : ''}`}
             data-tool={tool}
-            style={customCanvasFill ? { background: customCanvasFill } : undefined}
+            style={{ background: canvasFill }}
             onContextMenu={(event) => {
               if (view !== 'canvas') return
               const target = event.target as HTMLElement
               if (target.closest('.canvas-toolbar-stack, .canvas-toolbar, .draw-stroke-bar, .ctx-menu')) return
               openContextMenu(event, worldFromEvent(event))
+            }}
+            onPointerDownCapture={(event) => {
+              // Clicking the canvas takes focus out of the composer / inspector fields so
+              // arrow keys, Tab, Enter and Delete act on the selection (Paper).
+              const active = document.activeElement
+              const pressed = event.target as HTMLElement
+              if (
+                active instanceof HTMLElement &&
+                active !== document.body &&
+                !active.contains(pressed) &&
+                !pressed.closest('.canvas-toolbar-stack, input, textarea, select, [contenteditable="true"]') &&
+                (active instanceof HTMLInputElement ||
+                  active instanceof HTMLTextAreaElement ||
+                  active instanceof HTMLSelectElement ||
+                  active.isContentEditable) &&
+                !active.closest('.design-text-editor, .text-on-path-input')
+              ) {
+                active.blur()
+              }
+              if (toolRef.current !== 'measure' || event.button !== 0) return
+              const target = event.target as HTMLElement
+              if (target.closest('.canvas-toolbar-stack, .canvas-toolbar, .draw-stroke-bar')) return
+              const point = worldFromEvent(event)
+              const threshold = 10 / Math.max(0.0001, cameraRef.current.zoom)
+              const hitLine = hitTestMeasureLine(measureLinesRef.current, point, threshold)
+              if (hitLine) {
+                event.stopPropagation()
+                event.preventDefault()
+                const pinned = measurePins.some((pin) => pin.id === hitLine.id)
+                const current =
+                  hitLine.axis === 'h' ? hitLine.y1 : hitLine.x1
+                measureSlide.current = {
+                  lineId: hitLine.id,
+                  axis: hitLine.axis,
+                  startOffset: current,
+                  startPointer: hitLine.axis === 'h' ? point.y : point.x,
+                  slideMin: hitLine.slideMin,
+                  slideMax: hitLine.slideMax,
+                  pinned,
+                  offsetKey: `${designSelectedRef.current[designSelectedRef.current.length - 1] || ''}|${measureHoverId || '_'}`
+                }
+                setMeasureActiveLineId(hitLine.id)
+                event.currentTarget.setPointerCapture(event.pointerId)
+                return
+              }
+              const page = designRef.current.filter(
+                (node) =>
+                  (node.pageId || DEFAULT_PAGE.id) === activePageRef.current &&
+                  node.type !== 'comment'
+              )
+              const anchor = findMeasureAnchorAt(point, page, threshold)
+              if (anchor) {
+                event.stopPropagation()
+                event.preventDefault()
+                measureCreate.current = { start: anchor, current: point, target: null }
+                setMeasureEdgeHover(anchor)
+                setDesignSelectedIds([anchor.nodeId])
+                designSelectedRef.current = [anchor.nodeId]
+                setSelectedId(null)
+                event.currentTarget.setPointerCapture(event.pointerId)
+              }
             }}
             onPointerDown={async (event) => {
               const middle = event.button === 1
@@ -2463,22 +5631,68 @@ export function App() {
                 setActiveCommentId(null)
                 setCommentDraftText('')
               }
-              setSelectedId(null)
-              if (!event.shiftKey) setDesignSelectedIds([])
+              if (!event.shiftKey) {
+                setDesignSelectedIds([])
+                selectBrowsers([])
+              }
               if (switchMode !== 'chat') setInspectOn(false)
               const canvas = canvasRef.current
               if (!canvas) return
               const rect = canvas.getBoundingClientRect()
+              // Figma-style nested marquee: always deep — frames only when fully enclosed,
+              // otherwise the elements inside the drag. Ctrl/Cmd also lets the gesture start
+              // on top of a frame (DesignLayer won't steal it).
+              const deep = true
               marquee.current = {
                 x: event.clientX - rect.left,
                 y: event.clientY - rect.top,
                 shift: event.shiftKey,
-                baseIds: event.shiftKey ? [...designSelectedRef.current] : []
+                deep,
+                pick: event.ctrlKey || event.metaKey || deepSelectHeldRef.current,
+                baseIds: event.shiftKey ? [...designSelectedRef.current] : [],
+                baseBrowserIds: event.shiftKey ? [...selectedBrowserRef.current] : []
               }
               event.currentTarget.setPointerCapture(event.pointerId)
             }}
             onPointerMove={(event) => {
               const canvas = canvasRef.current
+              if (measureSlide.current) {
+                const slide = measureSlide.current
+                const point = worldFromEvent(event)
+                const pointer = slide.axis === 'h' ? point.y : point.x
+                const next = Math.min(
+                  slide.slideMax,
+                  Math.max(slide.slideMin, slide.startOffset + (pointer - slide.startPointer))
+                )
+                if (slide.pinned) {
+                  setMeasurePins((current) =>
+                    current.map((pin) => (pin.id === slide.lineId ? { ...pin, offset: next } : pin))
+                  )
+                } else {
+                  const key = `${slide.offsetKey}|${slide.lineId}`
+                  setMeasureOffsets((current) => ({ ...current, [key]: next }))
+                }
+                return
+              }
+              if (measureCreate.current) {
+                const point = worldFromEvent(event)
+                const page = designRef.current.filter(
+                  (node) =>
+                    (node.pageId || DEFAULT_PAGE.id) === activePageRef.current &&
+                    node.type !== 'comment'
+                )
+                const threshold = 10 / Math.max(0.0001, cameraRef.current.zoom)
+                let target = findMeasureAnchorAt(point, page, threshold)
+                if (target && target.nodeId === measureCreate.current.start.nodeId && target.edge === measureCreate.current.start.edge) {
+                  target = null
+                }
+                const end = target || freeMeasureAnchor(measureCreate.current.start, point)
+                measureCreate.current = { ...measureCreate.current, current: point, target }
+                setMeasureEdgeHover(target || measureCreate.current.start)
+                const preview = measurementBetweenAnchors('draft', measureCreate.current.start, end)
+                setMeasureDraft(preview)
+                return
+              }
               if (canvas && !pan.current) {
                 const rect = canvas.getBoundingClientRect()
                 const screen = { x: event.clientX - rect.left, y: event.clientY - rect.top }
@@ -2487,14 +5701,29 @@ export function App() {
                 else setDrawCursor(null)
                 if (toolRef.current === 'measure' || altHeld) {
                   const point = worldFromEvent(event)
-                  const candidates = designRef.current
-                    .filter((node) => (node.pageId || DEFAULT_PAGE.id) === activePageRef.current)
-                    .filter((node) => node.type !== 'comment' || !node.resolved)
-                    .map((node) => ({ id: node.id, rect: nodeBounds(node) }))
-                  const hit = hitTestRect(candidates, point)
-                  setMeasureHoverId(hit)
+                  const candidates = designRef.current.filter(
+                    (node) =>
+                      (node.pageId || DEFAULT_PAGE.id) === activePageRef.current &&
+                      (node.type !== 'comment' || !node.resolved)
+                  )
+                  const threshold = 10 / Math.max(0.0001, cameraRef.current.zoom)
+                  if (toolRef.current === 'measure') {
+                    const lineHit = hitTestMeasureLine(measureLinesRef.current, point, threshold)
+                    if (lineHit) {
+                      setMeasureActiveLineId(lineHit.id)
+                      setMeasureEdgeHover(null)
+                    } else {
+                      setMeasureActiveLineId(null)
+                      const anchor = findMeasureAnchorAt(point, candidates, threshold)
+                      setMeasureEdgeHover(anchor)
+                    }
+                  }
+                  const hit = pickDeepAtPoint(point, candidates)
+                  setMeasureHoverId(hit?.id || null)
                 } else if (measureHoverId) {
                   setMeasureHoverId(null)
+                  setMeasureEdgeHover(null)
+                  setMeasureActiveLineId(null)
                 }
               }
               if (pan.current) {
@@ -2507,6 +5736,13 @@ export function App() {
               }
               if (marquee.current && canvasRef.current) {
                 const start = marquee.current
+                // Latch deep for the gesture once Ctrl/Cmd is seen (event.ctrlKey can drop on Windows).
+                const deep =
+                  start.deep ||
+                  deepSelectHeldRef.current ||
+                  event.ctrlKey ||
+                  event.metaKey
+                start.deep = deep
                 const rect = canvasRef.current.getBoundingClientRect()
                 const x = event.clientX - rect.left
                 const y = event.clientY - rect.top
@@ -2516,12 +5752,18 @@ export function App() {
                 const height = Math.abs(y - start.y)
                 setMarqueeBox({ left, top, width, height })
                 if (width > 2 || height > 2) {
-                  const hits = marqueeHits({ left, top, width, height }, x < start.x)
-                  setDesignSelectedIds(
-                    start.shift ? [...new Set([...start.baseIds, ...hits])] : hits
-                  )
+                  const hits = marqueeHits({ left, top, width, height }, x < start.x, deep)
+                  const next = start.shift ? [...new Set([...start.baseIds, ...hits.nodeIds])] : hits.nodeIds
+                  const nextBrowsers = start.shift
+                    ? [...new Set([...start.baseBrowserIds, ...hits.browserIds])]
+                    : hits.browserIds
+                  designSelectedRef.current = next
+                  setDesignSelectedIds(next)
+                  selectBrowsers(nextBrowsers)
                 } else if (!start.shift) {
+                  designSelectedRef.current = []
                   setDesignSelectedIds([])
+                  selectBrowsers([])
                 }
                 return
               }
@@ -2536,7 +5778,6 @@ export function App() {
                 setPathHoverId(null)
               }
               if (
-                (deepSelectHeldRef.current || event.ctrlKey || event.metaKey) &&
                 toolRef.current === 'pointer' &&
                 !marquee.current &&
                 !pan.current
@@ -2545,7 +5786,15 @@ export function App() {
                   (node) => (node.pageId || DEFAULT_PAGE.id) === activePageRef.current
                 )
                 const deep = pickDeepAtPoint(point, pageNodes)
-                const hoverId = deep?.id || null
+                if (jev.picking) jev.notePointer(deep?.id || null)
+                const deepMode = deepSelectHeldRef.current || event.ctrlKey || event.metaKey
+                let hoverId: string | null = null
+                if (deep) {
+                  hoverId = deepMode
+                    ? deep.id
+                    : resolveClickTarget(deep, pageNodes, designSelectedRef.current)
+                }
+                if (hoverId && designSelectedRef.current.includes(hoverId)) hoverId = null
                 if (hoverId !== deepHoverIdRef.current) {
                   deepHoverIdRef.current = hoverId
                   setDeepHoverId(hoverId)
@@ -2624,11 +5873,61 @@ export function App() {
               setDrawCursor(null)
               setPathHoverId(null)
               if (!penDrag.current) setPenHover(null)
+              if (deepHoverIdRef.current) {
+                deepHoverIdRef.current = null
+                setDeepHoverId(null)
+              }
             }}
             onPointerUp={async (event) => {
+              if (measureSlide.current) {
+                measureSlide.current = null
+                setMeasureActiveLineId(null)
+                if (event.currentTarget.hasPointerCapture?.(event.pointerId)) {
+                  event.currentTarget.releasePointerCapture(event.pointerId)
+                }
+                return
+              }
+              if (measureCreate.current) {
+                const draft = measureCreate.current
+                const point = worldFromEvent(event)
+                const page = designRef.current.filter(
+                  (node) =>
+                    (node.pageId || DEFAULT_PAGE.id) === activePageRef.current &&
+                    node.type !== 'comment'
+                )
+                const threshold = 10 / Math.max(0.0001, cameraRef.current.zoom)
+                let target = findMeasureAnchorAt(point, page, threshold)
+                if (
+                  target &&
+                  target.nodeId === draft.start.nodeId &&
+                  target.edge === draft.start.edge
+                ) {
+                  target = null
+                }
+                const end = target || freeMeasureAnchor(draft.start, point)
+                const moved =
+                  Math.hypot(point.x - draft.start.x, point.y - draft.start.y) > 4 / cameraRef.current.zoom
+                if (moved) {
+                  const line = measurementBetweenAnchors(`pin-${crypto.randomUUID()}`, draft.start, end)
+                  if (line) {
+                    setMeasurePins((current) => [
+                      ...current,
+                      { id: line.id, base: line, offset: line.axis === 'h' ? line.y1 : line.x1 }
+                    ])
+                  }
+                }
+                measureCreate.current = null
+                setMeasureDraft(null)
+                if (event.currentTarget.hasPointerCapture?.(event.pointerId)) {
+                  event.currentTarget.releasePointerCapture(event.pointerId)
+                }
+                return
+              }
               if (marquee.current && canvasRef.current) {
                 const start = marquee.current
                 marquee.current = null
+                const deep =
+                  start.deep || deepSelectHeldRef.current || event.ctrlKey || event.metaKey
                 const rect = canvasRef.current.getBoundingClientRect()
                 const x = event.clientX - rect.left
                 const y = event.clientY - rect.top
@@ -2638,10 +5937,47 @@ export function App() {
                 const height = Math.abs(y - start.y)
                 setMarqueeBox(null)
                 if (width > 4 || height > 4) {
-                  const hits = marqueeHits({ left, top, width, height }, x < start.x)
-                  setDesignSelectedIds(start.shift ? [...new Set([...start.baseIds, ...hits])] : hits)
+                  const hits = marqueeHits({ left, top, width, height }, x < start.x, deep)
+                  const next = start.shift ? [...new Set([...start.baseIds, ...hits.nodeIds])] : hits.nodeIds
+                  const nextBrowsers = start.shift
+                    ? [...new Set([...start.baseBrowserIds, ...hits.browserIds])]
+                    : hits.browserIds
+                  designSelectedRef.current = next
+                  setDesignSelectedIds(next)
+                  selectBrowsers(nextBrowsers)
+                } else if (jev.picking && jev.pointerId) {
+                  // Click selects the pointed component for Jev (Shift adds / toggles).
+                  if (!jev.locked) jev.toggleLock()
+                  const id = jev.pointerId
+                  const next = start.shift
+                    ? designSelectedRef.current.includes(id)
+                      ? designSelectedRef.current.filter((item) => item !== id)
+                      : [...designSelectedRef.current, id]
+                    : [id]
+                  designSelectedRef.current = next
+                  setDesignSelectedIds(next)
+                  selectBrowsers([])
+                } else if (start.pick || event.ctrlKey || event.metaKey) {
+                  // Ctrl/Cmd click (no drag): deep-select the topmost node under the cursor.
+                  const point = screenToWorld(cameraRef.current, x, y)
+                  const pageNodes = designRef.current.filter(
+                    (node) => (node.pageId || DEFAULT_PAGE.id) === activePageRef.current
+                  )
+                  const hit = pickDeepAtPoint(point, pageNodes)
+                  const next = hit
+                    ? start.shift
+                      ? [...new Set([...start.baseIds, hit.id])]
+                      : [hit.id]
+                    : start.shift
+                      ? start.baseIds
+                      : []
+                  designSelectedRef.current = next
+                  setDesignSelectedIds(next)
+                  if (!start.shift) selectBrowsers([])
                 } else if (!start.shift) {
+                  designSelectedRef.current = []
                   setDesignSelectedIds([])
+                  selectBrowsers([])
                 }
               }
               penDrag.current = null
@@ -2651,10 +5987,20 @@ export function App() {
               if (!space.current) await window.vanta.setClickThrough(false)
             }}
           >
-            {browsers.length === 0 && status.state === 'ready' && (
-              <div className="empty">Scroll to pan · Ctrl+scroll zooms · Add a browser from File</div>
-            )}
             {status.state === 'error' && <div className="empty error">{status.message}</div>}
+            {jev.picking ? (
+              <div className="jev-point-hud" data-chrome-overlay="">
+                Point to an element · Click to select · Esc to exit
+              </div>
+            ) : null}
+            <div
+              ref={(node) => {
+                pixelGridRef.current = node
+                if (node) paintPixelGrid(node, cameraRef.current)
+              }}
+              className="pixel-grid"
+              aria-hidden
+            />
             <div
               ref={(node) => {
                 worldRef.current = node
@@ -2677,6 +6023,7 @@ export function App() {
               <DesignLayer
                 nodes={pageNodes.filter((node) => node.type !== 'comment' || !node.resolved || commentsShowResolved)}
                 selectedIds={designSelectedIds}
+                peerSelectedCount={selectedBrowserIds.length}
                 tool={tool}
                 draft={draft && (draft.pageId || DEFAULT_PAGE.id) === activePageId ? draft : null}
                 hoverPoint={tool === 'pen' ? penHover : null}
@@ -2691,12 +6038,14 @@ export function App() {
                     return
                   }
                   setActiveCommentId(null)
-                  setSelectedId(null)
+                  if (!additive) clearBrowserSelection()
                   let targetId = id
                   // Shift multi-select and Ctrl deep-select both pick the element under the
                   // cursor (incl. flex children) — skip drill-to-parent so nested nodes can
                   // be added without selecting the frame first.
-                  if (opts?.deep || additive) {
+                  if (opts?.exact && hit) {
+                    targetId = hit.id
+                  } else if (opts?.deep || additive) {
                     const world =
                       opts?.clientX != null && opts?.clientY != null
                         ? worldFromEvent({ clientX: opts.clientX, clientY: opts.clientY })
@@ -2710,12 +6059,38 @@ export function App() {
                       return
                     }
                     targetId = next
-                  } else if (hit) {
+                  } else if (hit && !opts?.exact) {
                     targetId = resolveClickTarget(hit, designRef.current, designSelectedRef.current)
+                    // Pressing inside an already-selected frame keeps it selected so a drag
+                    // moves the frame (Figma); a plain click drills in on release.
+                    const current = designSelectedRef.current
+                    if (!current.includes(targetId) && current.length) {
+                      const byId = nodeIndexOf(designRef.current)
+                      let parentId = hit.parentId
+                      let insideSelection = false
+                      for (let guard = 0; parentId && guard < 200; guard++) {
+                        if (current.includes(parentId)) {
+                          insideSelection = true
+                          break
+                        }
+                        parentId = byId.get(parentId)?.parentId
+                      }
+                      if (insideSelection) {
+                        pendingClickSelectRef.current = targetId
+                        return
+                      }
+                    }
                   }
+                  pendingClickSelectRef.current = null
                   if (toolRef.current === 'measure') {
-                    designSelectedRef.current = [targetId]
-                    setDesignSelectedIds([targetId])
+                    const world =
+                      opts?.clientX != null && opts?.clientY != null
+                        ? worldFromEvent({ clientX: opts.clientX, clientY: opts.clientY })
+                        : null
+                    const deep = world ? pickDeepAtPoint(world, designRef.current) : hit
+                    const nextId = deep?.id || targetId
+                    designSelectedRef.current = [nextId]
+                    setDesignSelectedIds([nextId])
                     return
                   }
                   const nextIds = (() => {
@@ -2732,14 +6107,26 @@ export function App() {
                   designSelectedRef.current = nextIds
                   setDesignSelectedIds(nextIds)
                 }}
-                deepHoverId={deepHoverId}
+                deepHoverId={jev.picking && jev.pointerId ? jev.pointerId : deepHoverId}
+                deepSelect={deepSelectHeld}
+                onClickRelease={() => {
+                  ghostDragRef.current = null
+                  const pending = pendingClickSelectRef.current
+                  pendingClickSelectRef.current = null
+                  if (!pending || !designRef.current.some((node) => node.id === pending)) return
+                  designSelectedRef.current = [pending]
+                  setDesignSelectedIds([pending])
+                }}
                 onMoveStart={(id) => {
+                  const hit = designRef.current.find((item) => item.id === id)
+                  if (hit?.locked) return
                   const selected = designSelectedRef.current
                   const seed = new Set(selected.length ? selected : [id])
                   const roots = [...seed].filter((nodeId) => {
                     const node = designRef.current.find((item) => item.id === nodeId)
-                    return Boolean(node && (!node.parentId || !seed.has(node.parentId)))
+                    return Boolean(node && !node.locked && (!node.parentId || !seed.has(node.parentId)))
                   })
+                  if (!roots.length) return
                   moveStart.current = new Map(
                     roots.flatMap((nodeId) => {
                       const node = designRef.current.find((item) => item.id === nodeId)
@@ -2759,26 +6146,18 @@ export function App() {
                       ]
                     })
                   )
-                  const parentIds = new Set(
-                    roots
-                      .map((nodeId) => designRef.current.find((item) => item.id === nodeId)?.parentId)
-                      .filter((parentId): parentId is string => Boolean(parentId))
-                  )
-                  let lifted = false
-                  let next = designRef.current.map((node) => {
-                    if (!roots.includes(node.id) || !node.parentId) return node
-                    const parent = designRef.current.find((item) => item.id === node.parentId)
-                    if (!parent || !isAutoLayout(parent) || node.layoutAbsolute) return node
-                    lifted = true
-                    return { ...node, layoutAbsolute: true }
-                  })
-                  if (lifted) {
-                    for (const parentId of parentIds) {
-                      const parent = next.find((node) => node.id === parentId)
-                      if (parent && isAutoLayout(parent)) next = reorderAutoLayoutChildren(next, parentId)
-                    }
-                    persistDesign(next)
-                  }
+                  // Flex children (same auto-layout parent, in flow) reorder with a ghost instead of lifting out.
+                  const byId = nodeIndexOf(designRef.current)
+                  const first = byId.get(roots[0])
+                  const flexParent = first?.parentId ? byId.get(first.parentId) : undefined
+                  const ghostable =
+                    Boolean(flexParent && isAutoLayout(flexParent)) &&
+                    roots.every((nodeId) => {
+                      const node = byId.get(nodeId)
+                      return Boolean(node && node.parentId === first?.parentId && !node.layoutAbsolute)
+                    })
+                  ghostDragRef.current = ghostable && flexParent ? { ids: roots, parentId: flexParent.id, dx: 0, dy: 0 } : null
+                  pendingLiftRef.current = ghostable ? null : roots
                   flexDropRef.current = null
                   setFlexDrop(null)
                   dropParentIdRef.current = null
@@ -2813,6 +6192,102 @@ export function App() {
                     )
                     return
                   }
+                  const ghostDrag = ghostDragRef.current
+                  if (ghostDrag) {
+                    const dx = x - start.worldX
+                    const dy = y - start.worldY
+                    ghostDrag.dx = dx
+                    ghostDrag.dy = dy
+                    const nodes = designRef.current
+                    let minX = Infinity
+                    let minY = Infinity
+                    let maxX = -Infinity
+                    let maxY = -Infinity
+                    for (const nodeId of ghostDrag.ids) {
+                      const origin = moveStart.current.get(nodeId)
+                      const node = nodes.find((item) => item.id === nodeId)
+                      if (!origin || !node) continue
+                      const size = resolveWorldRect(node, nodes)
+                      minX = Math.min(minX, origin.worldX + dx)
+                      minY = Math.min(minY, origin.worldY + dy)
+                      maxX = Math.max(maxX, origin.worldX + dx + size.width)
+                      maxY = Math.max(maxY, origin.worldY + dy + size.height)
+                    }
+                    if (!Number.isFinite(minX)) return
+                    const ghost = { x: minX, y: minY, width: maxX - minX, height: maxY - minY }
+                    const center = { x: ghost.x + ghost.width / 2, y: ghost.y + ghost.height / 2 }
+                    const size = { width: ghost.width, height: ghost.height }
+                    const home = nodes.find((item) => item.id === ghostDrag.parentId)
+                    const homeBox = home ? resolveWorldRect(home, nodes) : null
+                    const overHome = Boolean(
+                      homeBox &&
+                        center.x >= homeBox.x &&
+                        center.x <= homeBox.x + homeBox.width &&
+                        center.y >= homeBox.y &&
+                        center.y <= homeBox.y + homeBox.height
+                    )
+                    // Paper: pulling a flex child out of its parent detaches it for real — it follows
+                    // the pointer and the siblings close the gap.
+                    if (!ghostDrag.detached && !overHome) {
+                      ghostDrag.detached = true
+                      let next = nodes
+                      for (const nodeId of ghostDrag.ids) {
+                        const origin = moveStart.current.get(nodeId)
+                        if (!origin) continue
+                        next = next.map((item) =>
+                          item.id === nodeId
+                            ? { ...item, parentId: undefined, layoutAbsolute: false, x: origin.worldX + dx, y: origin.worldY + dy }
+                            : item
+                        )
+                      }
+                      moveStart.current = new Map(
+                        [...moveStart.current].map(([nodeId, origin]) => [
+                          nodeId,
+                          { ...origin, localX: origin.worldX, localY: origin.worldY }
+                        ])
+                      )
+                      setDragGhost(null)
+                      setDragGhostIds([])
+                      persistDesign(next)
+                    }
+                    if (ghostDrag.detached) {
+                      persistDesign(
+                        designRef.current.map((item) => {
+                          const origin = moveStart.current.get(item.id)
+                          return origin ? { ...item, x: origin.worldX + dx, y: origin.worldY + dy } : item
+                        }),
+                        { skipReflow: true }
+                      )
+                    } else {
+                      setDragGhost(ghost)
+                      setDragGhostIds((current) => (current.length ? current : ghostDrag.ids))
+                    }
+                    const live = designRef.current
+                    const exclude = expandWithDescendants(live, new Set(ghostDrag.ids))
+                    // Over the original row/column (or one of its children), insert there.
+                    let host: DesignNode | null = overHome ? home! : findContainingParent(center, live, exclude)
+                    if (host && !overHome) {
+                      const byId = nodeIndexOf(live)
+                      for (let cur: DesignNode | undefined = host, guard = 0; cur && guard < 200; guard++) {
+                        if (cur.id === ghostDrag.parentId) {
+                          host = cur
+                          break
+                        }
+                        cur = cur.parentId ? byId.get(cur.parentId) : undefined
+                      }
+                    }
+                    const hostId = host?.id || null
+                    if (hostId !== dropParentIdRef.current) {
+                      dropParentIdRef.current = hostId
+                      setDropParentId(hostId)
+                    }
+                    const guide =
+                      host && isAutoLayout(host) ? measureFlexDrop(live, host.id, ghostDrag.ids, center, size) : null
+                    flexDropRef.current = guide
+                    setFlexDrop(guide)
+                    return
+                  }
+                  liftPendingFlexChildren()
                   const rawDx = x - start.worldX
                   const rawDy = y - start.worldY
                   const movingIds = [...moveStart.current.keys()]
@@ -2869,7 +6344,7 @@ export function App() {
                   for (const nodeId of movingIds) {
                     const origin = moveStart.current.get(nodeId)
                     const node = designRef.current.find((item) => item.id === nodeId)
-                    if (!origin || !node) continue
+                    if (!origin || !node || hasWorldPoints(node)) continue
                     const size = resolveWorldRect(node, designRef.current)
                     const center = {
                       x: origin.worldX + dx + size.width / 2,
@@ -2912,6 +6387,58 @@ export function App() {
                   }
                 }}
                 onMoveEnd={(id) => {
+                  pendingLiftRef.current = null
+                  pendingClickSelectRef.current = null
+                  const ghostDrag = ghostDragRef.current
+                  if (ghostDrag) {
+                    ghostDragRef.current = null
+                    setDragGhost(null)
+                    setDragGhostIds([])
+                    const drop = flexDropRef.current
+                    let next = designRef.current
+                    if (drop) {
+                      const current = next.find((item) => item.id === ghostDrag.ids[0])
+                      if (current?.parentId !== drop.parentId) {
+                        next = next.map((item) =>
+                          ghostDrag.ids.includes(item.id) ? { ...item, parentId: drop.parentId, layoutAbsolute: false } : item
+                        )
+                      }
+                      next = placeFlexChildren(next, drop.parentId, ghostDrag.ids, drop.index)
+                    } else if (ghostDrag.detached) {
+                      // Already a free layer at the pointer: drop into whatever frame is under it.
+                      for (const nodeId of ghostDrag.ids) {
+                        const node = next.find((item) => item.id === nodeId)
+                        if (!node) continue
+                        const placed = reparentMovedNode(node, next, expandWithDescendants(next, new Set([nodeId])))
+                        next = next.map((item) => (item.id === nodeId ? placed : item))
+                      }
+                    } else {
+                      // Dropped outside any flex frame: place it where the ghost landed.
+                      for (const nodeId of ghostDrag.ids) {
+                        const origin = moveStart.current.get(nodeId)
+                        const node = next.find((item) => item.id === nodeId)
+                        if (!origin || !node) continue
+                        const free: DesignNode = {
+                          ...node,
+                          parentId: undefined,
+                          layoutAbsolute: false,
+                          x: origin.worldX + ghostDrag.dx,
+                          y: origin.worldY + ghostDrag.dy
+                        }
+                        next = next.map((item) => (item.id === nodeId ? free : item))
+                        const placed = reparentMovedNode(free, next, expandWithDescendants(next, new Set([nodeId])))
+                        next = next.map((item) => (item.id === nodeId ? placed : item))
+                      }
+                    }
+                    persistDesign(next)
+                    moveStart.current = new Map()
+                    flexDropRef.current = null
+                    setFlexDrop(null)
+                    dropParentIdRef.current = null
+                    setDropParentId(null)
+                    flashAlignGuides([])
+                    return
+                  }
                   const seed = new Set(designSelectedRef.current.includes(id) ? designSelectedRef.current : [id])
                   const roots = [...seed].filter((nodeId) => {
                     const node = designRef.current.find((item) => item.id === nodeId)
@@ -2951,9 +6478,18 @@ export function App() {
                 }}
                 dropParentId={dropParentId}
                 onResize={(id, next) => {
+                  if (designRef.current.find((item) => item.id === id)?.locked) return
                   const { world, ...rect } = next
-                  persistDesign(
-                    designRef.current.map((node) => {
+                  const before = designRef.current.find((node) => node.id === id)
+                  if (before && hasWorldPoints(before)) {
+                    const from = resolveWorldRect(before, designRef.current)
+                    persistDesign(
+                      designRef.current.map((node) => (node.id === id ? scalePathPoints(node, from, rect) : node)),
+                      { skipReflow: true }
+                    )
+                    return
+                  }
+                  let nodes = designRef.current.map((node) => {
                       if (node.id !== id) return node
                       let patched = node
                       if (!world || !node.parentId) patched = { ...node, ...rect }
@@ -2990,14 +6526,28 @@ export function App() {
                       }
                       return patched
                     })
-                  )
+                  if (
+                    before &&
+                    (before.type === 'frame' || before.type === 'section') &&
+                    (Math.abs((before.width || 0) - (rect.width || 0)) > 0.01 ||
+                      Math.abs((before.height || 0) - (rect.height || 0)) > 0.01)
+                  ) {
+                    nodes = applyConstraintsOnParentResize(
+                      nodes,
+                      id,
+                      { width: before.width || 0, height: before.height || 0 },
+                      { width: rect.width || 0, height: rect.height || 0 }
+                    )
+                  }
+                  persistDesign(nodes)
                 }}
                 onScaleStart={() => {
                   const ids = new Set(designSelectedRef.current)
-                  scaleStart.current = designRef.current.filter((node) => ids.has(node.id))
+                  scaleStart.current = designRef.current.filter((node) => ids.has(node.id) && !node.locked)
                 }}
                 onScale={(origin, factor) => {
                   const starts = scaleStart.current
+                  if (!starts.length) return
                   persistDesign(
                     designRef.current.map((node) => {
                       const start = starts.find((item) => item.id === node.id)
@@ -3006,6 +6556,7 @@ export function App() {
                   )
                 }}
                 onEdit={(id, patch) => {
+                  if (designRef.current.find((item) => item.id === id)?.locked) return
                   persistDesign(designRef.current.map((node) => (node.id === id ? { ...node, ...patch } : node)))
                 }}
                 onRemove={(id) => {
@@ -3019,49 +6570,80 @@ export function App() {
                 onSpaceEnd={() => persistDesign(designRef.current)}
                 onPad={(side, value) => {
                   const id = designSelectedRef.current[0]
-                  const before = designRef.current.find((node) => node.id === id)
-                  if (!before) return
-                  const beforeW = before.width || 0
-                  const beforeH = before.height || 0
-                  let next = reflowAutoLayout(applyFramePadding(designRef.current, id, side, value))
-                  next = next.map((node) => {
-                    if (node.id !== id || !node.layout) return node
-                    const hugH = (node.layout.sizingH || 'fixed') === 'hug'
-                    const hugV = (node.layout.sizingV || 'fixed') === 'hug'
-                    if (side === 'l' && hugH) return { ...node, x: before.x - ((node.width || 0) - beforeW) }
-                    if (side === 't' && hugV) return { ...node, y: before.y - ((node.height || 0) - beforeH) }
-                    return node
-                  })
-                  persistDesign(next, { skipReflow: true })
+                  if (!designRef.current.some((node) => node.id === id)) return
+                  persistDesign(reflowAutoLayout(applyFramePadding(designRef.current, id, side, value)), { skipReflow: true })
                 }}
                 onPadEnd={() => persistDesign(designRef.current)}
+                onSelectIds={(ids) => {
+                  clearBrowserSelection()
+                  designSelectedRef.current = ids
+                  setDesignSelectedIds(ids)
+                  setSelectedId(null)
+                }}
+                onReorderChildren={reorderDesignChildren}
                 onLayoutAlign={(justify, align) => {
                   const id = designSelectedRef.current[0]
                   if (!id) return
                   persistDesign(applyLayoutAlignment(designRef.current, id, justify, align))
                 }}
                 flexDrop={flexDrop}
+                dragGhost={dragGhost}
+                dragGhostIds={dragGhostIds}
+                crop={
+                  cropSession
+                    ? (() => {
+                        const node = design.find((item) => item.id === cropSession.nodeId)
+                        const paint = node ? getNodePaints(node)[cropSession.paintIndex] : undefined
+                        return {
+                          nodeId: cropSession.nodeId,
+                          frame: cropSession.frame,
+                          image: cropSession.image,
+                          src: cropSession.src,
+                          adjust: paint?.type === 'image' ? paint : null,
+                          ratio: aspectRatioOf(cropSession.aspect, cropSession.natural)
+                        }
+                      })()
+                    : null
+                }
+                onCropChange={(next) => {
+                  const session = cropSessionRef.current
+                  if (session) applyCropRects(session, next.frame, next.image)
+                }}
               />
               {alignGuides.length > 0 && <AlignGuidesOverlay guides={alignGuides} zoom={camera.zoom} />}
-              {(tool === 'measure' || altHeld) && measureLines.length > 0 && (
+              {(tool === 'measure' || altHeld) &&
+                (measureLines.length > 0 || measureTitles.length > 0 || measureEdgeHighlight) && (
                 <MeasureOverlay
                   lines={measureLines}
                   zoom={camera.zoom}
                   selectedRect={measureSelectedRect}
                   hoverRect={measureHoverRect}
+                  titles={measureTitles}
+                  edgeHighlight={measureEdgeHighlight}
+                  activeLineId={measureActiveLineId}
                 />
               )}
               {browsers.map((frame) => (
                 <BrowserFrame
                   key={frame.id}
                   frame={frame}
-                  selected={selectedId === frame.id}
-                  onSelect={() => {
-                    setSelectedId(frame.id)
+                  selected={selectedBrowserIds.includes(frame.id)}
+                  onSelect={(additive) => {
+                    if (additive) {
+                      const current = selectedBrowserRef.current
+                      selectBrowsers(
+                        current.includes(frame.id)
+                          ? current.filter((id) => id !== frame.id)
+                          : [...current, frame.id]
+                      )
+                      return
+                    }
+                    selectBrowsers([frame.id])
                     setDesignSelectedIds([])
                   }}
                   onChange={(patch) => patchFrame(frame.id, patch)}
                   onNavigate={(tabId, url) => {
+                    recordVisit({ url, title: '' })
                     setBrowsers((current) =>
                       current.map((item) =>
                         item.id === frame.id
@@ -3075,13 +6657,7 @@ export function App() {
                   onForward={(tabId) => void window.vanta.forward(tabId)}
                   onReload={(tabId) => void window.vanta.reload(tabId)}
                   onCloseWindow={() => {
-                    holes.current.delete(frame.id)
-                    setBrowsers((current) => current.filter((item) => item.id !== frame.id))
-                    if (selectedId === frame.id) {
-                      setInspectOn(false)
-                      setSelectedId(null)
-                    }
-                    void window.vanta.closeBrowser(frame.id)
+                    closeBrowserWindow(frame.id)
                   }}
                   onNewTab={() => {
                     void window.vanta.createTab(frame.id).then((next) => {
@@ -3090,7 +6666,7 @@ export function App() {
                           item.id === next.id ? { ...next, x: item.x, y: item.y, width: item.width, height: item.height } : item
                         )
                       )
-                      setSelectedId(frame.id)
+                      selectBrowsers([frame.id])
                     })
                   }}
                   onActivateTab={(tabId) => {
@@ -3098,7 +6674,47 @@ export function App() {
                     void window.vanta.activateTab(frame.id, tabId)
                   }}
                   onCloseTab={(tabId) => {
-                    void window.vanta.closeTab(frame.id, tabId)
+                    closeBrowserTab(frame.id, tabId)
+                  }}
+                  allTabs={[
+                    ...browsers.flatMap((item) =>
+                      item.tabs.map((tab) => ({
+                        id: tab.id,
+                        windowId: item.id,
+                        title: tab.title,
+                        url: tab.url,
+                        favicon: tab.favicon
+                      }))
+                    ),
+                    ...(codingActive
+                      ? [
+                          {
+                            id: SIDEBAR_BROWSER_ID,
+                            windowId: SIDEBAR_BROWSER_ID,
+                            title: getCodingAgentMeta(codingActive.agentId).name,
+                            url: codingAgentUrl,
+                            favicon: getCodingAgentMeta(codingActive.agentId).favicon
+                          }
+                        ]
+                      : []),
+                    ...sideBrowsers.map((slot) => {
+                      let title = slot.url
+                      try {
+                        title = new URL(slot.url).hostname.replace(/^www\./, '') || slot.url
+                      } catch {
+                        /* keep url */
+                      }
+                      return {
+                        id: slot.id,
+                        windowId: slot.id,
+                        title,
+                        url: slot.url,
+                        favicon: ''
+                      }
+                    })
+                  ]}
+                  onSwitchTab={(windowId, tabId) => {
+                    switchOmniboxTab(windowId, tabId)
                   }}
                   onHole={(el) => {
                     if (el) holes.current.set(frame.id, el)
@@ -3222,8 +6838,20 @@ export function App() {
               onClose={() => setResolveToastId(null)}
             />
           </div>
+            </div>
+            {rail === 'chat' && (
+              <div className="workspace-page">
+                <ChatWorkspace
+                  messages={chatLog}
+                  busy={agentBusy}
+                  poppedOut={chatPoppedOut}
+                  onPopOut={popOutAgentsPanel}
+                />
+              </div>
+            )}
+          </>
         )}
-        {view !== 'home' && (
+        {view === 'canvas' && rail !== 'chat' && (
         <RightSidebar
           zoom={Math.round(clampZoom(camera.zoom) * 100)}
           inspect={inspect}
@@ -3239,10 +6867,64 @@ export function App() {
           }}
           browser={selected}
           tool={tool}
+          theme={theme}
+          hideExpandChip={codingFullscreen}
           onPatchPage={(patch) => persistPages(pages.map((page) => (page.id === activePage.id ? { ...page, ...patch } : page)))}
           onPatchNode={(id, patch) => {
-            persistDesign(designRef.current.map((item) => (item.id === id ? { ...item, ...patch } : item)))
+            const before = designRef.current.find((item) => item.id === id)
+            if (
+              before &&
+              hasWorldPoints(before) &&
+              (patch.x != null || patch.y != null || patch.width != null || patch.height != null)
+            ) {
+              const { x, y, width, height, ...rest } = patch
+              const from = resolveWorldRect(before, designRef.current)
+              const to = {
+                x: x ?? from.x,
+                y: y ?? from.y,
+                width: Math.max(0.01, width ?? from.width),
+                height: Math.max(0.01, height ?? from.height)
+              }
+              persistDesign(
+                designRef.current.map((item) => (item.id === id ? scalePathPoints({ ...item, ...rest }, from, to) : item))
+              )
+              return
+            }
+            let next = designRef.current.map((item) =>
+              item.id === id ? (item.type === 'text' ? remeasureText({ ...item, ...patch }) : { ...item, ...patch }) : item
+            )
+            if (
+              before &&
+              (before.type === 'frame' || before.type === 'section') &&
+              (patch.width != null || patch.height != null)
+            ) {
+              const after = next.find((item) => item.id === id)
+              if (after) {
+                next = applyConstraintsOnParentResize(
+                  next,
+                  id,
+                  { width: before.width || 0, height: before.height || 0 },
+                  { width: after.width || 0, height: after.height || 0 }
+                )
+              }
+            }
+            persistDesign(next)
           }}
+          onPatchMany={(patches) => {
+            if (!patches.length) return
+            const map = new Map(patches.map((entry) => [entry.id, entry.patch]))
+            persistDesign(
+              designRef.current.map((item) => {
+                const patch = map.get(item.id)
+                if (!patch) return item
+                return item.type === 'text' ? remeasureText({ ...item, ...patch }) : { ...item, ...patch }
+              })
+            )
+          }}
+          onEnableAutoLayout={(id, opts) => {
+            persistDesign(enableAutoLayoutOnFrame(designRef.current, id, opts))
+          }}
+          onReorderChildren={reorderDesignChildren}
           onPatchBrowser={(id, patch) => patchFrame(id, patch)}
           onSpawnFrame={spawnFramePreset}
           onSpawnBrowser={spawnBrowserPreset}
@@ -3253,27 +6935,9 @@ export function App() {
           open={rightOpen}
           width={rightWidth}
           onToggle={() => setRightOpen((value) => !value)}
-          onResize={(width) => setRightWidth(Math.min(rail === 'chat' ? 720 : 480, Math.max(200, width)))}
-          commentsMode={tool === 'comment' && rail !== 'chat'}
-          browserPanel={
-            rail === 'chat' ? (
-              <ChatBrowserPanel
-                url={chatBrowserUrl}
-                onUrlChange={setChatBrowserUrl}
-                onNavigate={(url) => {
-                  setChatBrowserUrl(url)
-                  void window.vanta.navigate(CHAT_BROWSER_ID, url)
-                }}
-                onBack={() => void window.vanta.back(CHAT_BROWSER_ID)}
-                onForward={() => void window.vanta.forward(CHAT_BROWSER_ID)}
-                onReload={() => void window.vanta.reload(CHAT_BROWSER_ID)}
-                onHole={(el) => {
-                  chatHole.current = el
-                  syncLayout()
-                }}
-              />
-            ) : null
-          }
+          onResize={(width) => setRightWidth(Math.min(480, Math.max(200, width)))}
+          commentsMode={tool === 'comment'}
+          browserPanel={null}
           commentsPanel={
             <CommentsPanel
               comments={pageNodes.filter((node) => node.type === 'comment')}
@@ -3302,7 +6966,7 @@ export function App() {
         />
         )}
       </div>
-      {view === 'canvas' && rail !== 'chat' && actionBar && (
+      {view === 'canvas' && rail !== 'chat' && !codingFullscreen && !toolbarHiddenForAgentFs && actionBar && (
         <FrameActionBar
           id={actionBar.id}
           width={actionBar.width}
@@ -3318,35 +6982,230 @@ export function App() {
           onResize={actionBar.onResize}
           snapshot={actionBar.snapshot}
           measure={actionBar.measure}
+          dock={actionBar.dock}
+          onChromeChange={syncLayout}
         />
       )}
-      {view === 'canvas' && rail !== 'chat' && (
-        <CanvasToolbar
-          tool={tool}
-          shape={shapeKind}
-          mode={switchMode}
-          strokeColor={strokeColor}
-          strokeWeight={tool === 'brush' ? brushWeight : pencilWeight}
-          brushStyle={tool === 'brush' ? brushStyle : pencilStyle}
-          composerValue={chatInput}
-          composerBusy={agentBusy}
-          onTool={chooseTool}
-          onShape={(next) => {
-            setShapeKind(next)
-            chooseTool('shape')
+      <AnimatePresence
+        onExitComplete={() => {
+          if (agentFsPending.current === 'enter') {
+            agentFsPending.current = null
+            setCodingFullscreen(true)
+          } else if (agentFsPending.current === 'side-enter') {
+            agentFsPending.current = null
+            appendSideBrowser()
+          }
+          syncLayout()
+        }}
+      >
+        {view === 'canvas' && !toolbarHiddenForAgentFs && (
+          <motion.div
+            key="canvas-toolbar"
+            className={`canvas-toolbar-stack${createSvgOpen ? ' is-create-svg' : ''}`}
+            initial={false}
+            animate={{ y: 0, opacity: 1, scale: 1 }}
+            exit={
+              reduceMotion
+                ? { opacity: 0, transition: { duration: 0.08 } }
+                : {
+                    y: 220,
+                    opacity: 0,
+                    transition: {
+                      y: TOOLBAR_FS_EXIT,
+                      opacity: { duration: 0.1, ease: [0.4, 0, 1, 1] }
+                    }
+                  }
+            }
+            transition={{ duration: 0 }}
+            onUpdate={() => {
+              if (agentFsPending.current || toolbarHiddenForAgentFs) syncLayout()
+            }}
+            onAnimationComplete={() => syncLayout()}
+            onPointerDown={(event) => event.stopPropagation()}
+          >
+            {cropSession && (
+              <CropBar
+                zoom={scaleToZoom(
+                  cropSession.image.width / Math.max(1, coverRect(cropSession.frame, cropSession.natural).width)
+                )}
+                aspect={cropSession.aspect}
+                onZoom={(value) => {
+                  const session = cropSessionRef.current
+                  if (!session) return
+                  const { frame, image } = session
+                  const cover = coverRect(frame, session.natural)
+                  const scale = zoomToScale(value)
+                  const width = cover.width * scale
+                  const height = cover.height * scale
+                  // Zoom around the crop window's center.
+                  const cx = frame.x + frame.width / 2
+                  const cy = frame.y + frame.height / 2
+                  const relX = (cx - image.x) / Math.max(1, image.width)
+                  const relY = (cy - image.y) / Math.max(1, image.height)
+                  applyCropRects(session, frame, { x: cx - relX * width, y: cy - relY * height, width, height })
+                }}
+                onAspect={(aspect) => {
+                  const session = cropSessionRef.current
+                  if (!session) return
+                  const ratio = aspectRatioOf(aspect, session.natural)
+                  const next = { ...session, aspect }
+                  setCropSession(next)
+                  if (!ratio) return
+                  const { frame } = session
+                  const height = frame.width / ratio
+                  applyCropRects(next, { ...frame, y: frame.y + (frame.height - height) / 2, height }, session.image)
+                }}
+                onResizeToFit={() => {
+                  const session = cropSessionRef.current
+                  if (session) applyCropRects(session, { ...session.image }, session.image)
+                }}
+                onCancel={() => finishImageCrop(false)}
+                onApply={() => finishImageCrop(true)}
+              />
+            )}
+            <CanvasToolbar
+              tool={tool}
+              shape={shapeKind}
+              mode={switchMode}
+              strokeColor={selectedInk?.stroke || strokeColor}
+              strokeWeight={selectedInk?.strokeWidth || (tool === 'brush' ? brushWeight : pencilWeight)}
+              brushStyle={selectedInk?.brushStyle || (tool === 'brush' ? brushStyle : pencilStyle)}
+              composerValue={chatInput}
+              composerBusy={agentBusy}
+              onChromeChange={syncLayout}
+              onTool={chooseTool}
+              onShape={(next) => {
+                setShapeKind(next)
+                chooseTool('shape')
+              }}
+              onMode={chooseMode}
+              onStrokeColor={(color) => {
+                setStrokeColor(color)
+                patchSelectedInk({ stroke: color })
+              }}
+              onStrokeWeight={(weight) => {
+                if (tool === 'brush') setBrushWeight(weight)
+                else setPencilWeight(weight)
+                patchSelectedInk({ strokeWidth: weight })
+              }}
+              onBrushStyle={(style) => {
+                if (tool === 'brush') setBrushStyle(style)
+                else setPencilStyle(style)
+                patchSelectedInk({ brushStyle: style })
+              }}
+              onComposerChange={setChatInput}
+              onComposerSend={() => void sendChat()}
+              onSuggestion={(text) => setChatInput(text)}
+              showComposer={!chatPoppedOut || createSvgOpen}
+              jevComposer={jevComposer}
+              composerExtra={createSvgPanel}
+              createSvgActive={createSvgOpen}
+              onCreateSvg={() => {
+                if (createSvgOpen) {
+                  exitCreateSvg()
+                  return
+                }
+                setCreateSvgOpen(true)
+                // Paper-style: leave the field empty — ghost suggestions animate in the panel.
+                if (!createSvgBusy) setCreateSvgPrompt('')
+                setChatPoppedOut(false)
+              }}
+              inFileShaders={[
+                ...new Set(
+                  design.flatMap((node) =>
+                    getNodePaints(node)
+                      .filter((paint): paint is Extract<typeof paint, { type: 'shader' }> => paint.type === 'shader')
+                      .map((paint) => paint.shader)
+                  )
+                )
+              ]}
+              onSelectShader={(kind: ShaderKind) => {
+                exitCreateSvg()
+                const paint = defaultShader(kind)
+                const legacy = legacyFromPaints([paint])
+                const label = SHADER_OPTIONS.find((opt) => opt.id === kind)?.label || 'Shader'
+                const canvas = canvasRef.current
+                const cam = cameraRef.current
+                const center = canvas
+                  ? screenToWorld(cam, canvas.clientWidth / 2, canvas.clientHeight / 2)
+                  : { x: 120, y: 120 }
+                const width = 800
+                const height = 600
+                const id = crypto.randomUUID()
+                const sameName = designRef.current.filter(
+                  (node) =>
+                    (node.pageId || DEFAULT_PAGE.id) === activePageRef.current &&
+                    (node.name === label || node.name?.startsWith(`${label} -`))
+                ).length
+                const node: DesignNode = {
+                  id,
+                  type: 'rect',
+                  x: Math.round(center.x - width / 2),
+                  y: Math.round(center.y - height / 2),
+                  width,
+                  height,
+                  name: `${label} - ${sameName + 1}`,
+                  pageId: activePageRef.current,
+                  fills: [paint],
+                  fill: legacy.fill,
+                  fillOpacity: legacy.fillOpacity,
+                  radius: 16
+                }
+                persistDesign([...designRef.current, node])
+                setDesignSelectedIds([id])
+                setSelectedId(null)
+              }}
+            />
+          </motion.div>
+        )}
+      </AnimatePresence>
+      <ChatAgentsPopout
+        open={chatPoppedOut}
+        title={activeChat?.title || 'Agents'}
+        messages={chatLog}
+        busy={agentBusy}
+        input={chatInput}
+        onInput={setChatInput}
+        onSend={() => void sendChat()}
+        onClose={() => setChatPoppedOut(false)}
+        jevComposer={jevComposer}
+        composerExtra={createSvgPanel}
+      />
+      {layerMenu && view === 'canvas' && (
+        <LayerSidebarMenu
+          menu={layerMenu}
+          selectedIds={designSelectedIds}
+          selectedNodes={designSelectedIds
+            .map((id) => design.find((node) => node.id === id))
+            .filter((node): node is DesignNode => Boolean(node))}
+          canPaste={Boolean(designClipboard.current?.length)}
+          canPasteStyles={Boolean(styleClipboard.current)}
+          onClose={() => setLayerMenu(null)}
+          onCopy={copySelection}
+          onCopyLink={() => {
+            const id = designSelectedIds[designSelectedIds.length - 1]
+            void navigator.clipboard
+              .writeText(id ? `vanta://node/${id}` : `vanta://file/${activeFileId}`)
+              .catch(() => undefined)
           }}
-          onMode={chooseMode}
-          onStrokeColor={setStrokeColor}
-          onStrokeWeight={(weight) => {
-            if (tool === 'brush') setBrushWeight(weight)
-            else setPencilWeight(weight)
-          }}
-          onBrushStyle={(style) => {
-            if (tool === 'brush') setBrushStyle(style)
-            else setPencilStyle(style)
-          }}
-          onComposerChange={setChatInput}
-          onComposerSend={() => void sendChat()}
+          onCopyAsPng={copySelectionAsPng}
+          onCopyAsTailwind={() => copySelectionAsCode(true)}
+          onCopyAsReact={() => copySelectionAsCode(false)}
+          onPaste={() => pasteClipboard('default')}
+          onPasteOnTop={() => pasteClipboard('on-top')}
+          onPasteReplace={() => pasteClipboard('replace')}
+          onDuplicate={duplicateSelected}
+          onCopyStyles={copyStylesFromSelection}
+          onPasteStyles={pasteStylesToSelection}
+          onFrameSelection={frameSelected}
+          onWrapFlex={wrapFlexSelected}
+          onRemoveFlex={removeFlexSelected}
+          onUngroup={ungroupSelected}
+          onBringToFront={() => moveSelectionZ('front')}
+          onSendToBack={() => moveSelectionZ('back')}
+          onToggleVisible={toggleSelectionVisible}
+          onToggleLock={toggleSelectionLock}
+          onCollapseAll={() => setCollapseLayersToken((value) => value + 1)}
         />
       )}
       {contextMenu && view === 'canvas' && (
@@ -3375,28 +7234,9 @@ export function App() {
               .writeText(id ? `vanta://node/${id}` : `vanta://file/${activeFileId}`)
               .catch(() => undefined)
           }}
-          onCopyAsPng={() => {
-            const node = designSelectedIds
-              .map((id) => design.find((item) => item.id === id))
-              .filter((item): item is DesignNode => Boolean(item))
-              .at(-1)
-            if (!node) return
-            void copyNodeAsPng(node, design).catch(() => undefined)
-          }}
-          onCopyAsTailwind={() => {
-            const nodes = designSelectedIds
-              .map((id) => design.find((node) => node.id === id))
-              .filter((node): node is DesignNode => Boolean(node))
-            const text = nodes.map((node) => nodeCssSnippet(node, true)).join('\n')
-            void navigator.clipboard.writeText(text).catch(() => undefined)
-          }}
-          onCopyAsReact={() => {
-            const nodes = designSelectedIds
-              .map((id) => design.find((node) => node.id === id))
-              .filter((node): node is DesignNode => Boolean(node))
-            const text = nodes.map((node) => nodeCssSnippet(node, false)).join('\n\n')
-            void navigator.clipboard.writeText(text).catch(() => undefined)
-          }}
+          onCopyAsPng={copySelectionAsPng}
+          onCopyAsTailwind={() => copySelectionAsCode(true)}
+          onCopyAsReact={() => copySelectionAsCode(false)}
           onPaste={() => pasteClipboard('default')}
           onPasteOnTop={() => pasteClipboard('on-top')}
           onPasteReplace={() => pasteClipboard('replace')}
@@ -3408,6 +7248,11 @@ export function App() {
           onRemoveFlex={removeFlexSelected}
           onDelete={deleteSelected}
         />
+      )}
+      {copyToast && (
+        <div className="export-toast is-copy" role="status">
+          {copyToast}
+        </div>
       )}
     </div>
   )

@@ -3,7 +3,13 @@ import { join } from 'node:path'
 import { app } from 'electron'
 
 export function loadEnv(): void {
-  const files = [join(process.cwd(), '.env'), join(app.getAppPath(), '.env')]
+  const files = [
+    join(process.cwd(), '.env'),
+    join(app.getAppPath(), '.env'),
+    join(app.getAppPath(), '..', '.env'),
+    join(app.getAppPath(), '..', '..', '.env'),
+    join(app.getPath('userData'), '.env')
+  ]
   for (const file of files) {
     if (!existsSync(file)) continue
     for (const raw of readFileSync(file, 'utf8').split(/\r?\n/)) {
@@ -16,7 +22,8 @@ export function loadEnv(): void {
       if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
         value = value.slice(1, -1)
       }
-      if (!process.env[key]) process.env[key] = value
+      // File values win so a fresh .env overrides a stale empty shell env.
+      if (value) process.env[key] = value
     }
   }
 }

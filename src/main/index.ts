@@ -1,13 +1,39 @@
-import { app, BrowserWindow, ipcMain, nativeTheme } from 'electron'
+import { app, BrowserWindow, ipcMain, nativeTheme, shell } from 'electron'
 import { join } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { chromeHost } from './chrome'
-import { addDesign, getDesign, onDesignChange, setDesign } from './designStore'
+import { addDesign, getDesign, onDesignChange, setDesign, storeRendererDesign } from './designStore'
 import { loadWorkspace, saveWorkspace } from './workspace'
 import { loadEnv } from './env'
 import { runAgent } from './agent'
+import { askJev, jevStatus, setJevKey } from './jev'
+import {
+  generateSvgStream,
+  quiverStatus,
+  setQuiverKey,
+  vectorizeSvgStream,
+  type QuiverGenerateInput,
+  type QuiverVectorizeInput
+} from './quiver'
+import { onTranscriberStatus, transcribe, transcriberStatus, warmTranscriber } from './transcriber'
+import {
+  onRemoveBackgroundStatus,
+  removeBackgroundStatus,
+  removeImageBackground,
+  warmRemoveBackground
+} from './removeBackground'
+import type { JevQuestions } from '../shared/jev'
 import { onBuildEvent, type BuildEvent } from './buildBus'
 import { startVantaMcp, stopVantaMcp, isVantaMcpRunning, VANTA_MCP_URL, VANTA_MCP_PORT } from './mcpServer'
+import {
+  confirmCloudAgentMcp,
+  connectAgentMcp,
+  disconnectAgentMcp,
+  getAgentMcpLinkStatus
+} from './mcpClientInstall'
+import { ensureMcpTunnel, getTunnelError, hasNamedTunnel, stopMcpTunnel } from './mcpTunnel'
+import { startAutoUpdates } from './updater'
+import type { CodingAgentId } from '../shared/codingAgents'
 import {
   DEFAULT_PAGE,
   DEFAULT_URL,
@@ -209,13 +235,19 @@ async function closeTab(windowId: string, tabId: string): Promise<void> {
 
 async function closeWindow(id: string): Promise<void> {
   const frame = frames.get(id)
-  if (!frame) return
-  frames.delete(id)
-  for (const tab of frame.tabs) {
-    await chromeHost.closeBrowser(tab.id)
+  if (frame) {
+    frames.delete(id)
+    for (const tab of frame.tabs) {
+      await chromeHost.closeBrowser(tab.id)
+    }
+    broadcastFrames()
+    scheduleSave()
+    mainWindow?.webContents.send('vanta:need-layout')
+    return
   }
-  broadcastFrames()
-  scheduleSave()
+  // Sidebar / chat / agent side browsers are not canvas frames.
+  await chromeHost.closeBrowser(id)
+  mainWindow?.webContents.send('vanta:need-layout')
 }
 
 async function restoreWorkspace(): Promise<void> {
@@ -319,7 +351,7 @@ function registerIpc(): void {
   })
   ipcMain.handle('vanta:getDesign', () => getDesign())
   ipcMain.handle('vanta:setDesign', (_event, next: DesignNode[]) => {
-    setDesign(Array.isArray(next) ? next : [])
+    storeRendererDesign(Array.isArray(next) ? next : [])
     scheduleSave()
     return getDesign()
   })
@@ -358,6 +390,18 @@ function registerIpc(): void {
   })
   ipcMain.handle('vanta:setClickThrough', async (_event, enabled: boolean) => {
     await chromeHost.setClickThrough(enabled)
+  })
+  ipcMain.on('vanta:browser-wheel', (event, data: {
+    deltaX: number
+    deltaY: number
+    deltaMode: number
+    clientX: number
+    clientY: number
+    ctrlKey: boolean
+    metaKey: boolean
+    shiftKey: boolean
+  }) => {
+    chromeHost.forwardBrowserWheel(event.sender, data)
   })
   ipcMain.handle('vanta:setTheme', (_event, theme: 'light' | 'dark') => {
     const dark = theme === 'dark'
@@ -437,11 +481,108 @@ function registerIpc(): void {
       agentRunning = false
     }
   })
+  ipcMain.handle('vanta:jevStatus', () => jevStatus())
+  ipcMain.handle('vanta:jevSetKey', (_event, key: string) => setJevKey(key))
+  ipcMain.handle('vanta:jevAsk', (_event, state: string, questions: JevQuestions) => askJev(state, questions))
+  ipcMain.handle('vanta:quiverStatus', () => quiverStatus())
+  ipcMain.handle('vanta:quiverSetKey', (_event, key: string) => setQuiverKey(key))
+  ipcMain.handle('vanta:quiverGenerateSvg', async (event, input: QuiverGenerateInput) => {
+    const webContents = event.sender
+    const controller = new AbortController()
+    const onAbort = () => controller.abort()
+    ipcMain.once(`vanta:quiverAbort:${webContents.id}`, onAbort)
+    try {
+      const svg = await generateSvgStream(
+        input,
+        (streamEvent) => {
+          if (!webContents.isDestroyed()) webContents.send('vanta:quiver', streamEvent)
+        },
+        controller.signal
+      )
+      return { ok: true as const, svg }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      if (!webContents.isDestroyed()) webContents.send('vanta:quiver', { type: 'error', message })
+      return { ok: false as const, error: message }
+    } finally {
+      ipcMain.removeListener(`vanta:quiverAbort:${webContents.id}`, onAbort)
+    }
+  })
+  ipcMain.handle('vanta:quiverVectorizeSvg', async (event, input: QuiverVectorizeInput) => {
+    const webContents = event.sender
+    const controller = new AbortController()
+    const onAbort = () => controller.abort()
+    ipcMain.once(`vanta:quiverAbort:${webContents.id}`, onAbort)
+    try {
+      const svg = await vectorizeSvgStream(
+        input,
+        (streamEvent) => {
+          if (!webContents.isDestroyed()) webContents.send('vanta:quiver', streamEvent)
+        },
+        controller.signal
+      )
+      return { ok: true as const, svg }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      if (!webContents.isDestroyed()) webContents.send('vanta:quiver', { type: 'error', message })
+      return { ok: false as const, error: message }
+    } finally {
+      ipcMain.removeListener(`vanta:quiverAbort:${webContents.id}`, onAbort)
+    }
+  })
+  ipcMain.on('vanta:quiverAbort', (event) => {
+    ipcMain.emit(`vanta:quiverAbort:${event.sender.id}`)
+  })
+  ipcMain.handle('vanta:transcriberStatus', () => transcriberStatus())
+  ipcMain.handle('vanta:warmTranscriber', async () => {
+    await warmTranscriber().catch(() => undefined)
+    return transcriberStatus()
+  })
+  ipcMain.handle('vanta:transcribe', (_event, audio: Float32Array) => transcribe(audio))
+  onTranscriberStatus((status) => mainWindow?.webContents.send('vanta:transcriber', status))
+
+  ipcMain.handle('vanta:removeBackgroundStatus', () => removeBackgroundStatus())
+  ipcMain.handle('vanta:warmRemoveBackground', async () => {
+    await warmRemoveBackground().catch(() => undefined)
+    return removeBackgroundStatus()
+  })
+  ipcMain.handle(
+    'vanta:removeBackground',
+    async (
+      event,
+      imageDataUrl: string
+    ): Promise<{ ok: true; dataUrl: string } | { ok: false; error: string }> => {
+      try {
+        const dataUrl = await removeImageBackground(imageDataUrl, (message) => {
+          event.sender.send('vanta:removeBackgroundProgress', message)
+        })
+        return { ok: true, dataUrl }
+      } catch (error) {
+        return {
+          ok: false,
+          error: error instanceof Error ? error.message : String(error)
+        }
+      }
+    }
+  )
+  onRemoveBackgroundStatus((status) =>
+    mainWindow?.webContents.send('vanta:removeBackgroundStatus', status)
+  )
+
   ipcMain.handle('vanta:getMcpStatus', (): McpStatus => ({
     running: isVantaMcpRunning(),
     url: VANTA_MCP_URL,
     port: VANTA_MCP_PORT
   }))
+
+  ipcMain.handle('vanta:getAgentMcpLink', (_event, agentId: CodingAgentId) => getAgentMcpLinkStatus(agentId))
+  ipcMain.handle('vanta:connectAgentMcp', (_event, agentId: CodingAgentId) => connectAgentMcp(agentId))
+  ipcMain.handle('vanta:disconnectAgentMcp', (_event, agentId: CodingAgentId) => disconnectAgentMcp(agentId))
+  ipcMain.handle('vanta:confirmCloudAgentMcp', (_event, agentId: CodingAgentId) => confirmCloudAgentMcp(agentId))
+  ipcMain.handle('vanta:openExternal', async (_event, url: string) => {
+    if (typeof url !== 'string' || !url.trim()) return
+    await shell.openExternal(url.trim())
+  })
 }
 
 app.whenReady().then(async () => {
@@ -497,11 +638,26 @@ app.whenReady().then(async () => {
           }
         }
         return null
+      },
+      resolveChromeTabId: (browserId) => {
+        for (const frame of frames.values()) {
+          if (frame.activeTabId === browserId || frame.tabs.some((tab) => tab.id === browserId)) {
+            return browserId
+          }
+          if (frame.id === browserId) return frame.activeTabId
+        }
+        return null
       }
     })
+    if (hasNamedTunnel()) {
+      void ensureMcpTunnel().then((url) => {
+        if (!url) console.warn('[vanta-mcp] named tunnel failed:', getTunnelError())
+      })
+    }
   } catch (error) {
     console.error('[vanta-mcp] failed to start', error)
   }
+  startAutoUpdates()
 })
 
 app.on('second-instance', () => {
@@ -520,6 +676,7 @@ app.on('before-quit', (event) => {
   quitting = true
   void (async () => {
     try {
+      stopMcpTunnel()
       await stopVantaMcp()
     } catch {
       /* ignore */

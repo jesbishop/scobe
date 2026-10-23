@@ -12,7 +12,10 @@ import type {
   McpStatus,
   Workspace
 } from '../shared/types'
+import type { AgentMcpLinkStatus, CodingAgentId } from '../shared/codingAgents'
 import type { SnapshotEvent } from '../shared/snapshot'
+import type { JevQuestions, JevResponse, JevStatus, TranscriberStatus } from '../shared/jev'
+import type { QuiverGenerateInput, QuiverStatus, QuiverStreamEvent, QuiverVectorizeInput } from '../shared/quiver'
 
 const api = {
   getStatus: (): Promise<ChromeStatus> => ipcRenderer.invoke('vanta:getStatus'),
@@ -61,6 +64,68 @@ const api = {
   runAgent: (messages: Array<{ role: 'user' | 'assistant'; text: string }>): Promise<void> =>
     ipcRenderer.invoke('vanta:runAgent', messages),
   getMcpStatus: (): Promise<McpStatus> => ipcRenderer.invoke('vanta:getMcpStatus'),
+  getAgentMcpLink: (agentId: CodingAgentId): Promise<AgentMcpLinkStatus> =>
+    ipcRenderer.invoke('vanta:getAgentMcpLink', agentId),
+  connectAgentMcp: (agentId: CodingAgentId): Promise<AgentMcpLinkStatus> =>
+    ipcRenderer.invoke('vanta:connectAgentMcp', agentId),
+  disconnectAgentMcp: (agentId: CodingAgentId): Promise<AgentMcpLinkStatus> =>
+    ipcRenderer.invoke('vanta:disconnectAgentMcp', agentId),
+  confirmCloudAgentMcp: (agentId: CodingAgentId): Promise<AgentMcpLinkStatus> =>
+    ipcRenderer.invoke('vanta:confirmCloudAgentMcp', agentId),
+  openExternal: (url: string): Promise<void> => ipcRenderer.invoke('vanta:openExternal', url),
+  jevStatus: (): Promise<JevStatus> => ipcRenderer.invoke('vanta:jevStatus'),
+  jevSetKey: (key: string): Promise<JevStatus> => ipcRenderer.invoke('vanta:jevSetKey', key),
+  jevAsk: (state: string, questions: JevQuestions): Promise<JevResponse> =>
+    ipcRenderer.invoke('vanta:jevAsk', state, questions),
+  quiverStatus: (): Promise<QuiverStatus> => ipcRenderer.invoke('vanta:quiverStatus'),
+  quiverSetKey: (key: string): Promise<QuiverStatus> => ipcRenderer.invoke('vanta:quiverSetKey', key),
+  quiverGenerateSvg: (
+    input: QuiverGenerateInput
+  ): Promise<{ ok: true; svg: string } | { ok: false; error: string }> =>
+    ipcRenderer.invoke('vanta:quiverGenerateSvg', input),
+  quiverVectorizeSvg: (
+    input: QuiverVectorizeInput
+  ): Promise<{ ok: true; svg: string } | { ok: false; error: string }> =>
+    ipcRenderer.invoke('vanta:quiverVectorizeSvg', input),
+  quiverAbort: (): void => {
+    ipcRenderer.send('vanta:quiverAbort')
+  },
+  onQuiver: (handler: (event: QuiverStreamEvent) => void): (() => void) => {
+    const listener = (_event: unknown, payload: QuiverStreamEvent) => handler(payload)
+    ipcRenderer.on('vanta:quiver', listener)
+    return () => ipcRenderer.off('vanta:quiver', listener)
+  },
+  transcriberStatus: (): Promise<TranscriberStatus> => ipcRenderer.invoke('vanta:transcriberStatus'),
+  warmTranscriber: (): Promise<TranscriberStatus> => ipcRenderer.invoke('vanta:warmTranscriber'),
+  transcribe: (audio: Float32Array): Promise<string> => ipcRenderer.invoke('vanta:transcribe', audio),
+  onTranscriber: (handler: (status: TranscriberStatus) => void): (() => void) => {
+    const listener = (_event: unknown, status: TranscriberStatus) => handler(status)
+    ipcRenderer.on('vanta:transcriber', listener)
+    return () => ipcRenderer.off('vanta:transcriber', listener)
+  },
+  removeBackgroundStatus: (): Promise<{ state: 'idle' | 'loading' | 'ready' | 'error'; error?: string }> =>
+    ipcRenderer.invoke('vanta:removeBackgroundStatus'),
+  warmRemoveBackground: (): Promise<{ state: 'idle' | 'loading' | 'ready' | 'error'; error?: string }> =>
+    ipcRenderer.invoke('vanta:warmRemoveBackground'),
+  removeBackground: (
+    imageDataUrl: string
+  ): Promise<{ ok: true; dataUrl: string } | { ok: false; error: string }> =>
+    ipcRenderer.invoke('vanta:removeBackground', imageDataUrl),
+  onRemoveBackgroundProgress: (handler: (message: string) => void): (() => void) => {
+    const listener = (_event: unknown, message: string) => handler(message)
+    ipcRenderer.on('vanta:removeBackgroundProgress', listener)
+    return () => ipcRenderer.off('vanta:removeBackgroundProgress', listener)
+  },
+  onRemoveBackgroundStatus: (
+    handler: (status: { state: 'idle' | 'loading' | 'ready' | 'error'; error?: string }) => void
+  ): (() => void) => {
+    const listener = (
+      _event: unknown,
+      status: { state: 'idle' | 'loading' | 'ready' | 'error'; error?: string }
+    ) => handler(status)
+    ipcRenderer.on('vanta:removeBackgroundStatus', listener)
+    return () => ipcRenderer.off('vanta:removeBackgroundStatus', listener)
+  },
   onBrowsers: (handler: (browsers: BrowserFrame[]) => void): (() => void) => {
     const listener = (_event: unknown, browsers: BrowserFrame[]) => handler(browsers)
     ipcRenderer.on('vanta:browsers', listener)
@@ -105,6 +170,39 @@ const api = {
     const listener = (_event: unknown, event: BuildUiEvent) => handler(event)
     ipcRenderer.on('vanta:build', listener)
     return () => ipcRenderer.off('vanta:build', listener)
+  },
+  onCanvasWheel: (
+    handler: (event: {
+      deltaX: number
+      deltaY: number
+      deltaMode: number
+      clientX: number
+      clientY: number
+      ctrlKey: boolean
+      metaKey: boolean
+      shiftKey: boolean
+    }) => void
+  ): (() => void) => {
+    const listener = (
+      _event: unknown,
+      payload: {
+        deltaX: number
+        deltaY: number
+        deltaMode: number
+        clientX: number
+        clientY: number
+        ctrlKey: boolean
+        metaKey: boolean
+        shiftKey: boolean
+      }
+    ) => handler(payload)
+    ipcRenderer.on('vanta:canvas-wheel', listener)
+    return () => ipcRenderer.off('vanta:canvas-wheel', listener)
+  },
+  onCanvasZoomKey: (handler: (event: { key: string; shiftKey: boolean }) => void): (() => void) => {
+    const listener = (_event: unknown, payload: { key: string; shiftKey: boolean }) => handler(payload)
+    ipcRenderer.on('vanta:canvas-zoom-key', listener)
+    return () => ipcRenderer.off('vanta:canvas-zoom-key', listener)
   }
 }
 

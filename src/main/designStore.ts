@@ -14,6 +14,12 @@ export function setDesign(next: DesignNode[]): DesignNode[] {
   return nodes
 }
 
+// The renderer already flowed (or deliberately skipped flowing) these nodes, and echoing them back would clobber newer edits.
+export function storeRendererDesign(next: DesignNode[]): DesignNode[] {
+  nodes = next
+  return nodes
+}
+
 export function addDesign(node: DesignNode): DesignNode[] {
   return setDesign([...nodes, node])
 }

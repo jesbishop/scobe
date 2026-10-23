@@ -71,12 +71,13 @@ export function CodingAgentsPopup({
   return (
     <div
       className="ca-popup-backdrop"
+      data-chrome-overlay=""
       onPointerDown={(event) => {
         if (event.target === event.currentTarget) onClose()
       }}
     >
-      <div className="ca-popup-stage">
-        <div className="ca-popup" role="dialog" aria-modal="true" aria-labelledby="ca-popup-title">
+      <div className="ca-popup-stage" data-chrome-overlay="">
+        <div className="ca-popup" role="dialog" aria-modal="true" aria-labelledby="ca-popup-title" data-chrome-overlay="">
           <div className="ca-popup-title-row">
             <h2 id="ca-popup-title">Recents</h2>
             <button type="button" className="ca-popup-close" onClick={onClose} aria-label="Close">
@@ -140,7 +141,13 @@ export function CodingAgentsPopup({
         </div>
 
         {agentPickerOpen ? (
-          <div id="ca-agent-picker" className="ca-agent-picker" role="menu" aria-label="Choose a coding agent">
+          <div
+            id="ca-agent-picker"
+            className="ca-agent-picker"
+            role="menu"
+            aria-label="Choose a coding agent"
+            data-chrome-overlay=""
+          >
             <div className="ca-agent-picker-title">Coding agent</div>
             {CODING_AGENTS.map((agent) => (
               <button

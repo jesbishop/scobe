@@ -13,9 +13,6 @@ Thumbs.db
 .env.*
 !/.env.example
 .tmp-*
-scripts/.figma-frames/
-scripts/.marquee-frames/
-scripts/.paper-build-frames/
-scripts/.paper-shots/
-scripts/.toolbar-popup-frames/
-scripts/.section-frames/
+scripts/.*
+scripts/patch-*.mjs
+scripts/fix-voidpromise.mjs

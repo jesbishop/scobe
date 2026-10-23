@@ -1,9 +1,85 @@
 import type { DesignNode, ExportFormat, ExportSetting } from '../shared/types'
 import { getNodePaints } from '../shared/paint'
-import { absoluteBounds } from '../shared/layoutEngine'
+import { absoluteBounds, childIndexOf } from '../shared/layoutEngine'
 import { clampCornerRadii, cornersAreIndependent, resolveCornerRadii, roundedRectPath } from '../shared/corners'
 import { imageAdjustActive, imageAdjustFilterMarkup } from '../shared/imageAdjust'
-import { parseHex, withAlpha } from './colorMath'
+import { hexToRgb, parseHex, rgbToHsl, withAlpha } from './colorMath'
+
+/** Light near-neutral surfaces that should follow the themed page fill in dark thumbs. */
+function isLightSurfaceHex(hex: string): boolean {
+  const value = parseHex(hex, '#000000').toLowerCase()
+  const { l, s } = rgbToHsl(hexToRgb(value))
+  // Broad net: any near-neutral mid→light grey used as UI chrome.
+  return l >= 48 && s <= 22
+}
+
+function darkSurfaceForLight(hex: string, pageFill: string): string {
+  const { l } = rgbToHsl(hexToRgb(parseHex(hex, '#FFFFFF')))
+  if (l >= 96) return '#3a3a3a'
+  if (l >= 88) return '#333333'
+  if (l >= 70) return '#2f2f2f'
+  return pageFill
+}
+
+function nodeSolidHex(node: DesignNode, fallback = ''): string {
+  const paints = getNodePaints(node).filter((paint) => paint.visible !== false)
+  const solid = paints.find((paint) => paint.type === 'solid')
+  if (solid && solid.type === 'solid') return toHex(solid.color, fallback || '#000000')
+  if (node.fill) return toHex(node.fill, fallback || '#000000')
+  return fallback
+}
+
+/** Remap light UI chrome + dark type so dark-mode thumbs match a dark canvas. */
+function themeNodesForThumb(
+  nodes: DesignNode[],
+  theme: 'light' | 'dark',
+  pageFill: string,
+  rootId?: string
+): DesignNode[] {
+  if (theme !== 'dark') return nodes
+  return nodes.map((node) => {
+    if (node.type === 'comment' || node.visible === false) return node
+    if (node.type === 'image') return node
+
+    if (node.type === 'text') {
+      const hex = nodeSolidHex(node, '#000000')
+      const { l, s } = rgbToHsl(hexToRgb(hex))
+      if (l <= 42) return { ...node, fill: '#F1F1F1', fills: [] }
+      if (l <= 72 && s <= 20) return { ...node, fill: '#B3B3B3', fills: [] }
+      return node
+    }
+
+    // Transparent root frames still need an opaque dark surface in the thumb.
+    const paints = getNodePaints(node).filter((paint) => paint.visible !== false)
+    const solid = paints.find((paint) => paint.type === 'solid')
+    const hex =
+      solid && solid.type === 'solid'
+        ? toHex(solid.color, '')
+        : node.fill
+          ? toHex(node.fill, '')
+          : ''
+
+    if (!hex) {
+      // Only the root artboard needs an opaque dark surface when it has no fill.
+      if (node.id === rootId) return { ...node, fill: pageFill, fills: [] }
+      return node
+    }
+    if (!isLightSurfaceHex(hex)) return node
+    const next = darkSurfaceForLight(hex, pageFill)
+    if (paints.length) {
+      return {
+        ...node,
+        fill: next,
+        fills: paints.map((paint) =>
+          paint.type === 'solid' && paint.visible !== false
+            ? { ...paint, color: isLightSurfaceHex(paint.color) ? darkSurfaceForLight(paint.color, pageFill) : paint.color }
+            : paint
+        )
+      }
+    }
+    return { ...node, fill: next, fills: [] }
+  })
+}
 
 function toHex(color: string | undefined, fallback = '#DDDDDD'): string {
   return parseHex(color || fallback, fallback)
@@ -23,6 +99,11 @@ function fillCss(node: DesignNode): string {
   const top = paints[0]
   if (top?.type === 'solid') return withAlpha(top.color, top.opacity)
   if (top?.type === 'image' && top.imageDataUrl) return 'none'
+  // Match canvas: frames/sections with no fill stay transparent (not #DDDDDD).
+  if (!top && (node.type === 'frame' || node.type === 'section')) return 'none'
+  if (!node.fill && node.fillOpacity == null && !top) {
+    if (node.type === 'frame' || node.type === 'section') return 'none'
+  }
   return withAlpha(toHex(node.fill, '#DDDDDD'), node.fillOpacity ?? 1)
 }
 
@@ -36,7 +117,18 @@ function strokeAttrs(node: DesignNode): string {
   return `stroke="${escapeXml(color)}" stroke-width="${sw}"`
 }
 
+/** Base64 data URLs are XML-safe already; escaping copies megabytes of image data per node. */
+function escapeHref(value: string): string {
+  return /^data:[\w/+.-]+;base64,[A-Za-z0-9+/=]*$/.test(value.slice(0, 64)) && !/["<>&']/.test(value)
+    ? value
+    : escapeXml(value)
+}
+
 function shapeMarkup(node: DesignNode, width: number, height: number, allNodes: DesignNode[] = []): string {
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">${shapeInner(node, width, height, allNodes)}</svg>`
+}
+
+function shapeInner(node: DesignNode, width: number, height: number, allNodes: DesignNode[]): string {
   const fill = fillCss(node)
   const stroke = strokeAttrs(node)
   const opacity = node.opacity ?? 1
@@ -90,24 +182,28 @@ function shapeMarkup(node: DesignNode, width: number, height: number, allNodes: 
             ? `<clipPath id="${clipId}"><path d="${roundedRectPath(width, height, radii)}" /></clipPath>`
             : `<clipPath id="${clipId}"><rect width="${width}" height="${height}" rx="${radii.tl}" ry="${radii.tl}" /></clipPath>`
           : ''
-      body += clip
-      const aspect = node.type === 'image' ? 'none' : 'xMidYMid slice'
-      body += `<image href="${escapeXml(img)}" width="${width}" height="${height}" preserveAspectRatio="${aspect}"${
-        clip ? ` clip-path="url(#${clipId})"` : ''
+      const cropBox = imagePaint?.type === 'image' && imagePaint.scaleMode === 'crop' ? imagePaint.imageBox : undefined
+      // Crop mode places the image explicitly and always clips to the layer box.
+      const clipMarkup =
+        clip || (cropBox ? `<clipPath id="${clipId}"><rect width="${width}" height="${height}" /></clipPath>` : '')
+      body += clipMarkup
+      const aspect = node.type === 'image' || cropBox ? 'none' : 'xMidYMid slice'
+      const placement = cropBox
+        ? `x="${cropBox.x * width}" y="${cropBox.y * height}" width="${cropBox.w * width}" height="${cropBox.h * height}"`
+        : `width="${width}" height="${height}"`
+      body += `<image href="${escapeHref(img)}" ${placement} preserveAspectRatio="${aspect}"${
+        clipMarkup ? ` clip-path="url(#${clipId})"` : ''
       }${adjustOn ? ` filter="url(#${adjustId})"` : ''} />`
     }
   }
 
   // Nested children (local coords relative to this node)
   if (node.type === 'frame' || node.type === 'section') {
-    const kids = allNodes.filter((child) => child.parentId === node.id)
+    const kids = childIndexOf(allNodes).get(node.id) || []
     for (const child of kids) {
       const cw = Math.max(1, Math.round(child.width || 1))
       const ch = Math.max(1, Math.round(child.height || (child.type === 'text' ? child.fontSize || 12 : 1)))
-      const inner = shapeMarkup(child, cw, ch, allNodes)
-      // strip outer svg wrapper from recursive call — use group instead
-      const innerBody = inner.replace(/^<svg[^>]*>/, '').replace(/<\/svg>$/, '')
-      body += `<g transform="translate(${child.x || 0} ${child.y || 0})">${innerBody}</g>`
+      body += `<g transform="translate(${child.x || 0} ${child.y || 0})">${shapeInner(child, cw, ch, allNodes)}</g>`
     }
   }
 
@@ -141,7 +237,7 @@ function shapeMarkup(node: DesignNode, width: number, height: number, allNodes: 
       ? `filter="url(#bl-${escapeXml(node.id)})"`
       : ''
   const defs = filters.length ? `<defs>${filters.join('')}</defs>` : ''
-  return `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">${defs}<g opacity="${opacity}" ${filterAttr}>${body}</g></svg>`
+  return `${defs}<g opacity="${opacity}" ${filterAttr}>${body}</g>`
 }
 
 function starPoints(width: number, height: number, spikes = 5): string {
@@ -159,8 +255,12 @@ function starPoints(width: number, height: number, spikes = 5): string {
 }
 
 export function nodeToSvg(node: DesignNode, allNodes: DesignNode[] = []): string {
-  const box = absoluteBounds(node, allNodes.length ? allNodes : [node])
-  return shapeMarkup(node, Math.max(1, Math.round(box.width)), Math.max(1, Math.round(box.height)), allNodes)
+  const w = Math.max(1, Math.round(node.width || 1))
+  const h = Math.max(
+    1,
+    Math.round(node.height || (node.type === 'text' ? node.fontSize || 12 : 1))
+  )
+  return shapeMarkup(node, w, h, allNodes)
 }
 
 function downloadBlob(blob: Blob, filename: string) {
@@ -178,6 +278,8 @@ async function svgToCanvas(svg: string, width: number, height: number, scale: nu
   canvas.height = Math.max(1, Math.round(height * scale))
   const ctx = canvas.getContext('2d')
   if (!ctx) throw new Error('Canvas unavailable')
+  ctx.imageSmoothingEnabled = true
+  ctx.imageSmoothingQuality = 'high'
   const blob = new Blob([svg], { type: 'image/svg+xml;charset=utf-8' })
   const url = URL.createObjectURL(blob)
   try {
@@ -302,10 +404,21 @@ export async function exportNodeSetting(
   const box = absoluteBounds(node, allNodes.length ? allNodes : [node])
   const width = Math.max(1, Math.round(box.width))
   const height = Math.max(1, Math.round(box.height))
-  const scale = setting.scale > 0 ? setting.scale : 1
+  const scale = setting.fixedWidth
+    ? setting.fixedWidth / width
+    : setting.fixedHeight
+      ? setting.fixedHeight / height
+      : setting.scale > 0
+        ? setting.scale
+        : 1
   const svg = nodeToSvg(node, allNodes)
   const name = safeName(node)
-  const suffix = scale === 1 ? '' : `@${scale}x`
+  const suffix =
+    setting.suffix != null
+      ? setting.suffix.replace(/[\\/:*?"<>|]+/g, '')
+      : setting.fixedWidth || setting.fixedHeight || scale === 1
+        ? ''
+        : `@${scale}x`
 
   if (setting.format === 'SVG') {
     downloadBlob(new Blob([svg], { type: 'image/svg+xml' }), `${name}${suffix}.svg`)
@@ -319,7 +432,8 @@ export async function exportNodeSetting(
     return
   }
   if (setting.format === 'JPG') {
-    const blob = await canvasToBlob(canvas, 'image/jpeg', 0.92)
+    const quality = Math.max(1, Math.min(100, setting.quality ?? 92)) / 100
+    const blob = await canvasToBlob(canvas, 'image/jpeg', quality)
     downloadBlob(blob, `${name}${suffix}.jpg`)
     return
   }
@@ -334,6 +448,88 @@ export async function exportNodeAsPngBlob(node: DesignNode, allNodes: DesignNode
   const svg = nodeToSvg(node, allNodes)
   const canvas = await svgToCanvas(svg, Math.max(1, box.width), Math.max(1, box.height), scale)
   return canvasToBlob(canvas, 'image/png')
+}
+
+/** Figma-style page preview: composite the main artboard into a PNG data URL. */
+export async function renderPageThumbnailDataUrl(
+  nodes: DesignNode[],
+  pageId: string,
+  options?: {
+    maxEdge?: number
+    theme?: 'light' | 'dark'
+    pageFill?: string
+  }
+): Promise<string | null> {
+  const maxEdge = options?.maxEdge ?? 1600
+  const theme = options?.theme ?? 'light'
+  const pageFill =
+    options?.pageFill || (theme === 'dark' ? '#2c2c2c' : '#eeeeee')
+
+  const pageNodes = nodes.filter((node) => (node.pageId || 'page-1') === pageId)
+  const roots = pageNodes.filter(
+    (node) => !node.parentId && node.type !== 'comment' && node.visible !== false
+  )
+  if (!roots.length) return null
+
+  const frames = roots.filter((node) => node.type === 'frame')
+  const sections = roots.filter((node) => node.type === 'section')
+  const pool = frames.length ? frames : sections.length ? sections : roots
+
+  // Always frame the single largest artboard so the thumb shows main content clearly.
+  const target = [...pool].sort(
+    (a, b) =>
+      Math.max(1, b.width || 1) * Math.max(1, b.height || 1) -
+      Math.max(1, a.width || 1) * Math.max(1, a.height || 1)
+  )[0]!
+
+  const localW = Math.max(1, Math.round(target.width || 1))
+  const localH = Math.max(
+    1,
+    Math.round(target.height || (target.type === 'text' ? target.fontSize || 12 : 1))
+  )
+
+  // Retina-sharp for small artboards, but never past maxEdge — a tall snapshot at 2× is a
+  // 20-megapixel PNG encode on every edit.
+  const dpr = typeof window !== 'undefined' ? Math.min(2.5, window.devicePixelRatio || 2) : 2
+  const fit = maxEdge / Math.max(localW, localH)
+  const scale = Math.min(fit, dpr, 3)
+
+  const canvas = document.createElement('canvas')
+  canvas.width = Math.max(1, Math.round(localW * scale))
+  canvas.height = Math.max(1, Math.round(localH * scale))
+  const ctx = canvas.getContext('2d')
+  if (!ctx) return null
+  ctx.imageSmoothingEnabled = true
+  ctx.imageSmoothingQuality = 'high'
+
+  const paints = getNodePaints(target).filter((paint) => paint.visible !== false)
+  const solid = paints.find((paint) => paint.type === 'solid')
+  const themedNodes = themeNodesForThumb(pageNodes, theme, pageFill, target.id)
+  const renderTarget = themedNodes.find((node) => node.id === target.id) || target
+  // Dark thumbs start from the dark page surface; light thumbs use the artboard fill.
+  if (theme === 'dark') {
+    ctx.fillStyle = pageFill
+  } else {
+    const rawFill =
+      solid && solid.type === 'solid'
+        ? withAlpha(solid.color, solid.opacity)
+        : target.fill
+          ? withAlpha(toHex(target.fill, pageFill), target.fillOpacity ?? 1)
+          : pageFill
+    ctx.fillStyle = rawFill
+  }
+  ctx.fillRect(0, 0, canvas.width, canvas.height)
+
+  try {
+    const svg = shapeMarkup(renderTarget, localW, localH, themedNodes)
+    const raster = await svgToCanvas(svg, localW, localH, scale)
+    ctx.drawImage(raster, 0, 0)
+  } catch {
+    return null
+  }
+
+  // PNG keeps UI screenshots crisp (no JPEG blur).
+  return canvas.toDataURL('image/png')
 }
 
 export async function copyNodeAsPng(node: DesignNode, allNodes: DesignNode[] = []): Promise<void> {
@@ -352,5 +548,33 @@ export const DEFAULT_EXPORT_SETTING = (): ExportSetting => ({
   scale: 1
 })
 
-export const EXPORT_SCALES = [0.5, 1, 2, 3, 4] as const
+export const EXPORT_SCALES = [0.5, 0.75, 1, 1.5, 2, 3, 4] as const
+export const EXPORT_FIXED_SIZES = [
+  { id: '512w', fixedWidth: 512 },
+  { id: '512h', fixedHeight: 512 }
+] as const
 export const EXPORT_FORMATS: ExportFormat[] = ['PNG', 'JPG', 'SVG', 'PDF']
+
+export function exportFormatLabel(format: ExportFormat): string {
+  return format === 'JPG' ? 'JPEG' : format
+}
+
+export function exportSizeLabel(setting: ExportSetting): string {
+  if (setting.fixedWidth) return `${setting.fixedWidth}w`
+  if (setting.fixedHeight) return `${setting.fixedHeight}h`
+  return `${setting.scale > 0 ? setting.scale : 1}x`
+}
+
+/** Parse Figma-style size input: `2`, `2x`, `0.5x`, `512w`, `300h`. */
+export function parseExportSize(
+  text: string
+): Pick<ExportSetting, 'scale' | 'fixedWidth' | 'fixedHeight'> | null {
+  const match = text.trim().toLowerCase().match(/^(\d*\.?\d+)\s*(x|w|h)?$/)
+  if (!match) return null
+  const value = Number(match[1])
+  if (!Number.isFinite(value) || value <= 0) return null
+  const unit = match[2] || 'x'
+  if (unit === 'w') return { scale: 1, fixedWidth: Math.round(Math.min(16384, value)), fixedHeight: undefined }
+  if (unit === 'h') return { scale: 1, fixedWidth: undefined, fixedHeight: Math.round(Math.min(16384, value)) }
+  return { scale: Math.min(32, Math.max(0.01, value)), fixedWidth: undefined, fixedHeight: undefined }
+}

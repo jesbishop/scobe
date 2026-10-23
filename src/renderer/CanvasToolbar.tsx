@@ -1,28 +1,15 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react'
-import { AnimatePresence, motion } from 'motion/react'
-import NearMeIcon from '@mui/icons-material/NearMe'
-import PanToolIcon from '@mui/icons-material/PanTool'
-import ZoomOutMapIcon from '@mui/icons-material/ZoomOutMap'
-import LanguageIcon from '@mui/icons-material/Language'
-import TagIcon from '@mui/icons-material/Tag'
-import CropSquareIcon from '@mui/icons-material/CropSquare'
-import HorizontalRuleIcon from '@mui/icons-material/HorizontalRule'
-import EastIcon from '@mui/icons-material/East'
-import CircleOutlinedIcon from '@mui/icons-material/CircleOutlined'
-import ChangeHistoryIcon from '@mui/icons-material/ChangeHistory'
-import StarBorderIcon from '@mui/icons-material/StarBorder'
-import TitleIcon from '@mui/icons-material/Title'
-import ChatBubbleOutlineOutlinedIcon from '@mui/icons-material/ChatBubbleOutlineOutlined'
-import StraightenIcon from '@mui/icons-material/Straighten'
-import WidgetsOutlinedIcon from '@mui/icons-material/WidgetsOutlined'
-import KeyboardArrowDownIcon from '@mui/icons-material/KeyboardArrowDown'
-import CheckIcon from '@mui/icons-material/Check'
-import CloseIcon from '@mui/icons-material/Close'
+import { AnimatePresence, motion, useReducedMotion } from 'motion/react'
+import { ChangeHistoryIcon, ChatBubbleOutlineOutlinedIcon, CheckIcon, CircleOutlinedIcon, CloseIcon, CropSquareIcon, EastIcon, HorizontalRuleIcon, KeyboardArrowDownIcon, LanguageIcon, NearMeIcon, PanToolIcon, StarBorderIcon, StraightenIcon, TagIcon, TitleIcon, WidgetsOutlinedIcon, ZoomOutMapIcon } from './lucideIcons'
 import type { BrushStyleId, DesignTool, ShapeKind, SwitchMode } from '../shared/types'
 import { brushById, brushPreviewD, STRETCH_BRUSHES } from './drawBrushes'
-import { IconFigmaBrush, IconFigmaPen, IconFigmaPencil, IconSection, IconTextOnPath } from './icons'
-import { ChatComposer } from './ChatView'
+import { IconFigmaBrush, IconFigmaPen, IconFigmaPencil, IconCreateSvg, IconPaperShaders, IconSection, IconTextOnPath } from './icons'
+import { ChatComposer, type JevComposerProps } from './ChatView'
+import { ChatSuggestionGlyph, ChatSuggestionPopup, CHAT_SUGGESTIONS } from './ChatSuggestionPopup'
 import { ModeSwitch } from './ModeSwitch'
+import { SliderField, StrokeWeightIcon } from './InspectorFields'
+import { setDocumentShaderKinds, ShaderFillsPopup } from './ShaderFillsPopup'
+import type { ShaderKind } from '../shared/paint'
 
 const CURSOR: Array<{ id: 'pointer' | 'hand' | 'scale'; label: string; shortcut: string; Icon: typeof NearMeIcon }> = [
   { id: 'pointer', label: 'Move', shortcut: 'V', Icon: NearMeIcon },
@@ -54,6 +41,26 @@ const TEXT_TOOLS: Array<{
   { id: 'text-on-path', label: 'Text on path', shortcut: '⇧T', Icon: IconTextOnPath }
 ]
 
+const MODE_ORDER: Record<SwitchMode, number> = { draw: 0, design: 1, chat: 2 }
+
+const TOOLSET_TRANSITION = { duration: 0.22, ease: [0.22, 1, 0.36, 1] as const }
+const COMPOSER_TRANSITION = { duration: 0.28, ease: [0.22, 1, 0.36, 1] as const }
+
+const toolsetVariants = {
+  enter: (direction: number) => ({
+    opacity: 0,
+    x: 14 * direction
+  }),
+  center: {
+    opacity: 1,
+    x: 0
+  },
+  exit: (direction: number) => ({
+    opacity: 0,
+    x: -14 * direction
+  })
+}
+
 export function CanvasToolbar({
   tool,
   shape,
@@ -70,7 +77,16 @@ export function CanvasToolbar({
   onStrokeWeight,
   onBrushStyle,
   onComposerChange,
-  onComposerSend
+  onComposerSend,
+  onSuggestion,
+  showComposer = true,
+  onChromeChange,
+  inFileShaders,
+  onSelectShader,
+  jevComposer,
+  composerExtra,
+  createSvgActive = false,
+  onCreateSvg
 }: {
   tool: DesignTool
   shape: ShapeKind
@@ -88,10 +104,24 @@ export function CanvasToolbar({
   onBrushStyle: (style: BrushStyleId) => void
   onComposerChange: (value: string) => void
   onComposerSend: () => void
+  onSuggestion?: (text: string) => void
+  showComposer?: boolean
+  onChromeChange?: () => void
+  inFileShaders?: ShaderKind[]
+  onSelectShader?: (kind: ShaderKind) => void
+  jevComposer?: JevComposerProps
+  composerExtra?: ReactNode
+  createSvgActive?: boolean
+  onCreateSvg?: () => void
 }) {
-  const [menu, setMenu] = useState<'shape' | 'cursor' | 'brushes' | 'text' | 'frame' | null>(null)
+  const [menu, setMenu] = useState<'shape' | 'cursor' | 'brushes' | 'text' | 'frame' | 'shaders' | null>(null)
+  const [chatMenuOpen, setChatMenuOpen] = useState(false)
   const [composerFocused, setComposerFocused] = useState(false)
+  const [composerVisible, setComposerVisible] = useState(true)
   const root = useRef<HTMLDivElement>(null)
+  const prevModeRef = useRef(mode)
+  const reduceMotion = useReducedMotion()
+  const direction = MODE_ORDER[mode] >= MODE_ORDER[prevModeRef.current] ? 1 : -1
   const ShapeIcon = SHAPES.find((item) => item.id === shape)?.Icon || CropSquareIcon
   const CursorIcon = CURSOR.find((item) => item.id === tool)?.Icon || NearMeIcon
   const TextTool = TEXT_TOOLS.find((item) => item.id === tool) || TEXT_TOOLS[0]
@@ -99,24 +129,47 @@ export function CanvasToolbar({
   const frameActive = tool === 'frame' || tool === 'section'
   const cursorActive = tool === 'pointer' || tool === 'hand' || tool === 'scale'
   const drawing = tool === 'pen' || tool === 'pencil' || tool === 'brush'
-  const toolset = mode === 'draw' ? 'draw' : 'design'
-  const composerOpen = true
+  const toolset = mode === 'draw' ? 'draw' : mode === 'chat' ? 'chat' : 'design'
+  const hasComposerExtra = Boolean(composerExtra)
+  const composerOpen = showComposer && (composerVisible || hasComposerExtra)
 
   useEffect(() => {
-    if (!menu) return
+    prevModeRef.current = mode
+  }, [mode])
+
+  useEffect(() => {
+    setDocumentShaderKinds(inFileShaders || [])
+  }, [inFileShaders])
+
+  useEffect(() => {
+    onChromeChange?.()
+    const frame = requestAnimationFrame(() => onChromeChange?.())
+    return () => cancelAnimationFrame(frame)
+  }, [menu, chatMenuOpen, drawing, toolset, showComposer, composerVisible, hasComposerExtra, onChromeChange])
+
+  useEffect(() => {
+    if (!menu && !chatMenuOpen) return
     const onDown = (event: MouseEvent) => {
-      if (!root.current?.contains(event.target as Node)) setMenu(null)
+      if (!root.current?.contains(event.target as Node)) {
+        setMenu(null)
+        setChatMenuOpen(false)
+      }
     }
     window.addEventListener('mousedown', onDown)
     return () => window.removeEventListener('mousedown', onDown)
-  }, [menu])
+  }, [menu, chatMenuOpen])
 
   useEffect(() => {
     setMenu(null)
+    setChatMenuOpen(false)
   }, [mode])
 
+  useEffect(() => {
+    if (hasComposerExtra) setComposerVisible(true)
+  }, [hasComposerExtra])
+
   return (
-    <div ref={root} className="canvas-toolbar-stack" onPointerDown={(event) => event.stopPropagation()}>
+    <div ref={root} className="canvas-toolbar-inner" onPointerDown={(event) => event.stopPropagation()}>
       {drawing && tool !== 'pen' && mode === 'draw' && (
         <DrawStrokeBar
           color={strokeColor}
@@ -130,22 +183,71 @@ export function CanvasToolbar({
           onClose={() => setMenu(null)}
         />
       )}
-      <motion.div
-        className={`canvas-toolbar-shell${composerOpen ? ' is-composer-open' : ''}`}
-        layout
-        transition={{ type: 'spring', stiffness: 460, damping: 38, mass: 0.65 }}
-      >
-        <div className="canvas-toolbar">
+      <div className={`canvas-toolbar-shell${composerOpen ? ' is-composer-open' : ''}`}>
+        <div className={`canvas-toolbar${mode === 'chat' ? ' is-chat-only' : ''}`}>
           <div className="canvas-toolbar-tools">
-            <AnimatePresence mode="popLayout" initial={false}>
+            <AnimatePresence mode="popLayout" custom={direction} initial={false}>
               <motion.div
                 key={toolset}
-                className="canvas-toolbar-group"
-                initial={{ opacity: 0, x: toolset === 'draw' ? 14 : -14, filter: 'blur(6px)' }}
-                animate={{ opacity: 1, x: 0, filter: 'blur(0px)' }}
-                exit={{ opacity: 0, x: toolset === 'draw' ? -14 : 14, filter: 'blur(6px)' }}
-                transition={{ duration: 0.22, ease: [0.22, 1, 0.36, 1] }}
+                className={mode === 'chat' ? 'canvas-toolbar-suggestions' : 'canvas-toolbar-group'}
+                custom={direction}
+                variants={toolsetVariants}
+                initial="enter"
+                animate="center"
+                exit="exit"
+                transition={TOOLSET_TRANSITION}
               >
+                {mode === 'chat' ? (
+                  <>
+                    {CHAT_SUGGESTIONS.map((item) => (
+                      <button
+                        key={item.id}
+                        type="button"
+                        className="chat-suggestion-pill"
+                        onClick={() => {
+                          setChatMenuOpen(false)
+                          onSuggestion?.(item.prompt)
+                        }}
+                      >
+                        <ChatSuggestionGlyph item={item} />
+                        <span>{item.label}</span>
+                      </button>
+                    ))}
+                    <div className={`chat-suggestion-menu${chatMenuOpen ? ' is-open' : ''}`}>
+                      <button
+                        type="button"
+                        className={`chat-suggestion-caret${chatMenuOpen ? ' is-on' : ''}`}
+                        title="More suggestions"
+                        aria-label="Open suggestions menu"
+                        aria-expanded={chatMenuOpen}
+                        onClick={() => {
+                          setMenu(null)
+                          setChatMenuOpen((value) => !value)
+                        }}
+                      >
+                        <KeyboardArrowDownIcon sx={{ fontSize: 16 }} />
+                      </button>
+                      <ChatSuggestionPopup
+                        open={chatMenuOpen}
+                        onClose={() => setChatMenuOpen(false)}
+                        onSelect={(prompt) => onSuggestion?.(prompt)}
+                      />
+                    </div>
+                    {onCreateSvg ? (
+                      <ToolButton
+                        active={createSvgActive}
+                        title="Create SVG"
+                        onClick={() => {
+                          setChatMenuOpen(false)
+                          onCreateSvg()
+                        }}
+                      >
+                        <IconCreateSvg size={20} />
+                      </ToolButton>
+                    ) : null}
+                  </>
+                ) : (
+                  <>
                 <div className="tool-split">
                   <ToolButton
                     active={cursorActive}
@@ -165,8 +267,7 @@ export function CanvasToolbar({
                   >
                     <KeyboardArrowDownIcon sx={{ fontSize: 14 }} />
                   </button>
-                  {menu === 'cursor' && (
-                    <div className="shape-menu">
+                  <ToolbarFlyout open={menu === 'cursor'} className="shape-menu" label="Move tools">
                       {CURSOR.map((item) => {
                         const Icon = item.Icon
                         return (
@@ -186,8 +287,7 @@ export function CanvasToolbar({
                           </button>
                         )
                       })}
-                    </div>
-                  )}
+                    </ToolbarFlyout>
                 </div>
 
                 {toolset === 'draw' ? (
@@ -226,8 +326,7 @@ export function CanvasToolbar({
                   >
                     <KeyboardArrowDownIcon sx={{ fontSize: 14 }} />
                   </button>
-                  {menu === 'frame' && (
-                    <div className="shape-menu">
+                  <ToolbarFlyout open={menu === 'frame'} className="shape-menu" label="Frame tools">
                       {FRAME_TOOLS.map((item) => {
                         const active = tool === item.id
                         return (
@@ -247,8 +346,7 @@ export function CanvasToolbar({
                           </button>
                         )
                       })}
-                    </div>
-                  )}
+                    </ToolbarFlyout>
                 </div>
 
                 {toolset === 'design' ? (
@@ -279,8 +377,7 @@ export function CanvasToolbar({
                   >
                     <KeyboardArrowDownIcon sx={{ fontSize: 14 }} />
                   </button>
-                  {menu === 'shape' && (
-                    <div className="shape-menu">
+                  <ToolbarFlyout open={menu === 'shape'} className="shape-menu" label="Shapes">
                       {SHAPES.map((item) => {
                         const Icon = item.Icon
                         return (
@@ -301,8 +398,7 @@ export function CanvasToolbar({
                           </button>
                         )
                       })}
-                    </div>
-                  )}
+                    </ToolbarFlyout>
                 </div>
 
                 {toolset === 'design' ? (
@@ -333,8 +429,7 @@ export function CanvasToolbar({
                   >
                     <KeyboardArrowDownIcon sx={{ fontSize: 14 }} />
                   </button>
-                  {menu === 'text' && (
-                    <div className="shape-menu">
+                  <ToolbarFlyout open={menu === 'text'} className="shape-menu" label="Text tools">
                       {TEXT_TOOLS.map((item) => {
                         const Icon = item.Icon
                         const active = tool === item.id
@@ -349,14 +444,13 @@ export function CanvasToolbar({
                             }}
                           >
                             {active ? <CheckIcon sx={{ fontSize: 16 }} /> : <span className="shape-check" />}
-                            {item.id === 'text-on-path' ? <Icon /> : <Icon sx={{ fontSize: 18 }} />}
+                            <Icon size={18} />
                             <span>{item.label}</span>
                             {item.shortcut ? <em>{item.shortcut}</em> : null}
                           </button>
                         )
                       })}
-                    </div>
-                  )}
+                    </ToolbarFlyout>
                 </div>
 
                 <ToolButton active={tool === 'comment'} title="Comments" onClick={() => onTool('comment')}>
@@ -370,37 +464,107 @@ export function CanvasToolbar({
                 <ToolButton active={tool === 'widget'} title="Widgets" onClick={() => onTool('widget')}>
                   <WidgetsOutlinedIcon sx={{ fontSize: 20 }} />
                 </ToolButton>
+                {onCreateSvg ? (
+                  <ToolButton
+                    active={createSvgActive}
+                    title="Create SVG"
+                    onClick={() => {
+                      setMenu(null)
+                      onCreateSvg()
+                    }}
+                  >
+                    <IconCreateSvg size={20} />
+                  </ToolButton>
+                ) : null}
+                {toolset === 'design' ? (
+                  <div className="tool-split shader-tool-split">
+                    <ToolButton
+                      active={menu === 'shaders'}
+                      title="Shader fills"
+                      onClick={() => setMenu((value) => (value === 'shaders' ? null : 'shaders'))}
+                    >
+                      <IconPaperShaders size={20} />
+                    </ToolButton>
+                    <ShaderFillsPopup
+                      open={menu === 'shaders'}
+                      selectedKind={null}
+                      inFileKinds={inFileShaders || []}
+                      onClose={() => setMenu(null)}
+                      onSelect={(kind) => {
+                        onSelectShader?.(kind)
+                        setMenu(null)
+                      }}
+                    />
+                  </div>
+                ) : null}
+                  </>
+                )}
               </motion.div>
             </AnimatePresence>
           </div>
-          <ModeSwitch mode={mode} onMode={onMode} />
-        </div>
-        <motion.div
-          className="toolbar-composer"
-          layout
-          initial={false}
-          animate={{ opacity: 1 }}
-          transition={{ type: 'spring', stiffness: 420, damping: 36 }}
-          onFocusCapture={() => setComposerFocused(true)}
-          onBlurCapture={(event) => {
-            if (!event.currentTarget.contains(event.relatedTarget as Node)) {
-              setComposerFocused(false)
-            }
-          }}
-        >
-          <div className="toolbar-composer-inner">
-            <ChatComposer
-              value={composerValue}
-              onChange={onComposerChange}
-              onSend={onComposerSend}
-              busy={composerBusy}
-              compact
-              autoFocus={composerFocused}
-              placeholder="Plan, search, build anything"
-            />
+          <div className="canvas-toolbar-end">
+            {showComposer ? (
+              <button
+                type="button"
+                className={`composer-toggle${composerOpen ? ' is-on' : ''}`}
+                title={
+                  hasComposerExtra ? 'Composer stays open for Create SVG' : composerOpen ? 'Hide composer' : 'Show composer'
+                }
+                aria-label={composerOpen ? 'Hide composer' : 'Show composer'}
+                aria-pressed={composerOpen}
+                disabled={hasComposerExtra}
+                onClick={() => {
+                  setMenu(null)
+                  setChatMenuOpen(false)
+                  setComposerVisible((value) => !value)
+                }}
+              >
+                <KeyboardArrowDownIcon sx={{ fontSize: 16 }} />
+              </button>
+            ) : null}
+            <ModeSwitch mode={mode} onMode={onMode} />
           </div>
-        </motion.div>
-      </motion.div>
+        </div>
+        <AnimatePresence initial={false}>
+          {composerOpen ? (
+            <motion.div
+              key="toolbar-composer"
+              className="toolbar-composer-motion"
+              initial={reduceMotion ? { opacity: 0 } : { height: 0, opacity: 0 }}
+              animate={reduceMotion ? { opacity: 1 } : { height: 'auto', opacity: 1 }}
+              exit={reduceMotion ? { opacity: 0 } : { height: 0, opacity: 0 }}
+              transition={COMPOSER_TRANSITION}
+              onUpdate={() => onChromeChange?.()}
+            >
+              <div
+                className="toolbar-composer"
+                onFocusCapture={() => setComposerFocused(true)}
+                onBlurCapture={(event) => {
+                  if (!event.currentTarget.contains(event.relatedTarget as Node)) {
+                    setComposerFocused(false)
+                  }
+                }}
+              >
+                <div className="toolbar-composer-inner">
+                  {composerExtra}
+                  {!composerExtra ? (
+                    <ChatComposer
+                      value={composerValue}
+                      onChange={onComposerChange}
+                      onSend={onComposerSend}
+                      busy={composerBusy}
+                      compact
+                      autoFocus={composerFocused}
+                      placeholder="Send follow-up"
+                      jev={jevComposer}
+                    />
+                  ) : null}
+                </div>
+              </div>
+            </motion.div>
+          ) : null}
+        </AnimatePresence>
+      </div>
     </div>
   )
 }
@@ -433,28 +597,20 @@ function DrawStrokeBar({
         <span style={{ background: color }} />
         <input type="color" value={color} onChange={(event) => onColor(event.target.value)} />
       </label>
-      <input
-        className="draw-weight-num"
-        type="number"
-        min={1}
-        max={400}
-        value={Math.round(weight)}
-        onChange={(event) => onWeight(Math.max(1, Number(event.target.value) || 1))}
-      />
-      <input
-        className="draw-weight-range"
-        type="range"
-        min={1}
-        max={200}
-        value={Math.min(200, weight)}
-        onChange={(event) => onWeight(Number(event.target.value))}
-      />
+      <div className="draw-weight" title="Weight">
+        <SliderField
+          icon={<StrokeWeightIcon />}
+          value={weight}
+          min={1}
+          max={Math.max(200, Math.ceil(weight))}
+          onChange={(next) => onWeight(Math.max(1, Math.min(400, next)))}
+        />
+      </div>
       <button type="button" className={open ? 'draw-style-btn is-on' : 'draw-style-btn'} onClick={onToggle}>
         <BrushPreview style={style} color={color} />
         <KeyboardArrowDownIcon sx={{ fontSize: 16 }} />
       </button>
-      {open && (
-        <div className="brush-picker">
+      <ToolbarFlyout open={open} className="brush-picker" label="Brushes">
           <div className="brush-picker-head">
             <strong>Brushes</strong>
             <button type="button" onClick={onClose} title="Close">
@@ -484,8 +640,7 @@ function DrawStrokeBar({
               )
             })}
           </div>
-        </div>
-      )}
+      </ToolbarFlyout>
     </div>
   )
 }
@@ -498,6 +653,42 @@ function BrushPreview({ style, color }: { style: BrushStyleId; color: string }) 
         <path key={index} d={d} fill={color} />
       ))}
     </svg>
+  )
+}
+
+function ToolbarFlyout({
+  open,
+  className,
+  label,
+  children
+}: {
+  open: boolean
+  className: string
+  label: string
+  children: ReactNode
+}) {
+  const reduceMotion = useReducedMotion()
+  const spring = reduceMotion
+    ? { duration: 0.1 }
+    : { type: 'spring' as const, stiffness: 480, damping: 34, mass: 0.7 }
+  return (
+    <AnimatePresence>
+      {open ? (
+        <motion.div
+          className={className}
+          data-chrome-overlay=""
+          role="menu"
+          aria-label={label}
+          initial={reduceMotion ? { opacity: 0, x: '-50%' } : { opacity: 0, y: 10, scale: 0.96, x: '-50%' }}
+          animate={{ opacity: 1, y: 0, scale: 1, x: '-50%' }}
+          exit={reduceMotion ? { opacity: 0, x: '-50%' } : { opacity: 0, y: 6, scale: 0.98, x: '-50%' }}
+          transition={spring}
+          style={{ transformOrigin: 'bottom center' }}
+        >
+          {children}
+        </motion.div>
+      ) : null}
+    </AnimatePresence>
   )
 }
 

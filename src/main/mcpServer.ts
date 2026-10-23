@@ -5,6 +5,7 @@ import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/
 import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js'
 import * as z from 'zod'
 import { emitBuild } from './buildBus'
+import { getMcpToken, isMcpRequestAuthorized } from './mcpAuth'
 import { runCanvasTool, type CanvasToolContext } from './canvasTools'
 
 export const VANTA_MCP_PORT = 29980
@@ -222,16 +223,34 @@ function registerTools(server: McpServer, ctx: CanvasToolContext) {
   )
   tool(
     'snapshot_browser_to_frame',
-    'Screenshot a live browser into a design frame beside it. Keeps the live browser.',
+    'Bring a live browser region into the canvas using Vanta’s real Snapshot tool (DOM → editable layers, not a flat PNG). Prefer selector for sidebars (e.g. ytd-guide-renderer). Place beside the browser by default.',
     {
-      browserId: z.string(),
-      x: z.number().optional(),
-      y: z.number().optional(),
-      width: z.number().optional(),
-      height: z.number().optional(),
+      browserId: z.string().describe('Browser window id or tab id from list_browsers'),
+      selector: z
+        .union([z.string(), z.array(z.string())])
+        .optional()
+        .describe('CSS selector(s) to snapshot. Defaults to common nav/sidebar landmarks.'),
+      pointX: z.number().optional().describe('Optional CSS viewport X to pick an element'),
+      pointY: z.number().optional().describe('Optional CSS viewport Y to pick an element'),
+      x: z.number().optional().describe('Canvas X for the pasted root'),
+      y: z.number().optional().describe('Canvas Y for the pasted root'),
       name: z.string().optional()
     },
     run('snapshot_browser_to_frame')
+  )
+  tool(
+    'snapshot_to_canvas',
+    'Alias of snapshot_browser_to_frame — use Vanta Snapshot (layered) to paste a browser region onto the design canvas.',
+    {
+      browserId: z.string(),
+      selector: z.union([z.string(), z.array(z.string())]).optional(),
+      pointX: z.number().optional(),
+      pointY: z.number().optional(),
+      x: z.number().optional(),
+      y: z.number().optional(),
+      name: z.string().optional()
+    },
+    run('snapshot_to_canvas')
   )
   tool(
     'open_browser',
@@ -271,7 +290,14 @@ function registerTools(server: McpServer, ctx: CanvasToolContext) {
 function createSession(ctx: CanvasToolContext): Session {
   const server = new McpServer(
     { name: 'vanta', version: '0.1.0' },
-    { instructions: 'Vanta canvas MCP. Build UI with frames + auto-layout. Prefer create_artboard / add_design_* tools. Call finish_working_on_nodes when a build pass is done. Live browsers stay open; design sits on the canvas beside them.' }
+    {
+      instructions:
+        'You are connected to the Vanta desktop design canvas (NOT Cursor\'s canvas feature, NOT a code repo file). ' +
+        'Never use read-canvas or write-canvas — those do not control Vanta. ' +
+        'Build UI with Vanta tools only: get_basic_info → create_artboard / add_design_frame → add_design_* → set_layout / update_styles → finish_working_on_nodes. ' +
+        'To bring a live page region into the canvas, use snapshot_browser_to_frame / snapshot_to_canvas (Vanta Snapshot → editable layers). Never use flat screenshot-only paste for “snapshot” / “bring into canvas”. ' +
+        'Prefer auto-layout frames. Live browsers stay open; design sits on the canvas beside them.'
+    }
   )
   registerTools(server, ctx)
   const transport = new StreamableHTTPServerTransport({
@@ -306,11 +332,16 @@ function readJsonBody(req: IncomingMessage): Promise<unknown> {
   })
 }
 
-function setCors(res: ServerResponse): void {
-  res.setHeader('Access-Control-Allow-Origin', '*')
-  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, DELETE, OPTIONS')
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, mcp-session-id, MCP-Protocol-Version, Accept')
-  res.setHeader('Access-Control-Expose-Headers', 'mcp-session-id')
+function rejectUnauthorized(res: ServerResponse): void {
+  // 403 rather than 401: MCP clients treat 401 as "start OAuth", which Vanta doesn't offer.
+  res.writeHead(403, { 'Content-Type': 'application/json' })
+  res.end(
+    JSON.stringify({
+      jsonrpc: '2.0',
+      error: { code: -32001, message: 'Forbidden: missing or invalid Vanta MCP token. Reconnect from Vanta to get a fresh URL.' },
+      id: null
+    })
+  )
 }
 
 let mcpRunning = false
@@ -322,8 +353,9 @@ export async function startVantaMcp(ctx: CanvasToolContext): Promise<{ url: stri
     return { url: VANTA_MCP_URL, port: VANTA_MCP_PORT }
   }
 
+  getMcpToken()
   httpServer = createServer(async (req, res) => {
-    setCors(res)
+    // No CORS headers on purpose: web pages must not be able to drive the canvas.
     if (req.method === 'OPTIONS') {
       res.writeHead(204)
       res.end()
@@ -334,6 +366,10 @@ export async function startVantaMcp(ctx: CanvasToolContext): Promise<{ url: stri
     if (url.pathname !== '/mcp') {
       res.writeHead(404, { 'Content-Type': 'application/json' })
       res.end(JSON.stringify({ error: 'Not found. Use /mcp' }))
+      return
+    }
+    if (!isMcpRequestAuthorized(req, url, VANTA_MCP_PORT)) {
+      rejectUnauthorized(res)
       return
     }
 

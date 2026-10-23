@@ -47,7 +47,12 @@ export type PageState = {
 export type DesignPage = {
   id: string
   name: string
+  /** Light-mode canvas background */
   fill?: string
+  /** Dark-mode canvas background (auto-derived from fill when unset) */
+  fillDark?: string
+  /** Hide the custom background and show the default canvas color */
+  fillHidden?: boolean
 }
 
 export type Workspace = {
@@ -86,6 +91,8 @@ export type DesignTool =
 export type SwitchMode = 'draw' | 'design' | 'chat'
 export type ShapeKind = 'rect' | 'line' | 'arrow' | 'ellipse' | 'polygon' | 'star'
 export type DrawPathTool = 'pen' | 'pencil' | 'brush'
+
+export type StrokeProfile = 'uniform' | 'wedge' | 'taper' | 'swell' | 'lens' | 'bulge'
 export type BrushStyleId =
   | 'basic'
   | 'heist'
@@ -120,6 +127,14 @@ export type ExportSetting = {
   format: ExportFormat
   /** Multiplier, e.g. 1, 2, 3 or 0.5 */
   scale: number
+  /** Figma "512w": export at this pixel width (overrides `scale`). */
+  fixedWidth?: number
+  /** Figma "512h": export at this pixel height (overrides `scale`). */
+  fixedHeight?: number
+  /** File-name suffix; when unset, non-1x scales get `@2x`-style suffixes. */
+  suffix?: string
+  /** JPEG quality 0–100. */
+  quality?: number
 }
 
 export type DesignNode = {
@@ -148,6 +163,8 @@ export type DesignNode = {
   closed?: boolean
   text?: string
   name?: string
+  /** Semantic UI part (card, button, field-label…) for nodes built by Jev. */
+  uiRole?: string
   pageId?: string
   /** Parent frame or section id. Child x/y are parent-relative when set. */
   parentId?: string | null
@@ -176,6 +193,18 @@ export type DesignNode = {
   strokeOpacity?: number
   /** Figma-style stroke alignment. Shapes default inside; lines default center. */
   strokeAlign?: 'center' | 'inside' | 'outside'
+  /** Corner join for path strokes. Paths default round. */
+  strokeJoin?: 'miter' | 'round' | 'bevel'
+  /** End cap for open path strokes. Paths default round. */
+  strokeCap?: 'none' | 'square' | 'round'
+  /** Variable-width profile along a path stroke (Figma width profile). */
+  strokeProfile?: StrokeProfile
+  /** Run the width profile end-to-start. */
+  strokeProfileFlip?: boolean
+  /** Dash length for path strokes; solid when unset or 0. */
+  strokeDash?: number
+  /** Gap between dashes; defaults to the dash length. */
+  strokeGap?: number
   shadow?: boolean
   /** Drop shadow vs inner shadow when `shadow` is enabled. */
   shadowType?: 'drop' | 'inner'
@@ -194,6 +223,12 @@ export type DesignNode = {
   blendMode?: string
   /** Persisted export presets (Figma Export section). */
   exportSettings?: ExportSetting[]
+  /** Figma-style layout guides (frames only). */
+  layoutGrids?: import('./layoutGrids').LayoutGrid[]
+  /** When false, layer is hidden on the canvas. */
+  visible?: boolean
+  /** When true, layer cannot be selected or edited on the canvas. */
+  locked?: boolean
   fontFamily?: string
   fontWeight?: number | string
   /** CSS font-style — italic when using italic Google Font variants. */
@@ -207,7 +242,26 @@ export type DesignNode = {
   textAlign?: 'left' | 'center' | 'right' | 'justify'
   textAlignVertical?: 'top' | 'middle' | 'bottom'
   textDecoration?: 'none' | 'underline' | 'line-through'
+  textDecorationStyle?: 'solid' | 'dotted' | 'dashed' | 'wavy' | 'double'
+  /** Decoration thickness as % of font size (Figma). Omit = auto. */
+  textDecorationThickness?: number
+  /** Underline offset as % of font size (Figma). Omit = auto. */
+  textUnderlineOffset?: number
+  /** Skip descenders when underlining. Default true. */
+  textDecorationSkipInk?: boolean
+  /** Decoration color. Omit = auto (text color). */
+  textDecorationColor?: string
+  textDecorationOpacity?: number
   textCase?: 'none' | 'upper' | 'lower' | 'title' | 'small-caps'
+  /** Figma vertical trim: 'cap' trims to cap height and baseline. */
+  leadingTrim?: 'none' | 'cap'
+  textWrapStyle?: 'auto' | 'pretty' | 'balance'
+  numberStyle?: 'default' | 'lining' | 'oldstyle'
+  numberSpacing?: 'default' | 'proportional' | 'tabular'
+  fractions?: boolean
+  slashedZero?: boolean
+  /** Common ligatures. Default true. */
+  ligatures?: boolean
   paragraphSpacing?: number
   /** First-line indent in px (Figma paragraph indent). */
   paragraphIndent?: number
@@ -215,6 +269,8 @@ export type DesignNode = {
   maxLines?: number
   listStyle?: 'none' | 'ordered' | 'unordered'
   textResize?: 'auto-width' | 'auto-height' | 'fixed'
+  /** CSS `font-variation-settings` (e.g. Material Symbols `"FILL" 1`). */
+  fontVariationSettings?: string
   /** 0–100 start position for text on a path */
   textPathOffset?: number
   textPathFlip?: boolean
@@ -233,8 +289,25 @@ export type DesignNode = {
   layoutPercentV?: number
   /** When true, child ignores flex flow (Absolute position). */
   layoutAbsolute?: boolean
-  /** PNG/JPEG data URL for type === 'image'. */
+  /** CSS-style margins around a flex child (px). Spacing that travels with the layer when reordered. */
+  layoutMargin?: { t: number; r: number; b: number; l: number }
+  /** Cells spanned inside a grid auto-layout parent (default 1). */
+  gridColumnSpan?: number
+  gridRowSpan?: number
+  /**
+   * Pinning when the parent frame resizes (Figma constraints).
+   * Defaults: horizontal Left, vertical Top.
+   */
+  constraintH?: ConstraintH
+  constraintV?: ConstraintV
+  /** PNG/JPEG/SVG data URL for type === 'image'. */
   imageDataUrl?: string
+  /** Live SVG markup while streaming a generation (rendered inline). */
+  svgMarkup?: string
+  /** Prompt used to generate this node (Create SVG) — shown for Copy / Start over. */
+  generationPrompt?: string
+  /** Source image/node ids used as Create SVG references (for Start over). */
+  generationSourceIds?: string[]
   /** Comment thread fields (type === 'comment') */
   commentNumber?: number
   resolved?: boolean
@@ -247,6 +320,11 @@ export type AutoLayoutAlign = 'start' | 'center' | 'end' | 'stretch'
 export type AutoLayoutJustify = 'start' | 'center' | 'end' | 'space-between'
 /** Frame Fit maps to `'hug'`. Child Relative is `'relative'` (% of parent). */
 export type LayoutSizing = 'fixed' | 'hug' | 'fill' | 'relative'
+
+/** Horizontal pinning when a parent frame resizes. */
+export type ConstraintH = 'left' | 'right' | 'left-right' | 'center' | 'scale'
+/** Vertical pinning when a parent frame resizes. */
+export type ConstraintV = 'top' | 'bottom' | 'top-bottom' | 'center' | 'scale'
 
 export type AutoLayout = {
   mode: 'none' | 'horizontal' | 'vertical'
@@ -262,6 +340,18 @@ export type AutoLayout = {
   sizingH?: LayoutSizing
   /** Flex frame height: Fixed or Fit (`hug`). Fill only when nested in another flex. */
   sizingV?: LayoutSizing
+  /** Grid flow (Figma): children auto-place into cells. `gap` = column gap, `counterGap` = row gap. */
+  grid?: GridLayout
+}
+
+/** Track size: Hug content, Fill remaining space, or a fixed px value. */
+export type GridTrack = 'hug' | 'fill' | number
+
+export type GridLayout = {
+  columns: number
+  rows: number | 'auto'
+  columnTracks?: GridTrack[]
+  rowTracks?: GridTrack[]
 }
 
 export type CommentMessage = {
@@ -274,7 +364,7 @@ export type CommentMessage = {
 
 export const SECTION_COLORS = ['#7B61FF', '#0D99FF', '#14AE5C', '#F24822', '#FFCD29', '#9747FF'] as const
 
-export const DEFAULT_PAGE: DesignPage = { id: 'page-1', name: 'Page 1', fill: '#EEEEEE' }
+export const DEFAULT_PAGE: DesignPage = { id: 'page-1', name: 'Page 1', fill: '#EEEEEE', fillDark: '#2C2C2C' }
 
 export type ChromeStatus =
   | { state: 'starting' }
@@ -331,6 +421,6 @@ export const NAV_HEIGHT = 36
 export const FRAME_CHROME_HEIGHT = TAB_STRIP_HEIGHT + NAV_HEIGHT
 export const DEFAULT_URL = 'https://www.google.com'
 export const NEW_TAB_URL = 'about:blank'
-export const CANVAS_ZOOM_MIN = 0.1
-export const CANVAS_ZOOM_MAX = 8
+export const CANVAS_ZOOM_MIN = 0.02
+export const CANVAS_ZOOM_MAX = 256
 export const BROWSER_PARTITION = 'persist:vanta-browser'

@@ -55,9 +55,9 @@ function assert(name, cond, detail) {
 }
 
 assert('click kid → outer', resolveClickTarget(kid, nodes, []) === 'outer')
-assert('click kid with outer selected → stay outer', resolveClickTarget(kid, nodes, ['outer']) === 'outer')
+assert('click kid with outer selected → inner', resolveClickTarget(kid, nodes, ['outer']) === 'inner')
 assert('drill from outer → inner', resolveDrillIn(kid, nodes, ['outer']) === 'inner')
-assert('click kid with inner selected → stay inner', resolveClickTarget(kid, nodes, ['inner']) === 'inner')
+assert('click kid with inner selected → kid', resolveClickTarget(kid, nodes, ['inner']) === 'kid')
 assert('drill from inner → kid', resolveDrillIn(kid, nodes, ['inner']) === 'kid')
 assert('drill at deepest → null', resolveDrillIn(kid, nodes, ['kid']) === null)
 assert(

@@ -327,9 +327,9 @@ export function IconTextOnPath({ size = 20, ...props }: IconProps) {
         fill="none"
       />
       <path
-        d="M9.2 5.2h5.6M12 5.2v7.2"
+        d="M7.5 4h9M12 4v9"
         stroke="currentColor"
-        strokeWidth="1.55"
+        strokeWidth="1.5"
         strokeLinecap="round"
         strokeLinejoin="round"
       />
@@ -396,16 +396,68 @@ export function VantaMark({
   return <span aria-hidden="true" className={className} style={maskStyle} />
 }
 
+/** Figma-style sidebar / Minimize UI icon (panel with a thick edge bar). */
+export function IconSidebarPanel({
+  size = 16,
+  side = 'left',
+  ...props
+}: IconProps & { side?: 'left' | 'right' }) {
+  return (
+    <Icon size={size} viewBox="0 0 16 16" {...props}>
+      <rect x="2.75" y="3" width="10.5" height="10" rx="1.75" stroke="currentColor" strokeWidth="1.35" />
+      {side === 'left' ? (
+        <rect x="4" y="4.35" width="2.15" height="7.3" rx="0.55" fill="currentColor" />
+      ) : (
+        <rect x="9.85" y="4.35" width="2.15" height="7.3" rx="0.55" fill="currentColor" />
+      )}
+    </Icon>
+  )
+}
+
 /** Figma-style section icon: rectangle with a header tab on top. */
 export function IconSection({ size = 20, ...props }: IconProps) {
   return (
-    <Icon size={size} viewBox="0 0 20 20" {...props}>
+    <Icon size={size} viewBox="0 0 24 24" {...props}>
+      <path d="M5 3h7a1.5 1.5 0 0 1 1.5 1.5V6H5V3Z" fill="currentColor" />
+      <rect x="3" y="6.5" width="18" height="14.5" rx="2" stroke="currentColor" strokeWidth="1.5" fill="none" />
+    </Icon>
+  )
+}
+
+/** Shader fills mark: square with inset diamond. */
+export function IconPaperShaders({ size = 20, ...props }: IconProps) {
+  return (
+    <Icon size={size} viewBox="0 0 24 24" {...props}>
+      <rect x="3" y="3" width="18" height="18" stroke="currentColor" strokeWidth="1.5" fill="none" />
+      <path d="M12 6.5 17.5 12 12 17.5 6.5 12Z" stroke="currentColor" strokeWidth="1.5" fill="none" />
+    </Icon>
+  )
+}
+
+/** Create SVG: image frame with mountains + sparkle. */
+export function IconCreateSvg({ size = 20, ...props }: IconProps) {
+  return (
+    <Icon size={size} viewBox="0 0 24 24" {...props}>
       <path
-        d="M5.5 4.25h5.25c.414 0 .75.336.75.75v.75H5.5V4.25Z"
-        fill="currentColor"
-        opacity="0.9"
+        d="M16.5 3H5.5A2.5 2.5 0 0 0 3 5.5v13A2.5 2.5 0 0 0 5.5 21h13a2.5 2.5 0 0 0 2.5-2.5V8"
+        stroke="currentColor"
+        strokeWidth="1.5"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        fill="none"
       />
-      <rect x="3.75" y="6.25" width="12.5" height="10" rx="1.25" stroke="currentColor" strokeWidth="1.5" fill="none" />
+      <path
+        d="M6 17.5 9.5 12.5l2.25 2.75L15 10.75 18.25 17.5"
+        stroke="currentColor"
+        strokeWidth="1.5"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        fill="none"
+      />
+      <path
+        d="M20 1.5c.17 1.3.78 2.13 2.35 2.5-1.57.37-2.18 1.2-2.35 2.5-.17-1.3-.78-2.13-2.35-2.5 1.57-.37 2.18-1.2 2.35-2.5Z"
+        fill="currentColor"
+      />
     </Icon>
   )
 }
