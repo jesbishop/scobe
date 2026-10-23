@@ -242,6 +242,8 @@ writePng(path.join(assets, 'vanta-mark-white.png'), markWhite)
 const icon256 = ditherIcon(markWhite, 256)
 const icon32 = ditherIcon(markWhite, 32)
 writePng(path.join(resources, 'icon.png'), icon256)
+// electron-builder needs ≥512px for the macOS .icns.
+writePng(path.join(resources, 'icon-1024.png'), ditherIcon(markWhite, 1024))
 writePng(path.join(pub, 'favicon.png'), icon256)
 writePng(path.join(pub, 'favicon-32.png'), icon32)
 

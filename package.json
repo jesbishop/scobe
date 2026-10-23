@@ -40,7 +40,7 @@
       "releaseType": "release"
     },
     "win": {
-      "icon": "resources/icon.png",
+      "icon": "resources/icon-1024.png",
       "target": [
         "nsis"
       ],
@@ -54,7 +54,7 @@
       "artifactName": "Vanta-Setup.${ext}"
     },
     "mac": {
-      "icon": "resources/icon.png",
+      "icon": "resources/icon-1024.png",
       "artifactName": "Vanta-mac-${arch}.${ext}",
       "category": "public.app-category.graphics-design",
       "target": [
@@ -66,7 +66,7 @@
       ]
     },
     "linux": {
-      "icon": "resources/icon.png",
+      "icon": "resources/icon-1024.png",
       "category": "Graphics",
       "artifactName": "Vanta-linux-${arch}.${ext}",
       "target": [
@@ -106,6 +106,7 @@
     "electron-vite": "^4.0.0",
     "lucide-react": "^1.57.0",
     "motion": "^13.2.0",
+    "pngjs": "^7.0.0",
     "react": "^19.1.1",
     "react-dom": "^19.1.1",
     "typescript": "^5.9.2",
