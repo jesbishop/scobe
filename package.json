@@ -35,8 +35,8 @@
     ],
     "publish": {
       "provider": "github",
-      "owner": "jessebishop04-png",
-      "repo": "Vanta",
+      "owner": "jesbishop",
+      "repo": "vanta",
       "releaseType": "release"
     },
     "win": {
