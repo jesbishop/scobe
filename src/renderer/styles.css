@@ -4236,27 +4236,6 @@ button {
   min-width: 0;
 }
 
-/* Fixed left inset so logo/icons never shift when the rail expands */
-.home-rail-brand {
-  display: flex;
-  align-items: center;
-  justify-content: flex-start;
-  height: 44px;
-  margin-bottom: 2px;
-  padding: 0 20px 0 22px;
-  color: var(--text-strong);
-  flex-shrink: 0;
-  overflow: hidden;
-}
-
-.home-rail-brand-mark {
-  width: 28px;
-  height: 28px;
-  flex-shrink: 0;
-  display: grid;
-  place-items: center;
-}
-
 .home-rail-search {
   position: relative;
   display: flex;

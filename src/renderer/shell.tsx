@@ -41,7 +41,6 @@ import {
   IconSidebarPanel,
   IconSun,
   IconTextOnPath,
-  VantaMark,
   type IconProps
 } from './icons'
 import { fileHasThemeThumbnail, fileThumbnailUrl } from './fileThumb'
@@ -982,7 +981,6 @@ export function LeftSidebar({
             exit={leftChipMotion.exit}
             transition={chipSpring}
           >
-            <VantaMark size={18} />
             <span className="sidebar-ui-chip-name">{fileName}</span>
             <IconSidebarPanel side="left" size={17} />
           </motion.button>
@@ -1976,12 +1974,6 @@ export function HomeScreen({
         style={{ width: expanded ? HOME_RAIL_WIDE : HOME_RAIL_NARROW }}
       >
         <div className="home-rail-top">
-          <div className="home-rail-brand">
-            <span className="home-rail-brand-mark">
-              <VantaMark size={22} />
-            </span>
-          </div>
-
           {expanded ? (
             <label className="home-rail-search">
               <span className="home-rail-icon">

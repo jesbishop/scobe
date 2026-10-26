@@ -3,143 +3,75 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Scobe — design at the speed of code</title>
+    <title>Scobe — The full-stack creative canvas</title>
     <meta
       name="description"
       content="Scobe is an infinite canvas of live browsers and editable frames. Snapshot any site into layers, and let your coding agent build on the canvas over MCP."
     />
-    <meta property="og:title" content="Scobe — design at the speed of code" />
+    <meta property="og:title" content="Scobe — The full-stack creative canvas" />
     <meta
       property="og:description"
       content="An infinite canvas of live browsers and editable frames, driven by your coding agent."
     />
     <meta property="og:image" content="/icon.png" />
     <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
-    <link rel="preconnect" href="https://api.fontshare.com" />
-    <link href="https://api.fontshare.com/v2/css?f[]=satoshi@400,500,700,900&display=swap" rel="stylesheet" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter+Tight:wght@500;600&family=Inter:wght@500;600&display=swap"
+      rel="stylesheet"
+    />
     <link rel="stylesheet" href="/styles.css" />
   </head>
   <body>
     <header class="nav">
-      <a class="wordmark" href="/" aria-label="Scobe home"><img src="/scobe-logo.png" alt="" /></a>
-      <nav class="nav-links">
-        <a href="#features">Features</a>
-        <a href="#mcp">Agents</a>
-        <a href="https://github.com/jesbishop/scobe" target="_blank" rel="noopener">GitHub</a>
-        <a class="btn btn-small" href="#download">Download</a>
-      </nav>
+      <a class="wordmark" href="/" aria-label="Scobe home">
+        <img src="/scobe-logo.png" alt="" />
+      </a>
+      <div class="nav-actions">
+        <a class="nav-download js-download" id="download" href="https://github.com/jesbishop/scobe/releases/latest/download/Scobe-Setup.exe">
+          Download
+        </a>
+        <button class="nav-menu" type="button" aria-label="Menu">
+          <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true">
+            <path d="M2 4.25h12M2 8h12M2 11.75h12" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" />
+          </svg>
+        </button>
+      </div>
     </header>
 
     <main>
       <section class="hero">
-        <p class="eyebrow">Desktop app · Windows, macOS, Linux</p>
-        <h1>Design at the speed&nbsp;of&nbsp;code</h1>
-        <p class="lede">
-          Scobe is an infinite canvas of live browsers and editable frames. Snapshot any site into real layers, then let
-          your coding agent build right on the canvas.
-        </p>
-        <div class="cta" id="download">
-          <a class="btn btn-primary" data-os="win" href="https://github.com/jesbishop/scobe/releases/latest/download/Scobe-Setup.exe">
-            Download for Windows
-          </a>
-          <a class="btn btn-primary" data-os="mac" href="https://github.com/jesbishop/scobe/releases/latest/download/Vanta-mac-arm64.dmg">
-            Download for macOS
-          </a>
-          <a class="btn btn-primary" data-os="linux" href="https://github.com/jesbishop/scobe/releases/latest/download/Vanta-linux-x86_64.AppImage">
-            Download for Linux
-          </a>
-          <a class="btn btn-ghost" href="https://github.com/jesbishop/scobe/releases/latest">All downloads</a>
-        </div>
+        <h1>The full-<br />stack<br />creative<br />canvas</h1>
 
-        <div class="stage" aria-hidden="true">
-          <div class="win">
-            <div class="win-bar"><i></i><i></i><i></i></div>
-            <div class="canvas">
-              <div class="browser">
-                <div class="browser-bar"><span class="url">youtube.com</span></div>
-                <div class="browser-body">
-                  <div class="side">
-                    <b></b><b></b><b></b><b></b><b></b><b></b>
-                  </div>
-                  <div class="grid">
-                    <span></span><span></span><span></span><span></span><span></span><span></span>
-                  </div>
-                </div>
-              </div>
-              <div class="frame">
-                <div class="frame-label">Sidebar · Snapshot</div>
-                <div class="frame-body">
-                  <div class="row sel"><em></em><b></b></div>
-                  <div class="row"><em></em><b></b></div>
-                  <div class="row"><em></em><b></b></div>
-                  <div class="row"><em></em><b></b></div>
-                  <div class="badge">Fill × Hug</div>
-                </div>
-              </div>
-              <div class="agent">
-                <span class="dot"></span>
-                <span>Cursor is building on the canvas…</span>
-              </div>
+        <div class="hero-stage" aria-hidden="true">
+          <div class="hero-back"></div>
+          <div class="hero-card">
+            <div class="hero-card-top"></div>
+            <div class="hero-card-lines">
+              <span></span>
+              <span></span>
+              <span></span>
             </div>
           </div>
+          <div class="hero-edge"></div>
         </div>
-      </section>
 
-      <section class="features" id="features">
-        <article>
-          <h3>Live browsers on the canvas</h3>
-          <p>Real, interactive Chromium tabs sit beside your designs. Browse, log in, and compare at any zoom.</p>
-        </article>
-        <article>
-          <h3>Snapshot into layers</h3>
-          <p>
-            Bring any part of a page in as editable frames, text, and vector icons — with auto layout inferred, not a
-            flat screenshot.
-          </p>
-        </article>
-        <article>
-          <h3>Paper-style auto layout</h3>
-          <p>Fill and hug sizing, drag-to-reorder, keyboard nudging, crop, and image fills that behave like you expect.</p>
-        </article>
-      </section>
-
-      <section class="mcp" id="mcp">
-        <div class="mcp-copy">
-          <p class="eyebrow">Built for coding agents</p>
-          <h2>Your agent gets a canvas</h2>
-          <p>
-            Scobe runs an MCP server so Cursor, Claude Code, Codex, and v0 can create frames, snapshot pages, and lay out
-            UI while you watch. Click <strong>Connect</strong> in Scobe and it wires up your agent — locally, or through a
-            private, token-protected tunnel for cloud agents.
-          </p>
-        </div>
-        <pre class="code"><code><span class="c">// ~/.cursor/mcp.json — written for you by Connect</span>
-{
-  <span class="k">"mcpServers"</span>: {
-    <span class="k">"vanta"</span>: {
-      <span class="k">"type"</span>: <span class="s">"http"</span>,
-      <span class="k">"url"</span>: <span class="s">"http://127.0.0.1:29980/mcp"</span>
-    }
-  }
-}</code></pre>
+        <a class="hero-download js-download" href="https://github.com/jesbishop/scobe/releases/latest/download/Scobe-Setup.exe">
+          Download
+        </a>
       </section>
     </main>
 
-    <footer class="foot">
-      <img class="wordmark small" src="/scobe-logo.png" alt="" />
-      <span>© <span id="year"></span> Scobe</span>
-      <a href="https://github.com/jesbishop/scobe" target="_blank" rel="noopener">GitHub</a>
-    </footer>
-
     <script>
-      document.getElementById('year').textContent = new Date().getFullYear()
-      const ua = navigator.userAgent
-      const os = /Windows/i.test(ua) ? 'win' : /Mac/i.test(ua) ? 'mac' : /Linux/i.test(ua) ? 'linux' : null
-      if (os) {
-        for (const el of document.querySelectorAll('[data-os]')) {
-          if (el.dataset.os !== os) el.classList.add('btn-alt')
-        }
+      const downloads = {
+        win: 'https://github.com/jesbishop/scobe/releases/latest/download/Scobe-Setup.exe',
+        mac: 'https://github.com/jesbishop/scobe/releases/latest/download/Vanta-mac-arm64.dmg',
+        linux: 'https://github.com/jesbishop/scobe/releases/latest/download/Vanta-linux-x86_64.AppImage'
       }
+      const ua = navigator.userAgent
+      const os = /Windows/i.test(ua) ? 'win' : /Mac/i.test(ua) ? 'mac' : /Linux/i.test(ua) ? 'linux' : 'win'
+      for (const el of document.querySelectorAll('.js-download')) el.href = downloads[os]
     </script>
   </body>
 </html>
