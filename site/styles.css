@@ -30,17 +30,21 @@ a {
 
 .wordmark {
   display: block;
-  font-weight: 700;
-  font-size: 22px;
-  letter-spacing: -0.04em;
-  line-height: 1;
+  line-height: 0;
   color: var(--text);
 }
 
-.wordmark.small {
-  font-size: 14px;
-  font-weight: 600;
-  color: var(--muted);
+.wordmark img,
+img.wordmark {
+  display: block;
+  height: 22px;
+  width: auto;
+}
+
+.wordmark.small,
+img.wordmark.small {
+  height: 16px;
+  opacity: 0.72;
 }
 
 .nav {

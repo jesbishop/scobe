@@ -198,7 +198,7 @@ writePng(path.join(pub, 'favicon-32.png'), icon32)
 
 const site = path.join(root, 'site')
 writePng(path.join(site, 'icon.png'), icon256)
-writePng(path.join(site, 'vanta-logo.png'), wordmark)
+writePng(path.join(site, 'scobe-logo.png'), wordmarkWhite)
 
 const aspect = wordmark.width / wordmark.height
 const markAspect = mark.width / mark.height
