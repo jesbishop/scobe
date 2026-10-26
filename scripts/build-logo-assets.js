@@ -3,7 +3,7 @@ const path = require('path')
 const { PNG } = require('pngjs')
 
 const root = path.resolve(__dirname, '..')
-const sourcePath = path.join(root, 'resources', 'vanta-logo-source-clean.png')
+const sourcePath = path.join(root, 'resources', 'scobe-logo-source.png')
 
 function readPng(file) {
   return PNG.sync.read(fs.readFileSync(file))
@@ -42,6 +42,13 @@ function contentBounds(png) {
   return { minX, minY, maxX, maxY, width: maxX - minX + 1, height: maxY - minY + 1 }
 }
 
+/** Ink darkness → alpha, so edges stay anti-aliased and the white background drops out. */
+function inkAlpha(data, idx) {
+  const avg = (data[idx] + data[idx + 1] + data[idx + 2]) / 3
+  const a = Math.min(1, Math.max(0, (225 - avg) / 175))
+  return Math.round(a * (data[idx + 3] / 255) * 255)
+}
+
 function cropInk(png, bounds, { color = [0, 0, 0], pad = 0 } = {}) {
   const out = new PNG({ width: bounds.width + pad * 2, height: bounds.height + pad * 2, colorType: 6 })
   out.data.fill(0)
@@ -49,15 +56,13 @@ function cropInk(png, bounds, { color = [0, 0, 0], pad = 0 } = {}) {
     for (let x = 0; x < bounds.width; x++) {
       const sx = bounds.minX + x
       const sy = bounds.minY + y
-      const sIdx = (png.width * sy + sx) << 2
-      if (!isInk(png.data, sIdx)) continue
-      const dx = x + pad
-      const dy = y + pad
-      const dIdx = (out.width * dy + dx) << 2
+      const alpha = inkAlpha(png.data, (png.width * sy + sx) << 2)
+      if (!alpha) continue
+      const dIdx = (out.width * (y + pad) + (x + pad)) << 2
       out.data[dIdx] = color[0]
       out.data[dIdx + 1] = color[1]
       out.data[dIdx + 2] = color[2]
-      out.data[dIdx + 3] = 255
+      out.data[dIdx + 3] = alpha
     }
   }
   return out
@@ -88,110 +93,42 @@ function findLetterBounds(png, bounds) {
   return letters
 }
 
-function placeOnSquare(inkPng, size, { bg = [0, 0, 0, 255], ink = [255, 255, 255, 255], margin = 0.18 } = {}) {
-  const out = new PNG({ width: size, height: size, colorType: 6 })
-  for (let i = 0; i < out.data.length; i += 4) {
-    out.data[i] = bg[0]
-    out.data[i + 1] = bg[1]
-    out.data[i + 2] = bg[2]
-    out.data[i + 3] = bg[3]
-  }
-  const maxW = Math.round(size * (1 - margin * 2))
-  const maxH = Math.round(size * (1 - margin * 2))
-  const scale = Math.min(maxW / inkPng.width, maxH / inkPng.height)
-  const drawW = Math.max(1, Math.round(inkPng.width * scale))
-  const drawH = Math.max(1, Math.round(inkPng.height * scale))
-  const ox = Math.floor((size - drawW) / 2)
-  const oy = Math.floor((size - drawH) / 2)
-  for (let y = 0; y < drawH; y++) {
-    for (let x = 0; x < drawW; x++) {
-      const sx = Math.min(inkPng.width - 1, Math.floor(x / scale))
-      const sy = Math.min(inkPng.height - 1, Math.floor(y / scale))
-      const sIdx = (inkPng.width * sy + sx) << 2
-      if (inkPng.data[sIdx + 3] < 20) continue
-      const dIdx = (size * (oy + y) + (ox + x)) << 2
-      out.data[dIdx] = ink[0]
-      out.data[dIdx + 1] = ink[1]
-      out.data[dIdx + 2] = ink[2]
-      out.data[dIdx + 3] = ink[3]
-    }
-  }
-  return out
-}
-
-const BAYER4 = [
-  [0, 8, 2, 10],
-  [12, 4, 14, 6],
-  [3, 11, 1, 9],
-  [15, 7, 13, 5]
-]
-
 /**
- * 1-bit pixel icon: the mark is sampled onto a `grid`×`grid` board, shaded top-to-bottom, over a faint glow,
- * then ordered-dithered (Bayer 4×4). Corners are rounded on the pixel grid so they step like the art.
+ * App icon: the mark in white, centred on a black rounded square. Both the mark and the corners are
+ * anti-aliased with 4×4 supersampling so it stays crisp from 16px tabs up to the 1024px macOS icon.
  */
-function ditherIcon(inkPng, size, { grid = 32, margin = 0.16, radiusRatio = 0.225 } = {}) {
+function markIcon(inkPng, size, { margin = 0.22, radiusRatio = 0.225 } = {}) {
   const out = new PNG({ width: size, height: size, colorType: 6 })
-  out.data.fill(0)
-  const inner = grid * (1 - margin * 2)
+  const inner = size * (1 - margin * 2)
   const scale = Math.min(inner / inkPng.width, inner / inkPng.height)
-  const drawW = inkPng.width * scale
-  const drawH = inkPng.height * scale
-  const ox = (grid - drawW) / 2
-  const oy = (grid - drawH) / 2
-  const inkAt = (gx, gy) => {
-    const sx = Math.floor((gx - ox) / scale)
-    const sy = Math.floor((gy - oy) / scale)
-    if (sx < 0 || sy < 0 || sx >= inkPng.width || sy >= inkPng.height) return 0
-    return inkPng.data[((inkPng.width * sy + sx) << 2) + 3] > 20 ? 1 : 0
-  }
-  const radius = grid * radiusRatio
-  const cell = size / grid
-  const mark = []
-  for (let gy = 0; gy < grid; gy++) {
-    const row = []
-    for (let gx = 0; gx < grid; gx++) {
-      let coverage = 0
-      for (let sy = 0; sy < 4; sy++) {
-        for (let sx = 0; sx < 4; sx++) coverage += inkAt(gx + (sx + 0.5) / 4, gy + (sy + 0.5) / 4)
-      }
-      row.push(coverage >= 8)
-    }
-    mark.push(row)
-  }
-  const nearMark = (gx, gy) => {
-    for (let dy = -1; dy <= 1; dy++) {
-      for (let dx = -1; dx <= 1; dx++) if (mark[gy + dy]?.[gx + dx]) return true
-    }
-    return false
-  }
-  for (let gy = 0; gy < grid; gy++) {
-    for (let gx = 0; gx < grid; gx++) {
-      const cx = gx + 0.5
-      const cy = gy + 0.5
-      const kx = Math.min(Math.max(cx, radius), grid - radius)
-      const ky = Math.min(Math.max(cy, radius), grid - radius)
-      if ((cx - kx) ** 2 + (cy - ky) ** 2 > radius * radius) continue
-
-      // Background brightens toward the bottom; a 1-cell black moat keeps the mark legible.
-      const rise = Math.max(0, (cy / grid - 0.35) / 0.65)
-      const tone = mark[gy][gx] ? 1 : nearMark(gx, gy) ? 0 : rise * rise * 0.62
-      const on = tone * 16 > BAYER4[gy % 4][gx % 4] + 0.5
-
-      const value = on ? 255 : 0
-      const x0 = Math.round(gx * cell)
-      const y0 = Math.round(gy * cell)
-      const x1 = Math.round((gx + 1) * cell)
-      const y1 = Math.round((gy + 1) * cell)
-      for (let y = y0; y < y1; y++) {
-        for (let x = x0; x < x1; x++) {
-          const idx = (size * y + x) << 2
-          out.data[idx] = value
-          out.data[idx + 1] = value
-          out.data[idx + 2] = value
-          out.data[idx + 3] = 255
+  const ox = (size - inkPng.width * scale) / 2
+  const oy = (size - inkPng.height * scale) / 2
+  const r = size * radiusRatio
+  const SS = 4
+  for (let y = 0; y < size; y++) {
+    for (let x = 0; x < size; x++) {
+      let shape = 0
+      let ink = 0
+      for (let sy = 0; sy < SS; sy++) {
+        for (let sx = 0; sx < SS; sx++) {
+          const px = x + (sx + 0.5) / SS
+          const py = y + (sy + 0.5) / SS
+          const kx = Math.min(Math.max(px, r), size - r)
+          const ky = Math.min(Math.max(py, r), size - r)
+          if ((px - kx) ** 2 + (py - ky) ** 2 > r * r) continue
+          shape++
+          const ix = Math.floor((px - ox) / scale)
+          const iy = Math.floor((py - oy) / scale)
+          if (ix < 0 || iy < 0 || ix >= inkPng.width || iy >= inkPng.height) continue
+          ink += inkPng.data[((inkPng.width * iy + ix) << 2) + 3] / 255
         }
       }
+      const idx = (size * y + x) << 2
+      const value = shape ? Math.round((ink / shape) * 255) : 0
+      out.data[idx] = value
+      out.data[idx + 1] = value
+      out.data[idx + 2] = value
+      out.data[idx + 3] = Math.round((shape / (SS * SS)) * 255)
     }
   }
   return out
@@ -202,7 +139,15 @@ function pngToDataUri(png) {
 }
 
 const source = readPng(sourcePath)
-const bounds = contentBounds(source)
+/** Grow a crop by 1px so the soft, anti-aliased edge pixels aren't clipped. */
+function grow(box) {
+  const minX = Math.max(0, box.minX - 1)
+  const minY = Math.max(0, box.minY - 1)
+  const maxX = Math.min(source.width - 1, box.maxX + 1)
+  const maxY = Math.min(source.height - 1, box.maxY + 1)
+  return { minX, minY, maxX, maxY, width: maxX - minX + 1, height: maxY - minY + 1 }
+}
+const bounds = grow(contentBounds(source))
 console.log('content', bounds)
 
 const wordmark = cropInk(source, bounds, { color: [0, 0, 0] })
@@ -214,19 +159,19 @@ console.log(
 )
 if (!letters.length) throw new Error('Could not split letters')
 
-const vBounds = letters[0]
-// tighten vertical crop for V
-let vminY = vBounds.maxY
-let vmaxY = vBounds.minY
-for (let y = vBounds.minY; y <= vBounds.maxY; y++) {
-  for (let x = vBounds.minX; x <= vBounds.maxX; x++) {
+// The favicon mark is the first letter (the S), cropped tight.
+const sBounds = letters[0]
+let sminY = sBounds.maxY
+let smaxY = sBounds.minY
+for (let y = sBounds.minY; y <= sBounds.maxY; y++) {
+  for (let x = sBounds.minX; x <= sBounds.maxX; x++) {
     const idx = (source.width * y + x) << 2
     if (!isInk(source.data, idx)) continue
-    if (y < vminY) vminY = y
-    if (y > vmaxY) vmaxY = y
+    if (y < sminY) sminY = y
+    if (y > smaxY) smaxY = y
   }
 }
-const markBounds = { minX: vBounds.minX, maxX: vBounds.maxX, minY: vminY, maxY: vmaxY, width: vBounds.maxX - vBounds.minX + 1, height: vmaxY - vminY + 1 }
+const markBounds = grow({ minX: sBounds.minX, maxX: sBounds.maxX, minY: sminY, maxY: smaxY })
 const mark = cropInk(source, markBounds, { color: [0, 0, 0] })
 const markWhite = cropInk(source, markBounds, { color: [255, 255, 255] })
 
@@ -239,34 +184,42 @@ writePng(path.join(assets, 'vanta-logo-white.png'), wordmarkWhite)
 writePng(path.join(assets, 'vanta-mark.png'), mark)
 writePng(path.join(assets, 'vanta-mark-white.png'), markWhite)
 
-const icon256 = ditherIcon(markWhite, 256)
-const icon32 = ditherIcon(markWhite, 32)
+// Standalone downloads: transparent background, black ink and white ink.
+writePng(path.join(resources, 'scobe-logo-black.png'), wordmark)
+writePng(path.join(resources, 'scobe-logo-white.png'), wordmarkWhite)
+
+const icon256 = markIcon(markWhite, 256)
+const icon32 = markIcon(markWhite, 32)
 writePng(path.join(resources, 'icon.png'), icon256)
 // electron-builder needs ≥512px for the macOS .icns.
-writePng(path.join(resources, 'icon-1024.png'), ditherIcon(markWhite, 1024))
+writePng(path.join(resources, 'icon-1024.png'), markIcon(markWhite, 1024))
 writePng(path.join(pub, 'favicon.png'), icon256)
 writePng(path.join(pub, 'favicon-32.png'), icon32)
+
+const site = path.join(root, 'site')
+writePng(path.join(site, 'icon.png'), icon256)
+writePng(path.join(site, 'vanta-logo.png'), wordmark)
 
 const aspect = wordmark.width / wordmark.height
 const markAspect = mark.width / mark.height
 
 const logoSvg = `<?xml version="1.0" encoding="UTF-8"?>
-<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 ${wordmark.width} ${wordmark.height}" role="img" aria-label="Vanta">
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 ${wordmark.width} ${wordmark.height}" role="img" aria-label="Scobe">
   <image width="${wordmark.width}" height="${wordmark.height}" href="${pngToDataUri(wordmark)}" xlink:href="${pngToDataUri(wordmark)}"/>
 </svg>
 `
 const logoLight = `<?xml version="1.0" encoding="UTF-8"?>
-<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 ${wordmark.width} ${wordmark.height}" role="img" aria-label="Vanta">
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 ${wordmark.width} ${wordmark.height}" role="img" aria-label="Scobe">
   <image width="${wordmark.width}" height="${wordmark.height}" href="${pngToDataUri(wordmark)}" xlink:href="${pngToDataUri(wordmark)}"/>
 </svg>
 `
 const logoDark = `<?xml version="1.0" encoding="UTF-8"?>
-<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 ${wordmark.width} ${wordmark.height}" role="img" aria-label="Vanta">
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 ${wordmark.width} ${wordmark.height}" role="img" aria-label="Scobe">
   <image width="${wordmark.width}" height="${wordmark.height}" href="${pngToDataUri(wordmarkWhite)}" xlink:href="${pngToDataUri(wordmarkWhite)}"/>
 </svg>
 `
 const faviconSvg = `<?xml version="1.0" encoding="UTF-8"?>
-<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 256 256" role="img" aria-label="Vanta">
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 256 256" role="img" aria-label="Scobe">
   <image width="256" height="256" href="${pngToDataUri(icon256)}" xlink:href="${pngToDataUri(icon256)}"/>
 </svg>
 `
@@ -276,6 +229,7 @@ fs.writeFileSync(path.join(assets, 'vanta-logo.svg'), logoSvg)
 fs.writeFileSync(path.join(assets, 'vanta-logo-light.svg'), logoLight)
 fs.writeFileSync(path.join(assets, 'vanta-logo-dark.svg'), logoDark)
 fs.writeFileSync(path.join(pub, 'favicon.svg'), faviconSvg)
+fs.writeFileSync(path.join(site, 'favicon.svg'), faviconSvg)
 fs.writeFileSync(path.join(resources, 'icon.svg'), iconSvg)
 
 fs.writeFileSync(

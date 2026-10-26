@@ -2,9 +2,9 @@ import { useEffect, useState } from 'react'
 import { CODING_AGENTS, VANTA_BUILD_PROMPT, type AgentMcpLinkStatus, type CodingAgentId } from '../shared/codingAgents'
 
 const EXAMPLE_PROMPTS = [
-  'Create a basic Hello World frame in Vanta',
-  'Build a simple landing page hero on the Vanta design canvas',
-  'Create a mobile app settings screen with auto-layout in Vanta'
+  'Create a basic Hello World frame in Scobe',
+  'Build a simple landing page hero on the Scobe design canvas',
+  'Create a mobile app settings screen with auto-layout in Scobe'
 ] as const
 
 function AgentFavicon({
@@ -103,7 +103,7 @@ export function ConnectAgentModal({
       }
       setToast(
         ok
-          ? `Vanta MCP live — ${meta.name}`
+          ? `Scobe MCP live — ${meta.name}`
           : status.publicUrl
             ? 'Tunnel URL ready — verifying…'
             : 'Connect failed'
@@ -141,12 +141,12 @@ export function ConnectAgentModal({
 
   const addLabel =
     agentId === 'claude-code'
-      ? 'Add Vanta to Claude Code'
+      ? 'Add Scobe to Claude Code'
       : agentId === 'cursor'
-        ? 'Add Vanta to Cursor'
+        ? 'Add Scobe to Cursor'
         : agentId === 'codex'
-          ? 'Add Vanta to Codex'
-          : 'Add Vanta to v0'
+          ? 'Add Scobe to Codex'
+          : 'Add Scobe to v0'
 
   return (
     <div
@@ -187,7 +187,7 @@ export function ConnectAgentModal({
                 ✓
               </span>
               <div>
-                <strong>Vanta is running</strong>
+                <strong>Scobe is running</strong>
                 <p>Desktop is open and the local MCP server is available.</p>
               </div>
             </div>
@@ -199,8 +199,8 @@ export function ConnectAgentModal({
                 <div className="ca-connect-add-row">
                   <span>
                     {agentId === 'cursor'
-                      ? 'Starts a public tunnel and registers Vanta so it can show under Connectors / MCP.'
-                      : `Add Vanta MCP for ${meta.name}.`}
+                      ? 'Starts a public tunnel and registers Scobe so it can show under Connectors / MCP.'
+                      : `Add Scobe MCP for ${meta.name}.`}
                   </span>
                   <button type="button" className="ca-connect-add-btn" disabled={busy} onClick={() => void onAdd()}>
                     {busy ? 'Connecting…' : added ? 'Connected' : addLabel}
@@ -225,7 +225,7 @@ export function ConnectAgentModal({
                 <p>
                   {agentId === 'cursor'
                     ? 'Done opens Cursor’s Install MCP page, then Agents. Enable vanta under Connectors / MCP and paste a prompt:'
-                    : `After enabling Vanta MCP, run one of these in ${meta.name}:`}
+                    : `After enabling Scobe MCP, run one of these in ${meta.name}:`}
                 </p>
                 <div className="ca-connect-prompts">
                   {EXAMPLE_PROMPTS.map((prompt) => (

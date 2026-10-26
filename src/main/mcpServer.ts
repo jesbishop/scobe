@@ -75,7 +75,7 @@ function registerTools(server: McpServer, ctx: CanvasToolContext) {
     { id: z.string().describe('Browser tab id'), browserId: z.string().optional() },
     run('get_screenshot')
   )
-  tool('list_browsers', 'List live browsers/tabs on the Vanta canvas.', {}, run('list_browsers'))
+  tool('list_browsers', 'List live browsers/tabs on the Scobe canvas.', {}, run('list_browsers'))
   tool(
     'create_artboard',
     'Create a design frame (artboard). Prefer auto-layout for UI builds.',
@@ -223,7 +223,7 @@ function registerTools(server: McpServer, ctx: CanvasToolContext) {
   )
   tool(
     'snapshot_browser_to_frame',
-    'Bring a live browser region into the canvas using Vanta’s real Snapshot tool (DOM → editable layers, not a flat PNG). Prefer selector for sidebars (e.g. ytd-guide-renderer). Place beside the browser by default.',
+    'Bring a live browser region into the canvas using Scobe’s real Snapshot tool (DOM → editable layers, not a flat PNG). Prefer selector for sidebars (e.g. ytd-guide-renderer). Place beside the browser by default.',
     {
       browserId: z.string().describe('Browser window id or tab id from list_browsers'),
       selector: z
@@ -240,7 +240,7 @@ function registerTools(server: McpServer, ctx: CanvasToolContext) {
   )
   tool(
     'snapshot_to_canvas',
-    'Alias of snapshot_browser_to_frame — use Vanta Snapshot (layered) to paste a browser region onto the design canvas.',
+    'Alias of snapshot_browser_to_frame — use Scobe Snapshot (layered) to paste a browser region onto the design canvas.',
     {
       browserId: z.string(),
       selector: z.union([z.string(), z.array(z.string())]).optional(),
@@ -278,7 +278,7 @@ function registerTools(server: McpServer, ctx: CanvasToolContext) {
   )
   tool(
     'open_coding_agent',
-    'Open a coding agent in the Vanta left sidebar (cursor, claude-code, codex, or v0).',
+    'Open a coding agent in the Scobe left sidebar (cursor, claude-code, codex, or v0).',
     {
       agentId: z.enum(['cursor', 'claude-code', 'codex', 'v0']).describe('Which agent to open'),
       projectName: z.string().optional()
@@ -292,10 +292,10 @@ function createSession(ctx: CanvasToolContext): Session {
     { name: 'vanta', version: '0.1.0' },
     {
       instructions:
-        'You are connected to the Vanta desktop design canvas (NOT Cursor\'s canvas feature, NOT a code repo file). ' +
-        'Never use read-canvas or write-canvas — those do not control Vanta. ' +
-        'Build UI with Vanta tools only: get_basic_info → create_artboard / add_design_frame → add_design_* → set_layout / update_styles → finish_working_on_nodes. ' +
-        'To bring a live page region into the canvas, use snapshot_browser_to_frame / snapshot_to_canvas (Vanta Snapshot → editable layers). Never use flat screenshot-only paste for “snapshot” / “bring into canvas”. ' +
+        'You are connected to the Scobe desktop design canvas (NOT Cursor\'s canvas feature, NOT a code repo file). ' +
+        'Never use read-canvas or write-canvas — those do not control Scobe. ' +
+        'Build UI with Scobe tools only: get_basic_info → create_artboard / add_design_frame → add_design_* → set_layout / update_styles → finish_working_on_nodes. ' +
+        'To bring a live page region into the canvas, use snapshot_browser_to_frame / snapshot_to_canvas (Scobe Snapshot → editable layers). Never use flat screenshot-only paste for “snapshot” / “bring into canvas”. ' +
         'Prefer auto-layout frames. Live browsers stay open; design sits on the canvas beside them.'
     }
   )
@@ -338,7 +338,7 @@ function rejectUnauthorized(res: ServerResponse): void {
   res.end(
     JSON.stringify({
       jsonrpc: '2.0',
-      error: { code: -32001, message: 'Forbidden: missing or invalid Vanta MCP token. Reconnect from Vanta to get a fresh URL.' },
+      error: { code: -32001, message: 'Forbidden: missing or invalid Scobe MCP token. Reconnect from Scobe to get a fresh URL.' },
       id: null
     })
   )

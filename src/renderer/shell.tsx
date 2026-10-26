@@ -811,7 +811,7 @@ export function LeftSidebar({
                 Connect your agent
               </button>
               <p className="ca-agents-gate-note">
-                Set up Vanta MCP first. The coding agent opens fullscreen in this sidebar after you finish.
+                Set up Scobe MCP first. The coding agent opens fullscreen in this sidebar after you finish.
               </p>
             </section>
           </div>
@@ -1094,18 +1094,18 @@ function CanvasMcpLinkStrip({ agentId }: { agentId: CodingAgentId }) {
   const cloudReady = Boolean(link?.publicUrl)
   const showSetup = Boolean(link && (needsSetup || (connected && cloudReady)))
   const label = !apiReady
-    ? 'Vanta MCP · Restart app'
+    ? 'Scobe MCP · Restart app'
     : !link
-      ? 'Vanta MCP'
+      ? 'Scobe MCP'
       : busy
-        ? 'Vanta MCP · Tunneling…'
+        ? 'Scobe MCP · Tunneling…'
         : connected
-          ? 'Vanta MCP · Ready'
+          ? 'Scobe MCP · Ready'
           : needsSetup && cloudReady
-            ? 'Vanta MCP · Add in Agents'
+            ? 'Scobe MCP · Add in Agents'
             : needsSetup
-              ? 'Vanta MCP · Setup'
-              : 'Vanta MCP · Off'
+              ? 'Scobe MCP · Setup'
+              : 'Scobe MCP · Off'
 
   const copyText = async (text: string, kind: 'url' | 'prompt' | 'steps') => {
     if (!text) return
@@ -1187,8 +1187,8 @@ function CanvasMcpLinkStrip({ agentId }: { agentId: CodingAgentId }) {
         <div className="ca-mcp-setup">
           <p className="ca-mcp-setup-title">
             {agentId === 'cursor'
-              ? 'Cursor Agents use Cursor canvas unless you add Vanta MCP'
-              : 'Add Vanta MCP in this agent site'}
+              ? 'Cursor Agents use Cursor canvas unless you add Scobe MCP'
+              : 'Add Scobe MCP in this agent site'}
           </p>
           <ol className="ca-mcp-setup-steps">
             <li>
@@ -1206,7 +1206,7 @@ function CanvasMcpLinkStrip({ agentId }: { agentId: CodingAgentId }) {
               Agents → MCP → add HTTP <code>vanta</code> → enable it
             </li>
             <li>
-              New chat, paste Vanta prompt (never Cursor canvas)
+              New chat, paste Scobe prompt (never Cursor canvas)
               <button
                 type="button"
                 className="ca-mcp-link-btn"
@@ -1219,7 +1219,7 @@ function CanvasMcpLinkStrip({ agentId }: { agentId: CodingAgentId }) {
           </ol>
           {needsSetup && cloudReady && (
             <button type="button" className="ca-mcp-link-btn is-primary" disabled={busy} onClick={() => void onConfirm()}>
-              I’ve added Vanta MCP
+              I’ve added Scobe MCP
             </button>
           )}
           {!cloudReady && link.state !== 'off' && (

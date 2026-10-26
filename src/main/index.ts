@@ -52,7 +52,7 @@ import {
 } from '../shared/types'
 import type { SnapshotEvent } from '../shared/snapshot'
 
-app.setName('Vanta')
+app.setName('Scobe')
 
 const isPrimary = app.requestSingleInstanceLock()
 if (!isPrimary) {
@@ -273,7 +273,7 @@ function createWindow(): BrowserWindow {
     height: 900,
     minWidth: 900,
     minHeight: 600,
-    title: 'Vanta',
+    title: 'Scobe',
     icon: join(__dirname, '../../resources/icon.png'),
     backgroundColor: '#e8e8e8',
     autoHideMenuBar: true,

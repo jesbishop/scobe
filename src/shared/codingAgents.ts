@@ -38,10 +38,10 @@ export type AgentMcpLinkStatus = {
 
 export const VANTA_BUILD_PROMPT =
   'IMPORTANT: Do NOT use the Cursor canvas skill, read-canvas, write-canvas, or any Cursor canvas. Those edit a different product and will not change what I see. ' +
-  'You must use the Vanta MCP server tools only: get_basic_info, create_artboard, add_design_frame, add_design_rect, add_design_ellipse, add_design_text, set_layout, update_styles, set_text_content, snapshot_browser_to_frame, snapshot_to_canvas, finish_working_on_nodes. ' +
-  'When asked to snapshot or bring a page/sidebar into the canvas, call snapshot_browser_to_frame or snapshot_to_canvas (Vanta Snapshot → editable layers). Never paste a flat PNG screenshot for that. ' +
-  'If Vanta MCP tools are missing, stop and tell me — do not fall back to Cursor canvas. ' +
-  'Start with get_basic_info, then build UI frames with auto-layout on the Vanta design canvas.'
+  'You must use the Scobe MCP server tools only: get_basic_info, create_artboard, add_design_frame, add_design_rect, add_design_ellipse, add_design_text, set_layout, update_styles, set_text_content, snapshot_browser_to_frame, snapshot_to_canvas, finish_working_on_nodes. ' +
+  'When asked to snapshot or bring a page/sidebar into the canvas, call snapshot_browser_to_frame or snapshot_to_canvas (Scobe Snapshot → editable layers). Never paste a flat PNG screenshot for that. ' +
+  'If Scobe MCP tools are missing, stop and tell me — do not fall back to Cursor canvas. ' +
+  'Start with get_basic_info, then build UI frames with auto-layout on the Scobe design canvas.'
 
 export const SIDEBAR_BROWSER_ID = 'vanta-sidebar-agent'
 export const AGENT_SIDE_BROWSER_IDS = ['vanta-agent-side-browser', 'vanta-agent-side-browser-2'] as const

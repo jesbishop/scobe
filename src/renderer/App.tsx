@@ -2084,7 +2084,7 @@ export function App() {
       return
     }
     if (typeof window.vanta.removeBackground !== 'function') {
-      window.alert('Restart Vanta to enable Remove background (preload needs a reload).')
+      window.alert('Restart Scobe to enable Remove background (preload needs a reload).')
       return
     }
 
@@ -2485,7 +2485,7 @@ export function App() {
     const refs = createSvgContext.references
     if (!refs.length) return
     if (typeof window.vanta.quiverVectorizeSvg !== 'function') {
-      window.alert('Restart Vanta to enable Vectorize (preload needs a reload).')
+      window.alert('Restart Scobe to enable Vectorize (preload needs a reload).')
       return
     }
 
@@ -3160,7 +3160,7 @@ export function App() {
       return
     }
     if (typeof window.vanta.screenshotBrowser !== 'function') {
-      window.alert('Convert to design needs a restart. Quit and reopen Vanta, then try again.')
+      window.alert('Convert to design needs a restart. Quit and reopen Scobe, then try again.')
       return
     }
     try {
@@ -3654,7 +3654,7 @@ export function App() {
       if (event.type === 'ui:open-coding-agent') {
         const agentId = (event.agentId || 'cursor') as CodingAgentId
         setCodingRecents((recents) => {
-          const projectName = event.projectName || 'Vanta'
+          const projectName = event.projectName || 'Scobe'
           const stored = rememberCodingAgent(recents, { agentId, projectName })
           setCodingActive(stored.active)
           return stored.recents
@@ -5216,7 +5216,7 @@ export function App() {
           active: snapshotBrowserId === selected.id,
           onToggle: () => {
             if (typeof window.vanta.setSnapshot !== 'function') {
-              window.alert('Snapshot needs a restart. Quit and reopen Vanta, then try again.')
+              window.alert('Snapshot needs a restart. Quit and reopen Scobe, then try again.')
               return
             }
             selectBrowsers([selected.id])

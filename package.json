@@ -1,8 +1,8 @@
 {
   "name": "vanta",
-  "productName": "Vanta",
+  "productName": "Scobe",
   "version": "0.1.0",
-  "description": "Vanta design canvas with live browsers and an MCP server for coding agents.",
+  "description": "Scobe design canvas with live browsers and an MCP server for coding agents.",
   "author": "Jesse Bishop",
   "private": true,
   "main": "./out/main/index.js",
@@ -17,7 +17,7 @@
   },
   "build": {
     "appId": "com.vanta.app",
-    "productName": "Vanta",
+    "productName": "Scobe",
     "directories": {
       "output": "release/${version}",
       "buildResources": "resources"
@@ -36,7 +36,7 @@
     "publish": {
       "provider": "github",
       "owner": "jesbishop",
-      "repo": "vanta",
+      "repo": "scobe",
       "releaseType": "release"
     },
     "win": {
@@ -51,11 +51,11 @@
     "nsis": {
       "oneClick": false,
       "allowToChangeInstallationDirectory": true,
-      "artifactName": "Vanta-Setup.${ext}"
+      "artifactName": "Scobe-Setup.${ext}"
     },
     "mac": {
       "icon": "resources/icon-1024.png",
-      "artifactName": "Vanta-mac-${arch}.${ext}",
+      "artifactName": "Scobe-mac-${arch}.${ext}",
       "category": "public.app-category.graphics-design",
       "target": [
         "dmg",
@@ -68,7 +68,7 @@
     "linux": {
       "icon": "resources/icon-1024.png",
       "category": "Graphics",
-      "artifactName": "Vanta-linux-${arch}.${ext}",
+      "artifactName": "Scobe-linux-${arch}.${ext}",
       "target": [
         "AppImage"
       ],

@@ -472,7 +472,7 @@ export async function runCanvasTool(
 
   if (name === 'open_coding_agent') {
     const agentId = String(input.agentId || 'cursor')
-    const projectName = String(input.projectName || 'Vanta')
+    const projectName = String(input.projectName || 'Scobe')
     emitBuild({ type: 'ui:open-coding-agent', agentId, projectName })
     return { content: JSON.stringify({ opened: agentId, projectName }) }
   }

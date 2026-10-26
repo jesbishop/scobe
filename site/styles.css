@@ -30,16 +30,16 @@ a {
 
 .wordmark {
   display: block;
-  width: 112px;
-  height: 24px;
-  background: currentColor;
-  -webkit-mask: url('/vanta-logo.png') left center / contain no-repeat;
-  mask: url('/vanta-logo.png') left center / contain no-repeat;
+  font-weight: 700;
+  font-size: 22px;
+  letter-spacing: -0.04em;
+  line-height: 1;
+  color: var(--text);
 }
 
 .wordmark.small {
-  width: 64px;
-  height: 14px;
+  font-size: 14px;
+  font-weight: 600;
   color: var(--muted);
 }
 

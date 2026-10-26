@@ -1,12 +1,12 @@
 {
   "wordmark": {
-    "width": 898,
-    "height": 194,
-    "aspect": 4.628865979381444
+    "width": 916,
+    "height": 169,
+    "aspect": 5.420118343195266
   },
   "mark": {
-    "width": 158,
-    "height": 194,
-    "aspect": 0.8144329896907216
+    "width": 169,
+    "height": 169,
+    "aspect": 1
   }
 }

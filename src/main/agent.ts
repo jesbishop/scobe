@@ -6,7 +6,7 @@ import { runCanvasTool, type CanvasToolContext } from './canvasTools'
 const TOOLS: Tool[] = [
   {
     name: 'list_browsers',
-    description: 'List browser windows and tabs currently on the Vanta canvas.',
+    description: 'List browser windows and tabs currently on the Scobe canvas.',
     input_schema: { type: 'object', properties: {} }
   },
   {
@@ -197,7 +197,7 @@ const TOOLS: Tool[] = [
   {
     name: 'snapshot_browser_to_frame',
     description:
-      'Bring a live browser region into the canvas with Vanta Snapshot (DOM → editable layers, not a flat PNG). Optional CSS selector for sidebars.',
+      'Bring a live browser region into the canvas with Scobe Snapshot (DOM → editable layers, not a flat PNG). Optional CSS selector for sidebars.',
     input_schema: {
       type: 'object',
       properties: {
@@ -214,7 +214,7 @@ const TOOLS: Tool[] = [
   },
   {
     name: 'snapshot_to_canvas',
-    description: 'Alias of snapshot_browser_to_frame — Vanta Snapshot layered paste onto the canvas.',
+    description: 'Alias of snapshot_browser_to_frame — Scobe Snapshot layered paste onto the canvas.',
     input_schema: {
       type: 'object',
       properties: {
@@ -231,7 +231,7 @@ const TOOLS: Tool[] = [
   }
 ]
 
-const SYSTEM = `You operate Vanta, an infinite canvas of real website browsers plus a Paper-like design layer.
+const SYSTEM = `You operate Scobe, an infinite canvas of real website browsers plus a Paper-like design layer.
 
 Browsers: open, list, and navigate URLs. Do not click or type inside pages — there is no computer-use / screenshot click loop.
 
@@ -239,7 +239,7 @@ Design: build UI on the canvas with frames, auto-layout, shapes, and text — li
 - Prefer nested frames with vertical/horizontal auto-layout over one giant image when generating from scratch.
 - Children of a parent use parent-relative x/y when parentId is set.
 - list_design returns parentId, layout, and world bounds.
-- Use snapshot_browser_to_frame / snapshot_to_canvas to bring a live page region into the canvas via Vanta Snapshot (editable layers). Do not flat-screenshot for “snapshot” requests.
+- Use snapshot_browser_to_frame / snapshot_to_canvas to bring a live page region into the canvas via Scobe Snapshot (editable layers). Do not flat-screenshot for “snapshot” requests.
 - Design objects sit behind browsers and never replace a live page.
 - Do not close, move, or resize browsers unless the user asks.`
 
@@ -253,7 +253,7 @@ export async function runAgent(
   if (!apiKey) {
     emit({
       type: 'error',
-      message: 'Set ANTHROPIC_API_KEY in a .env file next to the project, then restart Vanta.'
+      message: 'Set ANTHROPIC_API_KEY in a .env file next to the project, then restart Scobe.'
     })
     return
   }

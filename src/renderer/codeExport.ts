@@ -412,7 +412,7 @@ export function nodesToReact(roots: DesignNode[], all: DesignNode[], opts: { tai
       : ['    <>', ...visible.flatMap((node) => renderNode(node, null, all, 3, opts.tailwind, true)), '    </>']
   return [
     '/**',
-    ' * from Vanta',
+    ' * from Scobe',
     ` * on ${date}`,
     ' */',
     `export default function ${name}() {`,

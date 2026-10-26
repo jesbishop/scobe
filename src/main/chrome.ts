@@ -21,7 +21,7 @@ function cursorVantaMcpBannerScript(): string {
   bar.style.cssText = 'position:fixed;top:0;left:0;right:0;z-index:2147483646;display:flex;gap:10px;align-items:center;flex-wrap:wrap;padding:10px 12px;background:#111;color:#fff;font:12px/1.35 system-ui,Segoe UI,sans-serif;box-shadow:0 4px 16px rgba(0,0,0,.28)';
   var isInstall = /install-mcp/i.test(location.href);
   var label = document.createElement('strong');
-  label.textContent = isInstall ? 'Install Vanta MCP' : 'Vanta MCP connected';
+  label.textContent = isInstall ? 'Install Scobe MCP' : 'Scobe MCP connected';
   label.style.flex = '0 0 auto';
   var hint = document.createElement('span');
   hint.style.opacity = '0.82';

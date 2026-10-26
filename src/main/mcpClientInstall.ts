@@ -20,12 +20,12 @@ function cloudSetupSnippet(publicUrl: string | null): string {
   const url = publicUrl || VANTA_MCP_URL
   return [
     'Cursor Agents (cloud) will NOT use ~/.cursor/mcp.json and will NOT see localhost.',
-    'They also have a built-in "canvas skill" that is NOT Vanta.',
+    'They also have a built-in "canvas skill" that is NOT Scobe.',
     '',
     '1) In cursor.com/agents open the MCP menu → Add custom HTTP MCP:',
     `   Name: vanta`,
     `   URL: ${url}`,
-    '   Auth: None (the URL carries your private Vanta token — do not share it) → Enable it for this chat',
+    '   Auth: None (the URL carries your private Scobe token — do not share it) → Enable it for this chat',
     '',
     '2) Start a NEW agent chat (old chats keep using Cursor canvas).',
     '',
@@ -77,7 +77,7 @@ function enrich(status: AgentMcpLinkStatus): AgentMcpLinkStatus {
     detail:
       status.detail ||
       (publicUrl
-        ? `Tunnel ready (${publicUrl}). Install opens Cursor’s MCP page so Vanta appears under Connectors.`
+        ? `Tunnel ready (${publicUrl}). Install opens Cursor’s MCP page so “vanta” appears under Connectors.`
         : 'Local MCP written. Cloud agent sites still need a public tunnel URL.')
   }
 }
@@ -123,7 +123,7 @@ function cloudLinkState(
       agentId,
       state: 'needs-setup',
       detail: publicUrl
-        ? `Tunnel on. Add vanta MCP in the Agents MCP menu, enable it, then start a NEW chat with the Vanta prompt — do not use Cursor canvas.`
+        ? `Tunnel on. Add vanta MCP in the Agents MCP menu, enable it, then start a NEW chat with the Scobe prompt — do not use Cursor canvas.`
         : `Local IDE config only. Click Connect to open a cloud tunnel, then add that URL in the Agents MCP menu.`
     })
   }
@@ -379,7 +379,7 @@ export async function connectAgentMcp(agentId: CodingAgentId): Promise<AgentMcpL
     state: publicUrl && tunnelOk ? 'connected' : 'needs-setup',
     detail: publicUrl
       ? tunnelOk
-        ? `Vanta MCP live at ${publicUrl}. Done opens Cursor’s install page so it appears under Connectors / MCP.`
+        ? `Scobe MCP live at ${publicUrl}. Done opens Cursor’s install page so “vanta” appears under Connectors / MCP.`
         : `Tunnel URL ready but not reachable yet (${publicUrl}). Wait a moment and try Add again.`
       : getTunnelError() ||
         'Tunnel failed. Cloud Agents cannot reach localhost — fix cloudflared, then Connect again.'
@@ -410,7 +410,7 @@ export function disconnectAgentMcp(agentId: CodingAgentId): AgentMcpLinkStatus {
       return enrich({
         agentId: 'v0',
         state: 'off',
-        detail: 'Disconnected. Remove the Vanta MCP entry in v0 / Agents MCP settings if you added one.'
+        detail: 'Disconnected. Remove the vanta entry in v0 / Agents MCP settings if you added one.'
       })
     default:
       return enrich({ agentId, state: 'off' })

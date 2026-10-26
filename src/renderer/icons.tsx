@@ -337,7 +337,7 @@ export function IconTextOnPath({ size = 20, ...props }: IconProps) {
   )
 }
 
-/** VANTA wordmark — uses currentColor (black in light mode, white in dark). */
+/** SCOBE wordmark — uses currentColor (black in light mode, white in dark). */
 export function VantaLogo({
   height = 28,
   className,
@@ -347,7 +347,7 @@ export function VantaLogo({
   className?: string
   style?: CSSProperties
 }) {
-  const width = Math.round((height * 898) / 194)
+  const width = Math.round((height * 916) / 169)
   const maskStyle: CSSProperties = {
     width,
     height,
@@ -364,10 +364,10 @@ export function VantaLogo({
     maskSize: 'contain',
     ...style
   }
-  return <span role="img" aria-label="Vanta" className={className} style={maskStyle} />
+  return <span role="img" aria-label="Scobe" className={className} style={maskStyle} />
 }
 
-/** Favicon mark: V only (inherits currentColor). */
+/** Favicon mark: S only (inherits currentColor). */
 export function VantaMark({
   size = 24,
   className,

@@ -101,7 +101,7 @@ function ChatThread({
                 <div className="chat-bubble user">{item.text}</div>
               ) : (
                 <div className={`chat-bubble ${item.role}`}>
-                  {item.role === 'assistant' && <div className="chat-bubble-label">Vanta</div>}
+                  {item.role === 'assistant' && <div className="chat-bubble-label">Scobe</div>}
                   <div className="chat-bubble-text">{item.text}</div>
                 </div>
               )}
@@ -111,7 +111,7 @@ function ChatThread({
         {busy && messages[messages.length - 1]?.role !== 'assistant' && (
           <div className="chat-bubble-row assistant">
             <div className="chat-bubble assistant">
-              <div className="chat-bubble-label">Vanta</div>
+              <div className="chat-bubble-label">Scobe</div>
               <div className="chat-bubble-text muted">Working…</div>
             </div>
           </div>
