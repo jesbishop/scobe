@@ -13,6 +13,7 @@ import {
   buildCursorMcpDeeplink
 } from './mcpInstallLinks'
 import { ensureMcpTunnel, getPublicMcpUrl, getTunnelError, hasNamedTunnel, stopMcpTunnel } from './mcpTunnel'
+import { scobeBridgePath, scobeCommand } from './mcpCli'
 
 export type { AgentMcpLinkStatus }
 
@@ -104,10 +105,6 @@ async function verifyTunnel(url: string): Promise<boolean> {
   }
 }
 
-function mcpUrlForWrite(): string {
-  return getPublicMcpUrl() || VANTA_MCP_URL
-}
-
 /** Local config exists, but cloud site still needs tunnel URL + MCP enable. */
 function cloudLinkState(
   agentId: CodingAgentId,
@@ -174,25 +171,27 @@ function mcpServersOf(doc: Record<string, unknown>): Record<string, unknown> {
   return {}
 }
 
-function isVantaMcpUrl(url: unknown): boolean {
-  return typeof url === 'string' && (url.includes('29980') || url.includes('trycloudflare.com') || url.includes('/mcp'))
+const SERVER_KEY = 'scobe'
+const LEGACY_KEY = 'vanta'
+
+/** Same server the Scobe agent plugin installs: the stdio bridge run by Scobe's own runtime. */
+function stdioEntry(): { command: string; args: string[]; env: Record<string, string> } {
+  return { command: scobeCommand(), args: [scobeBridgePath()], env: { ELECTRON_RUN_AS_NODE: '1' } }
+}
+
+function hasScobeEntry(servers: Record<string, unknown>): boolean {
+  return [SERVER_KEY, LEGACY_KEY].some((key) => {
+    const entry = servers[key]
+    return Boolean(entry && typeof entry === 'object')
+  })
 }
 
 function cursorHasVanta(): boolean {
-  const servers = mcpServersOf(readJsonFile(cursorMcpPath()))
-  const entry = servers.vanta
-  if (!entry || typeof entry !== 'object') return false
-  return isVantaMcpUrl((entry as { url?: string }).url)
+  return hasScobeEntry(mcpServersOf(readJsonFile(cursorMcpPath())))
 }
 
 function claudeHasVanta(): boolean {
-  for (const path of [claudeConfigPath(), claudeProjectMcpPath()]) {
-    const servers = mcpServersOf(readJsonFile(path))
-    const entry = servers.vanta
-    if (!entry || typeof entry !== 'object') continue
-    if (isVantaMcpUrl((entry as { url?: string }).url)) return true
-  }
-  return false
+  return [claudeConfigPath(), claudeProjectMcpPath()].some((path) => hasScobeEntry(mcpServersOf(readJsonFile(path))))
 }
 
 function codexHasVanta(): boolean {
@@ -200,12 +199,10 @@ function codexHasVanta(): boolean {
   if (!existsSync(path)) return false
   try {
     const text = readFileSync(path, 'utf8')
-    const match = text.match(/\[mcp_servers\.vanta\]([\s\S]*?)(?=\n\[|\n*$)/)
-    if (!match) return false
-    const body = match[1] || ''
-    if (!isVantaMcpUrl(body.match(/url\s*=\s*"([^"]*)"/)?.[1])) return false
-    if (/enabled\s*=\s*false/.test(body)) return false
-    return true
+    return [SERVER_KEY, LEGACY_KEY].some((key) => {
+      const match = text.match(new RegExp(`\\[mcp_servers\\.${key}\\]([\\s\\S]*?)(?=\\n\\[|\\n*$)`))
+      return Boolean(match && !/enabled\s*=\s*false/.test(match[1] || ''))
+    })
   } catch {
     return false
   }
@@ -215,18 +212,19 @@ function connectCursor(): AgentMcpLinkStatus {
   const path = cursorMcpPath()
   const doc = readJsonFile(path)
   const servers = mcpServersOf(doc)
-  const url = mcpUrlForWrite()
-  servers.vanta = { type: 'http', url }
+  delete servers[LEGACY_KEY]
+  servers[SERVER_KEY] = stdioEntry()
   doc.mcpServers = servers
   writeJsonFile(path, doc)
-  return { agentId: 'cursor', state: 'connected', detail: `${path} → ${url}` }
+  return { agentId: 'cursor', state: 'connected', detail: path }
 }
 
 function disconnectCursor(): AgentMcpLinkStatus {
   const path = cursorMcpPath()
   const doc = readJsonFile(path)
   const servers = mcpServersOf(doc)
-  delete servers.vanta
+  delete servers[SERVER_KEY]
+  delete servers[LEGACY_KEY]
   doc.mcpServers = servers
   writeJsonFile(path, doc)
   return { agentId: 'cursor', state: 'off', detail: path }
@@ -236,11 +234,11 @@ function connectClaude(): AgentMcpLinkStatus {
   const path = claudeConfigPath()
   const doc = readJsonFile(path)
   const servers = mcpServersOf(doc)
-  const url = mcpUrlForWrite()
-  servers.vanta = { type: 'http', url }
+  delete servers[LEGACY_KEY]
+  servers[SERVER_KEY] = { type: 'stdio', ...stdioEntry() }
   doc.mcpServers = servers
   writeJsonFile(path, doc)
-  return { agentId: 'claude-code', state: 'connected', detail: `${path} → ${url}` }
+  return { agentId: 'claude-code', state: 'connected', detail: path }
 }
 
 function disconnectClaude(): AgentMcpLinkStatus {
@@ -251,23 +249,29 @@ function disconnectClaude(): AgentMcpLinkStatus {
     last = path
     const doc = readJsonFile(path)
     const servers = mcpServersOf(doc)
-    if (!('vanta' in servers)) continue
-    delete servers.vanta
+    if (!(SERVER_KEY in servers) && !(LEGACY_KEY in servers)) continue
+    delete servers[SERVER_KEY]
+    delete servers[LEGACY_KEY]
     doc.mcpServers = servers
     writeJsonFile(path, doc)
   }
   return { agentId: 'claude-code', state: 'off', detail: last }
 }
 
-/** Insert or replace [mcp_servers.vanta] block in Codex TOML. */
+function tomlBlock(key: string): RegExp {
+  return new RegExp(`\\[mcp_servers\\.${key}\\][\\s\\S]*?(?=\\n\\[|\\n*$)`)
+}
+
+/** Insert or replace the [mcp_servers.scobe] block in Codex TOML, dropping the old vanta one. */
 function upsertCodexVantaToml(text: string, enable: boolean): string {
-  const block = `[mcp_servers.vanta]\nurl = "${mcpUrlForWrite()}"\nenabled = ${enable ? 'true' : 'false'}\n`
-  const re = /\[mcp_servers\.vanta\][\s\S]*?(?=\n\[|\n*$)/
-  if (re.test(text)) {
-    return `${text.replace(re, block).replace(/\n{3,}/g, '\n\n').trimEnd()}\n`
+  const cleaned = text.replace(tomlBlock(LEGACY_KEY), '').replace(/\n{3,}/g, '\n\n')
+  const block = `[mcp_servers.${SERVER_KEY}]\nurl = "${VANTA_MCP_URL}"\nenabled = ${enable ? 'true' : 'false'}\n`
+  const re = tomlBlock(SERVER_KEY)
+  if (re.test(cleaned)) {
+    return `${cleaned.replace(re, block).replace(/\n{3,}/g, '\n\n').trimEnd()}\n`
   }
-  if (!enable) return text
-  const trimmed = text.trimEnd()
+  if (!enable) return cleaned
+  const trimmed = cleaned.trimEnd()
   return `${trimmed}${trimmed ? '\n\n' : ''}${block}`
 }
 
@@ -286,7 +290,7 @@ function disconnectCodex(): AgentMcpLinkStatus {
     return { agentId: 'codex', state: 'off', detail: path }
   }
   const prev = readFileSync(path, 'utf8')
-  if (!/\[mcp_servers\.vanta\]/.test(prev)) {
+  if (!tomlBlock(SERVER_KEY).test(prev) && !tomlBlock(LEGACY_KEY).test(prev)) {
     return { agentId: 'codex', state: 'off', detail: path }
   }
   const next = upsertCodexVantaToml(prev, false)

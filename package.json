@@ -1,7 +1,7 @@
 {
   "name": "vanta",
   "productName": "Scobe",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Scobe design canvas with live browsers and an MCP server for coding agents.",
   "author": "Jesse Bishop",
   "private": true,

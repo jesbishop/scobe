@@ -32,6 +32,8 @@ import {
   getAgentMcpLinkStatus
 } from './mcpClientInstall'
 import { ensureMcpTunnel, getTunnelError, hasNamedTunnel, stopMcpTunnel } from './mcpTunnel'
+import { installScobeCli } from './mcpCli'
+import type { CanvasToolContext } from './canvasTools'
 import { startAutoUpdates } from './updater'
 import type { CodingAgentId } from '../shared/codingAgents'
 import {
@@ -612,7 +614,7 @@ app.whenReady().then(async () => {
   mainWindow.webContents.send('vanta:status', chromeHost.getStatus())
   await restoreWorkspace()
   try {
-    await startVantaMcp({
+    const mcpContext: CanvasToolContext = {
       openBrowser: async (url) => {
         const frame = await createBrowser({ url })
         return frame.activeTabId
@@ -648,7 +650,9 @@ app.whenReady().then(async () => {
         }
         return null
       }
-    })
+    }
+    await startVantaMcp(mcpContext)
+    void installScobeCli(mcpContext)
     if (hasNamedTunnel()) {
       void ensureMcpTunnel().then((url) => {
         if (!url) console.warn('[vanta-mcp] named tunnel failed:', getTunnelError())

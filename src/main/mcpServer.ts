@@ -1,5 +1,8 @@
 import { randomUUID } from 'node:crypto'
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http'
+import { app } from 'electron'
+import { Client } from '@modelcontextprotocol/sdk/client/index.js'
+import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js'
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js'
 import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js'
@@ -287,19 +290,36 @@ function registerTools(server: McpServer, ctx: CanvasToolContext) {
   )
 }
 
-function createSession(ctx: CanvasToolContext): Session {
-  const server = new McpServer(
-    { name: 'vanta', version: '0.1.0' },
-    {
-      instructions:
-        'You are connected to the Scobe desktop design canvas (NOT Cursor\'s canvas feature, NOT a code repo file). ' +
-        'Never use read-canvas or write-canvas — those do not control Scobe. ' +
-        'Build UI with Scobe tools only: get_basic_info → create_artboard / add_design_frame → add_design_* → set_layout / update_styles → finish_working_on_nodes. ' +
-        'To bring a live page region into the canvas, use snapshot_browser_to_frame / snapshot_to_canvas (Scobe Snapshot → editable layers). Never use flat screenshot-only paste for “snapshot” / “bring into canvas”. ' +
-        'Prefer auto-layout frames. Live browsers stay open; design sits on the canvas beside them.'
-    }
-  )
+export const SCOBE_MCP_INSTRUCTIONS =
+  'You are connected to the Scobe desktop design canvas (NOT Cursor\'s canvas feature, NOT a code repo file). ' +
+  'Never use read-canvas or write-canvas — those do not control Scobe. ' +
+  'Build UI with Scobe tools only: get_basic_info → create_artboard / add_design_frame → add_design_* → set_layout / update_styles → finish_working_on_nodes. ' +
+  'To bring a live page region into the canvas, use snapshot_browser_to_frame / snapshot_to_canvas (Scobe Snapshot → editable layers). Never use flat screenshot-only paste for “snapshot” / “bring into canvas”. ' +
+  'Prefer auto-layout frames. Live browsers stay open; design sits on the canvas beside them.'
+
+function newServer(ctx: CanvasToolContext): McpServer {
+  const server = new McpServer({ name: 'scobe', version: app.getVersion() }, { instructions: SCOBE_MCP_INSTRUCTIONS })
   registerTools(server, ctx)
+  return server
+}
+
+/** Tool definitions as agents see them (JSON Schema inputs), for the offline cache. */
+export async function listToolDefinitions(ctx: CanvasToolContext): Promise<unknown[]> {
+  const server = newServer(ctx)
+  const client = new Client({ name: 'scobe-cache', version: app.getVersion() })
+  const [clientSide, serverSide] = InMemoryTransport.createLinkedPair()
+  await server.connect(serverSide)
+  await client.connect(clientSide)
+  try {
+    return (await client.listTools()).tools
+  } finally {
+    await client.close()
+    await server.close()
+  }
+}
+
+function createSession(ctx: CanvasToolContext): Session {
+  const server = newServer(ctx)
   const transport = new StreamableHTTPServerTransport({
     sessionIdGenerator: () => randomUUID(),
     onsessioninitialized: (sessionId) => {
