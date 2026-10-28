@@ -1,0 +1,16 @@
+{
+  "name": "scobe-ai-gateway",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "start": "node ai-gateway.mjs",
+    "test": "node --test ai-gateway.test.mjs"
+  },
+  "dependencies": {
+    "express": "5.2.1"
+  }
+}
