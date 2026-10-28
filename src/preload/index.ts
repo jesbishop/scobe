@@ -54,6 +54,7 @@ const api = {
     mode: { inspect?: boolean; xray?: boolean } | null
   ): Promise<void> => ipcRenderer.invoke('vanta:setMesurer', id, mode),
   setSnapshot: (id: string | null): Promise<void> => ipcRenderer.invoke('vanta:setSnapshot', id),
+  snapshotPage: (id: string): Promise<void> => ipcRenderer.invoke('vanta:snapshotPage', id),
   getDesign: (): Promise<DesignNode[]> => ipcRenderer.invoke('vanta:getDesign'),
   setDesign: (nodes: DesignNode[]): Promise<DesignNode[]> => ipcRenderer.invoke('vanta:setDesign', nodes),
   addDesign: (node: DesignNode): Promise<DesignNode[]> => ipcRenderer.invoke('vanta:addDesign', node),
@@ -63,6 +64,21 @@ const api = {
     ipcRenderer.invoke('vanta:setPages', pages, activePageId),
   runAgent: (messages: Array<{ role: 'user' | 'assistant'; text: string }>): Promise<void> =>
     ipcRenderer.invoke('vanta:runAgent', messages),
+  agentStatus: (): Promise<{ configured: boolean }> => ipcRenderer.invoke('vanta:agentStatus'),
+  /** Answer main-process requests that only the canvas can fulfil (render a layer, read tokens). */
+  onRpc: (handler: (method: string, args: unknown) => Promise<unknown> | unknown): (() => void) => {
+    const listener = async (_event: unknown, request: { id: string; method: string; args: unknown }) => {
+      try {
+        const result = await handler(request.method, request.args)
+        ipcRenderer.send('vanta:rpcResult', { id: request.id, ok: true, result })
+      } catch (error) {
+        ipcRenderer.send('vanta:rpcResult', { id: request.id, ok: false, error: error instanceof Error ? error.message : String(error) })
+      }
+    }
+    ipcRenderer.on('vanta:rpc', listener)
+    return () => ipcRenderer.off('vanta:rpc', listener)
+  },
+  agentSetKey: (key: string): Promise<{ configured: boolean }> => ipcRenderer.invoke('vanta:agentSetKey', key),
   getMcpStatus: (): Promise<McpStatus> => ipcRenderer.invoke('vanta:getMcpStatus'),
   getAgentMcpLink: (agentId: CodingAgentId): Promise<AgentMcpLinkStatus> =>
     ipcRenderer.invoke('vanta:getAgentMcpLink', agentId),
@@ -98,6 +114,13 @@ const api = {
   transcriberStatus: (): Promise<TranscriberStatus> => ipcRenderer.invoke('vanta:transcriberStatus'),
   warmTranscriber: (): Promise<TranscriberStatus> => ipcRenderer.invoke('vanta:warmTranscriber'),
   transcribe: (audio: Float32Array): Promise<string> => ipcRenderer.invoke('vanta:transcribe', audio),
+  dictationStart: (): Promise<{ ok: true } | { ok: false; error: string }> => ipcRenderer.invoke('vanta:dictationStart'),
+  dictationStop: (): Promise<void> => ipcRenderer.invoke('vanta:dictationStop'),
+  onDictation: (handler: (event: { type: 'partial' | 'final' | 'error'; text: string }) => void): (() => void) => {
+    const listener = (_event: unknown, payload: { type: 'partial' | 'final' | 'error'; text: string }) => handler(payload)
+    ipcRenderer.on('vanta:dictation', listener)
+    return () => ipcRenderer.off('vanta:dictation', listener)
+  },
   onTranscriber: (handler: (status: TranscriberStatus) => void): (() => void) => {
     const listener = (_event: unknown, status: TranscriberStatus) => handler(status)
     ipcRenderer.on('vanta:transcriber', listener)

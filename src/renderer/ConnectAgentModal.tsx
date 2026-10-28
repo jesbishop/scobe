@@ -1,6 +1,15 @@
+import { createPortal } from 'react-dom'
+import { AnimatePresence, motion, useReducedMotion } from 'motion/react'
 import { useEffect, useState } from 'react'
 import { CODING_AGENTS, VANTA_BUILD_PROMPT, type AgentMcpLinkStatus, type CodingAgentId } from '../shared/codingAgents'
 
+const EXTRA_AGENTS = [
+ {id:'opencode',name:'OpenCode',domain:'opencode.ai'}, {id:'antigravity',name:'Antigravity',domain:'antigravity.google'},
+ {id:'copilot',name:'GitHub Copilot',domain:'github.com'}, {id:'vscode',name:'VS Code',domain:'code.visualstudio.com'},
+ {id:'other',name:'Other Agents',domain:''}
+] as const
+const PICKER_AGENTS = [...CODING_AGENTS.filter(a => a.id !== 'v0'), ...EXTRA_AGENTS.map(a => ({...a, favicon:a.domain ? 'https://www.google.com/s2/favicons?domain='+a.domain+'&sz=32' : '',faviconFallback:''}))]
+type PickerAgentId = CodingAgentId | typeof EXTRA_AGENTS[number]['id']
 const EXAMPLE_PROMPTS = [
   'Create a basic Hello World frame in Scobe',
   'Build a simple landing page hero on the Scobe design canvas',
@@ -10,7 +19,7 @@ const EXAMPLE_PROMPTS = [
 function AgentFavicon({
   src,
   fallback,
-  size = 22
+  size = 16
 }: {
   src: string
   fallback: string
@@ -32,7 +41,7 @@ function AgentFavicon({
 
 export function ConnectAgentModal({
   open,
-  initialAgentId = 'cursor',
+  initialAgentId = 'codex',
   onClose,
   onDone
 }: {
@@ -42,15 +51,19 @@ export function ConnectAgentModal({
   /** Called when user finishes setup — unlocks the coding agent browser. */
   onDone: (agentId: CodingAgentId, openUrl?: string) => void
 }) {
-  const [agentId, setAgentId] = useState<CodingAgentId>(initialAgentId)
+  const [agentId, setAgentId] = useState<PickerAgentId>(initialAgentId)
   const [busy, setBusy] = useState(false)
+  const reduceMotion = useReducedMotion()
   const [added, setAdded] = useState(false)
   const [link, setLink] = useState<AgentMcpLinkStatus | null>(null)
   const [toast, setToast] = useState<string | null>(null)
   const [copiedPrompt, setCopiedPrompt] = useState<string | null>(null)
 
-  const meta = CODING_AGENTS.find((item) => item.id === agentId) || CODING_AGENTS[0]
-  const ready = Boolean(link?.publicUrl && (link.tunnelOk !== false || added))
+  const manualAgent = EXTRA_AGENTS.some(a => a.id === agentId)
+  const backendAgent = agentId as CodingAgentId
+  const meta = PICKER_AGENTS.find((item) => item.id === agentId) || CODING_AGENTS[0]
+  const localCodex = agentId === 'codex'
+  const ready = manualAgent ? true : localCodex ? link?.state === 'connected' : Boolean(link?.publicUrl && (link.tunnelOk !== false || added))
 
   useEffect(() => {
     if (!open) return
@@ -72,7 +85,7 @@ export function ConnectAgentModal({
   useEffect(() => {
     if (!open) return
     let cancelled = false
-    void window.vanta.getAgentMcpLink?.(agentId).then((status) => {
+    void window.vanta.getAgentMcpLink?.(manualAgent ? 'codex' : backendAgent).then((status) => {
       if (!cancelled) setLink(status)
     }).catch(() => undefined)
     return () => {
@@ -80,15 +93,15 @@ export function ConnectAgentModal({
     }
   }, [open, agentId])
 
-  if (!open) return null
 
   const onAdd = async () => {
     if (busy || typeof window.vanta.connectAgentMcp !== 'function') return
     setBusy(true)
     setToast(null)
     try {
-      const status = await window.vanta.connectAgentMcp(agentId)
+      const status = await window.vanta.connectAgentMcp(backendAgent)
       setLink(status)
+      if (localCodex) { setAdded(status.state === 'connected'); setToast('Scobe configured. Restart Codex and start a local chat.'); return }
       const ok = Boolean(status.publicUrl && status.tunnelOk !== false)
       setAdded(ok || Boolean(status.publicUrl))
       if (status.publicUrl) {
@@ -116,7 +129,8 @@ export function ConnectAgentModal({
   }
 
   const copyPrompt = async (text: string) => {
-    const full = `${VANTA_BUILD_PROMPT}\n\nTask: ${text}`
+    const instructions = localCodex ? 'Use Scobe MCP to build editable UI on the Scobe canvas. Start with get_basic_info and use auto-layout frames. If Scobe tools are unavailable, explain how to reconnect.' : VANTA_BUILD_PROMPT
+    const full = `${instructions}\n\nTask: ${text}`
     try {
       await navigator.clipboard.writeText(full)
       setCopiedPrompt(text)
@@ -127,16 +141,17 @@ export function ConnectAgentModal({
   }
 
   const finish = async () => {
-    if (!ready && !link?.publicUrl) return
+    if (!ready) return
+    if (localCodex || manualAgent) { onClose(); return }
     if (typeof window.vanta.confirmCloudAgentMcp === 'function') {
       try {
-        await window.vanta.confirmCloudAgentMcp(agentId)
+        await window.vanta.confirmCloudAgentMcp(backendAgent)
       } catch {
         /* ignore */
       }
     }
     // Cursor: open install-mcp so Vanta is registered under Connectors / MCP.
-    onDone(agentId, link?.openUrl || link?.installUrl || undefined)
+    onDone(backendAgent, link?.openUrl || link?.installUrl || undefined)
   }
 
   const addLabel =
@@ -148,15 +163,19 @@ export function ConnectAgentModal({
           ? 'Add Scobe to Codex'
           : 'Add Scobe to v0'
 
-  return (
-    <div
+  return createPortal(
+    <AnimatePresence>
+    {open && <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
       className="ca-connect-backdrop"
       data-chrome-overlay=""
       onPointerDown={(event) => {
         if (event.target === event.currentTarget) onClose()
       }}
     >
-      <div className="ca-connect-modal" role="dialog" aria-modal="true" aria-labelledby="ca-connect-title">
+      <motion.div initial={reduceMotion ? { opacity: 0 } : { opacity: 0, y: 5, scale: 0.99 }}
+        animate={{ opacity: 1, y: 0, scale: 1 }}
+        exit={reduceMotion ? { opacity: 0 } : { opacity: 0, y: 3, scale: 0.995 }}
+        transition={{ duration: reduceMotion ? 0 : 0.18, ease: 'easeOut' }} className="ca-connect-modal" role="dialog" aria-modal="true" aria-labelledby="ca-connect-title">
         <div className="ca-connect-head">
           <h2 id="ca-connect-title">Connect your agent</h2>
           <button type="button" className="ca-connect-x" onClick={onClose} aria-label="Close">
@@ -165,18 +184,19 @@ export function ConnectAgentModal({
         </div>
         <div className="ca-connect-body">
           <nav className="ca-connect-agents" aria-label="Coding agents">
-            {CODING_AGENTS.map((agent) => (
+            {PICKER_AGENTS.map((agent) => (
               <button
                 key={agent.id}
                 type="button"
                 className={`ca-connect-agent${agentId === agent.id ? ' is-active' : ''}`}
                 onClick={() => {
+                  setLink(null)
                   setAgentId(agent.id)
                   setAdded(false)
                   setToast(null)
                 }}
               >
-                <AgentFavicon src={agent.favicon} fallback={agent.faviconFallback} />
+                {agent.favicon ? <AgentFavicon src={agent.favicon} fallback={agent.faviconFallback} /> : <span aria-hidden>⌘</span>}
                 <span>{agent.name}</span>
               </button>
             ))}
@@ -196,17 +216,38 @@ export function ConnectAgentModal({
               <span className={`ca-connect-num${added ? ' is-done' : ''}`}>{added ? '✓' : '2'}</span>
               <div className="ca-connect-step-main">
                 <strong>Connect to {meta.name}</strong>
-                <div className="ca-connect-add-row">
+                <div className="ca-connect-add-row" style={manualAgent ? { display: 'none' } : undefined}>
                   <span>
                     {agentId === 'cursor'
                       ? 'Starts a public tunnel and registers Scobe so it can show under Connectors / MCP.'
-                      : `Add Scobe MCP for ${meta.name}.`}
+                      : localCodex ? 'Configure the bundled MCP server. No separate download needed.' : `Add Scobe MCP for ${meta.name}.`}
                   </span>
                   <button type="button" className="ca-connect-add-btn" disabled={busy} onClick={() => void onAdd()}>
-                    {busy ? 'Connecting…' : added ? 'Connected' : addLabel}
+                    {busy ? 'Connecting…' : (added || (localCodex && ready)) ? 'Configured' : addLabel}
                   </button>
                 </div>
-                {link?.publicUrl && (
+                {manualAgent && <div className="ca-connect-manual">
+                  <p>Add Scobe in your agent’s MCP settings as a local Streamable HTTP server.</p>
+                  <div className="ca-connect-command"><code>{link?.localUrl || 'Loading…'}</code><button type="button" disabled={!link?.localUrl} onClick={async () => {
+                    try { await navigator.clipboard.writeText(link!.localUrl!); setToast('Server URL copied') }
+                    catch { setToast('Could not copy URL') }
+                  }}>Copy URL</button></div>
+                  <p>Name the server Scobe and keep Scobe open. Follow your agent’s MCP configuration format. This does not configure it automatically.</p>
+                </div>}
+                {localCodex && <div className="ca-connect-manual">
+                  <p>Or add manually with the Codex CLI:</p>
+                  <div className="ca-connect-command"><code>{link?.setupSnippet || 'Loading…'}</code>
+                    <button type="button" disabled={!link?.setupSnippet} onClick={async () => {
+                      try { await navigator.clipboard.writeText(link!.setupSnippet!); setToast('Command copied') }
+                      catch { setToast('Could not copy. Select the command and copy manually.') }
+                    }}>Copy command</button></div>
+                  <p>Keep Scobe open. Restart Codex after setup and use a local chat. Cloud tasks cannot use this local connection.</p>
+                  <button type="button" onClick={async () => {
+                    try { setLink(await window.vanta.getAgentMcpLink(backendAgent)) }
+                    catch { setToast('Could not check configuration') }
+                  }}>Check configuration</button>
+                </div>}
+                {!manualAgent && link?.publicUrl && (
                   <p className="ca-connect-hint">
                     Live tunnel: <code>{link.publicUrl}</code>
                     {link.tunnelOk === false ? ' (waiting for tunnel…)' : ''}
@@ -224,7 +265,7 @@ export function ConnectAgentModal({
                 <strong>Run your first prompt</strong>
                 <p>
                   {agentId === 'cursor'
-                    ? 'Done opens Cursor’s Install MCP page, then Agents. Enable vanta under Connectors / MCP and paste a prompt:'
+                    ? 'Enable Scobe in your agent, then paste a prompt:'
                     : `After enabling Scobe MCP, run one of these in ${meta.name}:`}
                 </p>
                 <div className="ca-connect-prompts">
@@ -248,18 +289,18 @@ export function ConnectAgentModal({
         </div>
         <div className="ca-connect-foot">
           <span className="ca-connect-learn">
-            {agentId === 'cursor' ? 'Done → Install MCP → Open Agents (enable vanta)' : 'Set up MCP before using the agent sidebar'}
+            {localCodex ? 'Keep Scobe open while using Codex.' : 'Connect Scobe to your preferred agent.'}
           </span>
           <button
             type="button"
             className="ca-connect-done"
-            disabled={!link?.publicUrl || busy}
+            disabled={!ready || busy}
             onClick={() => void finish()}
           >
             Done
           </button>
         </div>
-      </div>
+      </motion.div>
       {toast && (
         <div className="ca-connect-toast" role="status">
           <strong>{toast}</strong>
@@ -270,6 +311,7 @@ export function ConnectAgentModal({
           </span>
         </div>
       )}
-    </div>
+    </motion.div>}
+    </AnimatePresence>, document.body
   )
 }

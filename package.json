@@ -57,6 +57,9 @@
       "icon": "resources/icon-1024.png",
       "artifactName": "Scobe-mac-${arch}.${ext}",
       "category": "public.app-category.graphics-design",
+      "extendInfo": {
+        "NSMicrophoneUsageDescription": "Scobe uses the microphone so you can talk in chat."
+      },
       "target": [
         "dmg",
         "zip"
@@ -87,6 +90,10 @@
     "express": "^5.2.1",
     "ws": "^8.18.3",
     "zod": "^4.6.4"
+  },
+  "overrides": {
+    "onnxruntime-node": "1.21.0",
+    "sharp": "0.34.5"
   },
   "devDependencies": {
     "@emotion/react": "^11.14.0",

@@ -1,0 +1,13 @@
+{
+  "name": "scobe",
+  "version": "0.1.0",
+  "description": "Build on a canvas of live browsers and editable frames that Claude can read and write to.",
+  "author": {
+    "name": "Jesse Bishop"
+  },
+  "homepage": "https://github.com/jesbishop/scobe",
+  "repository": "https://github.com/jesbishop/scobe-plugins",
+  "license": "MIT",
+  "keywords": ["scobe", "design", "ui", "canvas", "browser", "snapshot", "mcp"],
+  "mcpServers": "./mcp.claude.json"
+}

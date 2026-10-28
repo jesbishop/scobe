@@ -10,6 +10,7 @@ import * as z from 'zod'
 import { emitBuild } from './buildBus'
 import { getMcpToken, isMcpRequestAuthorized } from './mcpAuth'
 import { runCanvasTool, type CanvasToolContext } from './canvasTools'
+import { DESIGN_GUIDE, DESIGN_GUIDE_SUMMARY } from '../shared/designGuide'
 
 export const VANTA_MCP_PORT = 29980
 export const VANTA_MCP_URL = `http://127.0.0.1:${VANTA_MCP_PORT}/mcp`
@@ -79,6 +80,27 @@ function registerTools(server: McpServer, ctx: CanvasToolContext) {
     run('get_screenshot')
   )
   tool('list_browsers', 'List live browsers/tabs on the Scobe canvas.', {}, run('list_browsers'))
+  tool(
+    'get_design_guide',
+    'The Scobe design guide: process, spacing and type scales, color, components, what to avoid, and the review checklist. Read it before designing.',
+    {},
+    run('get_design_guide')
+  )
+  tool(
+    'get_tokens',
+    'Design tokens from the Tokens panel plus the colors, fonts, sizes, radii and spacing the file already uses most. Reuse these so new work matches.',
+    {},
+    run('get_tokens')
+  )
+  tool(
+    'render_node',
+    'Render a design layer (usually the top-level frame you built) to a PNG so you can see it. Use after building, review against the design guide checklist, fix issues, and render again. Omit id to render the newest top-level frame on the current page.',
+    {
+      id: z.string().optional().describe('Layer id to render; omit for the newest top-level frame'),
+      maxEdge: z.number().optional().describe('Longest edge of the image in px (default 1568)')
+    },
+    run('render_node')
+  )
   tool(
     'create_artboard',
     'Create a design frame (artboard). Prefer auto-layout for UI builds.',
@@ -293,13 +315,39 @@ function registerTools(server: McpServer, ctx: CanvasToolContext) {
 export const SCOBE_MCP_INSTRUCTIONS =
   'You are connected to the Scobe desktop design canvas (NOT Cursor\'s canvas feature, NOT a code repo file). ' +
   'Never use read-canvas or write-canvas — those do not control Scobe. ' +
-  'Build UI with Scobe tools only: get_basic_info → create_artboard / add_design_frame → add_design_* → set_layout / update_styles → finish_working_on_nodes. ' +
+  'Build UI with Scobe tools only: get_design_guide + get_tokens → get_basic_info → create_artboard / add_design_frame → add_design_* → set_layout / update_styles → render_node to review → fix → finish_working_on_nodes. ' +
   'To bring a live page region into the canvas, use snapshot_browser_to_frame / snapshot_to_canvas (Scobe Snapshot → editable layers). Never use flat screenshot-only paste for “snapshot” / “bring into canvas”. ' +
-  'Prefer auto-layout frames. Live browsers stay open; design sits on the canvas beside them.'
+  'Prefer auto-layout frames. Live browsers stay open; design sits on the canvas beside them. ' +
+  DESIGN_GUIDE_SUMMARY
+
+function registerGuide(server: McpServer) {
+  server.registerResource(
+    'design-guide',
+    'scobe://design-guide',
+    { title: 'Scobe design guide', description: 'How to design well on the Scobe canvas.', mimeType: 'text/markdown' },
+    async (uri) => ({ contents: [{ uri: uri.href, mimeType: 'text/markdown', text: DESIGN_GUIDE }] })
+  )
+  server.registerPrompt(
+    'design_on_scobe',
+    { title: 'Design on Scobe', description: 'Load the Scobe design guide and process before building on the canvas.' },
+    () => ({
+      messages: [
+        {
+          role: 'user' as const,
+          content: {
+            type: 'text' as const,
+            text: `${DESIGN_GUIDE}\n\nFollow this guide for everything you build on the Scobe canvas. Start with get_tokens and list_design, and finish each build with render_node and a review pass.`
+          }
+        }
+      ]
+    })
+  )
+}
 
 function newServer(ctx: CanvasToolContext): McpServer {
   const server = new McpServer({ name: 'scobe', version: app.getVersion() }, { instructions: SCOBE_MCP_INSTRUCTIONS })
   registerTools(server, ctx)
+  registerGuide(server)
   return server
 }
 

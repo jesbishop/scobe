@@ -164,8 +164,10 @@ export function scaleFactorFromDrag(
   dx: number,
   dy: number
 ): number {
-  const before = Math.hypot(start.x - origin.x, start.y - origin.y) || 1
-  return Math.max(0.02, Math.min(32, Math.hypot(start.x + dx - origin.x, start.y + dy - origin.y) / before))
+  const vx = start.x-origin.x, vy = start.y-origin.y
+  const squared = vx*vx+vy*vy
+  if (squared < 1e-8) return 1
+  return Math.max(.02,Math.min(32,1+(dx*vx+dy*vy)/squared))
 }
 
 export function scaleNodeAround<T extends {

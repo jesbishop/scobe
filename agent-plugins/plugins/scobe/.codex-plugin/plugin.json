@@ -1,0 +1,31 @@
+{
+  "name": "scobe",
+  "version": "0.1.0",
+  "description": "Build on a canvas of live browsers and editable frames that Codex can read and write to.",
+  "author": {
+    "name": "Jesse Bishop",
+    "url": "https://github.com/jesbishop"
+  },
+  "homepage": "https://github.com/jesbishop/scobe",
+  "repository": "https://github.com/jesbishop/scobe-plugins.git",
+  "license": "MIT",
+  "keywords": ["scobe", "design", "ui", "canvas", "browser", "snapshot", "mcp"],
+  "mcpServers": "./mcp.codex.json",
+  "interface": {
+    "displayName": "Scobe",
+    "shortDescription": "Build on a canvas that Codex can read and write to.",
+    "longDescription": "Scobe is an infinite canvas of live browsers and editable frames. With this plugin, Codex can read the canvas, create frames with auto-layout, add text and shapes, style them, and snapshot any live web page into editable layers, all while you watch.",
+    "developerName": "Jesse Bishop",
+    "category": "Design",
+    "capabilities": ["Read", "Write"],
+    "websiteURL": "https://github.com/jesbishop/scobe",
+    "brandColor": "#111111",
+    "composerIcon": "./assets/logo.svg",
+    "logo": "./assets/logo.svg",
+    "defaultPrompt": [
+      "Build a landing page hero on the Scobe canvas with auto-layout",
+      "Snapshot the sidebar from my open browser into editable layers in Scobe",
+      "Design a mobile settings screen in Scobe using my repo's colors and type"
+    ]
+  }
+}

@@ -1,11 +1,11 @@
-import { app, BrowserWindow, ipcMain, nativeTheme, shell } from 'electron'
+import { app, BrowserWindow, ipcMain, nativeTheme, session, shell, systemPreferences } from 'electron'
 import { join } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { chromeHost } from './chrome'
 import { addDesign, getDesign, onDesignChange, setDesign, storeRendererDesign } from './designStore'
 import { loadWorkspace, saveWorkspace } from './workspace'
 import { loadEnv } from './env'
-import { runAgent } from './agent'
+import { agentStatus, runAgent, setAgentKey } from './agent'
 import { askJev, jevStatus, setJevKey } from './jev'
 import {
   generateSvgStream,
@@ -15,6 +15,7 @@ import {
   type QuiverGenerateInput,
   type QuiverVectorizeInput
 } from './quiver'
+import { onDictation, startDictation, stopDictation } from './dictation'
 import { onTranscriberStatus, transcribe, transcriberStatus, warmTranscriber } from './transcriber'
 import {
   onRemoveBackgroundStatus,
@@ -33,7 +34,8 @@ import {
 } from './mcpClientInstall'
 import { ensureMcpTunnel, getTunnelError, hasNamedTunnel, stopMcpTunnel } from './mcpTunnel'
 import { installScobeCli } from './mcpCli'
-import type { CanvasToolContext } from './canvasTools'
+import type { CanvasToolContext, RenderedNode } from './canvasTools'
+import { callRenderer, initRendererRpc } from './rendererRpc'
 import { startAutoUpdates } from './updater'
 import type { CodingAgentId } from '../shared/codingAgents'
 import {
@@ -55,6 +57,9 @@ import {
 import type { SnapshotEvent } from '../shared/snapshot'
 
 app.setName('Scobe')
+// Windows stops painting a window that other apps cover. Agents photograph the canvas to review
+// their designs while Scobe sits behind their editor, so keep painting it.
+app.commandLine.appendSwitch('disable-features', 'CalculateNativeWinOcclusion')
 
 const isPrimary = app.requestSingleInstanceLock()
 if (!isPrimary) {
@@ -269,6 +274,28 @@ async function restoreWorkspace(): Promise<void> {
   }
 }
 
+/** Electron denies getUserMedia unless the session explicitly allows the microphone. */
+function allowMicrophone(): void {
+  if (process.platform === 'darwin') {
+    void systemPreferences.askForMediaAccess('microphone').catch(() => undefined)
+  }
+  const trusted = new Set<string>(['clipboard-read', 'clipboard-sanitized-write', 'fullscreen', 'pointerLock'])
+  const ses = session.defaultSession
+  ses.setPermissionCheckHandler((_webContents, permission, _origin, details) => {
+    if (permission === 'media') return details.mediaType !== 'video'
+    if (permission === 'deprecated-sync-clipboard-read') return true
+    return trusted.has(permission)
+  })
+  ses.setPermissionRequestHandler((_webContents, permission, callback, details) => {
+    if (permission === 'media') {
+      const kinds = 'mediaTypes' in details ? details.mediaTypes : undefined
+      callback(!kinds?.length || kinds.includes('audio'))
+      return
+    }
+    callback(trusted.has(permission))
+  })
+}
+
 function createWindow(): BrowserWindow {
   const win = new BrowserWindow({
     width: 1440,
@@ -283,7 +310,7 @@ function createWindow(): BrowserWindow {
     titleBarOverlay: {
       color: '#e8e8e8',
       symbolColor: '#1a1a1a',
-      height: 44
+      height: 39
     },
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
@@ -320,7 +347,53 @@ function tabOf(id: string): { frame: BrowserFrame; tab: BrowserTab } | null {
   return null
 }
 
+/** Things only the canvas window can do, for agent tools (render a layer to see it, read tokens). */
+const canvasBridge: Pick<CanvasToolContext, 'renderNode' | 'getTokens'> = {
+  renderNode: async (id, maxEdge) => {
+    const photo = await photographNode(id, maxEdge).catch((error) => {
+      console.warn('[render_node] canvas photo unavailable, using vector export:', error instanceof Error ? error.message : error)
+      return null
+    })
+    // Layer on another page, window minimized, etc.: fall back to the vector export.
+    return photo || callRenderer<RenderedNode>('renderNode', { id, maxEdge }, 30000)
+  },
+  getTokens: () => callRenderer('getTokens', undefined, 5000)
+}
+
+/** Exactly what Scobe draws: fit the layer in view, hide chrome, capture that part of the window. */
+async function photographNode(id: string | undefined, maxEdge?: number): Promise<RenderedNode | null> {
+  const win = mainWindow
+  if (!win || win.isDestroyed() || win.isMinimized() || !win.isVisible()) throw new Error('window not visible')
+  type Plan = { id: string; name: string; width: number; height: number; rect: { x: number; y: number; width: number; height: number } }
+  const plan = await callRenderer<Plan>('beginCapture', { id }, 10000)
+  try {
+    const rect = {
+      x: Math.max(0, Math.floor(plan.rect.x)),
+      y: Math.max(0, Math.floor(plan.rect.y)),
+      width: Math.max(1, Math.ceil(plan.rect.width)),
+      height: Math.max(1, Math.ceil(plan.rect.height))
+    }
+    let image = await win.webContents.capturePage(rect)
+    if (image.isEmpty()) throw new Error('capture was empty')
+    const size = image.getSize()
+    const cap = maxEdge || 1568
+    const longest = Math.max(size.width, size.height)
+    if (longest > cap) image = image.resize({ width: Math.round((size.width * cap) / longest), quality: 'best' })
+    return {
+      id: plan.id,
+      name: plan.name,
+      base64: image.toPNG().toString('base64'),
+      width: plan.width,
+      height: plan.height,
+      scale: Math.round((image.getSize().width / Math.max(1, plan.width)) * 100) / 100
+    }
+  } finally {
+    await callRenderer('endCapture', undefined, 5000).catch(() => undefined)
+  }
+}
+
 function registerIpc(): void {
+  initRendererRpc(() => mainWindow)
   ipcMain.handle('vanta:getStatus', () => chromeHost.getStatus())
   ipcMain.handle('vanta:getWorkspace', () => workspaceSnapshot())
   ipcMain.handle('vanta:getBrowsers', () => mergeChromeState())
@@ -415,7 +488,7 @@ function registerIpc(): void {
       mainWindow.setTitleBarOverlay({
         color: dark ? '#1a1a1a' : '#e8e8e8',
         symbolColor: dark ? '#f0f0f0' : '#1a1a1a',
-        height: 44
+        height: 39
       })
     } catch {
       /* unsupported */
@@ -449,6 +522,9 @@ function registerIpc(): void {
   ipcMain.handle('vanta:setSnapshot', (_event, id: string | null) => {
     chromeHost.setSnapshot(id)
   })
+  ipcMain.handle('vanta:snapshotPage', (_event, id: string) => chromeHost.snapshotPage(id))
+  ipcMain.handle('vanta:agentStatus', () => agentStatus())
+  ipcMain.handle('vanta:agentSetKey', (_event, key: string) => setAgentKey(key))
   ipcMain.handle('vanta:runAgent', async (_event, messages: Array<{ role: 'user' | 'assistant'; text: string }>) => {
     if (agentRunning) throw new Error('Agent is already running')
     agentRunning = true
@@ -477,7 +553,8 @@ function registerIpc(): void {
             }
           }
           return null
-        }
+        },
+        canvasBridge
       )
     } finally {
       agentRunning = false
@@ -542,6 +619,11 @@ function registerIpc(): void {
   })
   ipcMain.handle('vanta:transcribe', (_event, audio: Float32Array) => transcribe(audio))
   onTranscriberStatus((status) => mainWindow?.webContents.send('vanta:transcriber', status))
+  ipcMain.handle('vanta:dictationStart', () => startDictation())
+  ipcMain.handle('vanta:dictationStop', () => {
+    stopDictation()
+  })
+  onDictation((event) => mainWindow?.webContents.send('vanta:dictation', event))
 
   ipcMain.handle('vanta:removeBackgroundStatus', () => removeBackgroundStatus())
   ipcMain.handle('vanta:warmRemoveBackground', async () => {
@@ -589,6 +671,7 @@ function registerIpc(): void {
 
 app.whenReady().then(async () => {
   if (!isPrimary) return
+  allowMicrophone()
   loadEnv()
   workspaceFile = join(app.getPath('userData'), 'workspace.json')
   registerIpc()
@@ -615,6 +698,7 @@ app.whenReady().then(async () => {
   await restoreWorkspace()
   try {
     const mcpContext: CanvasToolContext = {
+      ...canvasBridge,
       openBrowser: async (url) => {
         const frame = await createBrowser({ url })
         return frame.activeTabId
@@ -680,6 +764,7 @@ app.on('before-quit', (event) => {
   quitting = true
   void (async () => {
     try {
+      stopDictation()
       stopMcpTunnel()
       await stopVantaMcp()
     } catch {

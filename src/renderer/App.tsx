@@ -1,8 +1,9 @@
+import type { Paint } from '../shared/paint'
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent } from 'react'
 import { AnimatePresence, motion, useReducedMotion } from 'motion/react'
 import { BrowserFrame } from './BrowserFrame'
 import { CanvasToolbar } from './CanvasToolbar'
-import { DesignLayer } from './DesignLayer'
+import { DesignLayer, pointerEndedTextEdit } from './DesignLayer'
 import { CommentCursor, CommentResolveToast, CommentThreadCard, CURRENT_USER } from './CommentOverlays'
 import { CommentsPanel } from './CommentsPanel'
 import { MeasureOverlay, type MeasureTitle } from './MeasureOverlay'
@@ -38,7 +39,9 @@ function isQuiverCancelMessage(message?: string | null): boolean {
     text.includes('abort')
   )
 }
-import { useJev } from './useJev'
+import { useJev, type CommandResult } from './useJev'
+import { commandById, commandRunnable, type CommandId } from './jevCommands'
+import { extractColor, extractDimensions } from './jevEngine'
 import { FileTabs, HomeScreen, LeftSidebar, NewTabScreen, RightSidebar, type LayerItem, type ProjectFile, type RailTab } from './shell'
 import { FrameActionBar } from './FrameBar'
 import { loadCodingAgents, rememberCodingAgent } from './codingAgents'
@@ -61,6 +64,7 @@ import {
   type ChromeStatus,
   type DesignNode,
   type DesignPage,
+  type ExportFormat,
   type BrushStyleId,
   type DesignTool,
   type InspectInfo,
@@ -76,7 +80,8 @@ import { nextCommentNumber } from '../shared/comments'
 import type { FramePreset } from '../shared/framePresets'
 import { CanvasContextMenu, type ContextMenuState } from './CanvasContextMenu'
 import { LayerSidebarMenu, type LayerMenuState } from './LayerSidebarMenu'
-import { copyNodeAsPng, renderPageThumbnailDataUrl } from './exportNode'
+import { copyNodeAsPng, exportNodeAsPngBlob, exportNodeSetting, renderPageThumbnailDataUrl } from './exportNode'
+import { tokensForAgents } from './tokenStore'
 import {
   CropBar,
   aspectRatioOf,
@@ -765,6 +770,10 @@ export function App() {
     null
   )
   const [quiverConfigured, setQuiverConfigured] = useState(false)
+  /** Create SVG work requested from chat; runs once the panel has the selection as references. */
+  const discardJevDraftRef = useRef<(next: DesignNode[]) => DesignNode[]>((next) => next)
+  const pendingCreateSvgJob = useRef<{ kind: 'create'; prompt: string } | { kind: 'remove-bg' } | { kind: 'vectorize' } | null>(null)
+  const agentConfiguredRef = useRef(false)
   const createSvgImageId = useRef<string | null>(null)
   const createSvgFrameId = useRef<string | null>(null)
   const createSvgSlots = useRef<Array<{ frameId: string; imageId: string }>>([])
@@ -774,6 +783,9 @@ export function App() {
   const [draft, setDraft] = useState<DesignNode | null>(null)
   const [shapeKind, setShapeKind] = useState<ShapeKind>('rect')
   const [strokeColor, setStrokeColor] = useState('#000000')
+  const [instrumentColors, setInstrumentColors] = useState({ pen: '#000000', pencil: '#000000', brush: '#000000' })
+  const [instrumentPaints, setInstrumentPaints] = useState<Partial<Record<'pen' | 'pencil' | 'brush', Paint>>>({})
+  const [penWeight, setPenWeight] = useState(2)
   const [pencilWeight, setPencilWeight] = useState(6)
   const [brushWeight, setBrushWeight] = useState(64)
   const [pencilStyle, setPencilStyle] = useState<BrushStyleId>('basic')
@@ -866,6 +878,7 @@ export function App() {
   const designSelectedRef = useRef(designSelectedIds)
   const designUndoPastRef = useRef<DesignNode[][]>([])
   const designUndoFutureRef = useRef<DesignNode[][]>([])
+  const [, refreshHistory] = useState(0)
   const designHistoryLockRef = useRef(false)
   const designHistoryGestureRef = useRef(false)
   const createSvgBusyRef = useRef(false)
@@ -899,7 +912,9 @@ export function App() {
   } | null>(null)
   const penDrag = useRef<{ x: number; y: number; worldX: number; worldY: number } | null>(null)
   const strokeRef = useRef({
+    paint: undefined as Paint | undefined,
     color: '#000000',
+    penWeight: 2,
     pencilWeight: 6,
     brushWeight: 64,
     pencilStyle: 'basic' as BrushStyleId,
@@ -928,7 +943,9 @@ export function App() {
   shapeRef.current = shapeKind
   draftRef.current = draft
   strokeRef.current = {
+    paint: tool === 'pen' || tool === 'pencil' || tool === 'brush' ? instrumentPaints[tool] : undefined,
     color: strokeColor,
+    penWeight,
     pencilWeight,
     brushWeight,
     pencilStyle,
@@ -1325,7 +1342,7 @@ export function App() {
           name:
             node.name ||
             node.text ||
-            (node.type === 'frame' ? 'New frame name' : node.type === 'section' ? 'Section' : node.type),
+            (node.type === 'frame' ? 'Frame' : node.type === 'section' ? 'Section' : node.type),
           selected: designSelectedIds.includes(node.id),
           textOnPath: isTextOnPath(node),
           vector: node.type === 'image' && Boolean(node.svgMarkup?.trim()),
@@ -1419,10 +1436,15 @@ export function App() {
     }
   }, [theme, captureActiveFileThumbnail])
 
+  const logCanvasHistory = (text: string) => {
+    setChats(current => current.map(chat => chat.id === activeChatIdRef.current ? { ...chat, messages: [...chat.messages, { role: 'assistant' as const, text }] } : chat))
+  }
   const pushDesignHistory = (snapshot: DesignNode[]) => {
     designUndoPastRef.current.push(structuredClone(snapshot))
     if (designUndoPastRef.current.length > 80) designUndoPastRef.current.shift()
     designUndoFutureRef.current = []
+    refreshHistory(value => value + 1)
+    logCanvasHistory('Canvas change recorded. Use Undo to restore the previous version.')
   }
 
   const clearDesignHistory = () => {
@@ -1454,6 +1476,8 @@ export function App() {
     if (!prev) return
     designUndoFutureRef.current.push(structuredClone(designRef.current))
     applyDesignSnapshot(prev)
+    refreshHistory(value => value + 1)
+    logCanvasHistory('Undid the last canvas change.')
   }
 
   const redoDesign = () => {
@@ -1462,9 +1486,13 @@ export function App() {
     if (!next) return
     designUndoPastRef.current.push(structuredClone(designRef.current))
     applyDesignSnapshot(next)
+    refreshHistory(value => value + 1)
+    logCanvasHistory('Redid the canvas change.')
   }
 
-  const persistDesign = (next: DesignNode[], opts?: { skipReflow?: boolean; skipHistory?: boolean }) => {
+  const persistDesign = (next: DesignNode[], opts?: { skipReflow?: boolean; skipHistory?: boolean; fromJev?: boolean }) => {
+    // A hand edit while words sit in the chat composer clears them and their unsent preview.
+    if (!opts?.fromJev) next = discardJevDraftRef.current(next)
     const flowed = opts?.skipReflow ? next : reflowAutoLayout(next)
     if (!opts?.skipHistory && !designHistoryLockRef.current && !isDesignGenerationBusy()) {
       if (opts?.skipReflow) {
@@ -1680,12 +1708,62 @@ export function App() {
           : { x: 120, y: 120 }
       }
     },
-    persist: (nodes) => persistDesign(nodes),
+    persist: (nodes) => persistDesign(nodes, { fromJev: true }),
     onOpenSidebar: () => {
       setRightOpen(true)
       setRightWidth((width) => Math.max(width, 300))
+    },
+    runCommand: (id, request) => runJevCommand(id, request),
+    delegate: (request) => delegateToClaude(request),
+    canDelegate: () => agentConfiguredRef.current,
+    onRequest: (decisionId, request) => {
+      const chatId = activeChatIdRef.current
+      setChats((current) => {
+        const targetId = chatId && current.some((chat) => chat.id === chatId) ? chatId : current[0]?.id
+        return current.map((chat) =>
+          chat.id === targetId
+            ? {
+                ...chat,
+                title: chat.title === 'New chat' ? request.slice(0, 42) : chat.title,
+                messages: [
+                  ...chat.messages,
+                  { role: 'user', text: request },
+                  { role: 'assistant', text: '', jevId: decisionId }
+                ]
+              }
+            : chat
+        )
+      })
     }
   })
+  const jevThread = { onUndo: jev.undo }
+  discardJevDraftRef.current = jev.discardForManualEdit
+
+  // Copy each finished decision into its chat message so history survives after Jev drops old decisions.
+  useEffect(() => {
+    const byId = new Map(jev.decisions.map((decision) => [decision.id, decision]))
+    setChats((current) => {
+      let changed = false
+      const next = current.map((chat) => {
+        let chatChanged = false
+        const messages = chat.messages.map((message) => {
+          if (!message.jevId) return message
+          const decision = byId.get(message.jevId)
+          if (!decision || decision === message.jev) return message
+          chatChanged = true
+          return {
+            ...message,
+            jev: decision,
+            text: decision.status === 'error' ? decision.error || message.text : decision.result || message.text
+          }
+        })
+        if (!chatChanged) return chat
+        changed = true
+        return { ...chat, messages }
+      })
+      return changed ? next : current
+    })
+  }, [jev.decisions])
   const jevComposer = {
     on: jev.on,
     onToggle: jev.setOn,
@@ -1720,12 +1798,139 @@ export function App() {
       designSelectedRef.current = []
       setDesignSelectedIds([])
     },
-    onSaveKey: (key: string) => void jev.saveKey(key)
+    onSaveKey: (key: string) => void jev.saveKey(key),
+    clearTick: jev.draftClearTick
   }
 
   useEffect(() => {
     void window.vanta.quiverStatus().then((status) => setQuiverConfigured(status.configured))
+    void window.vanta.agentStatus?.().then((status) => {
+      agentConfiguredRef.current = status.configured
+    })
   }, [])
+
+  // Agents (Claude in chat, MCP coding agents) ask the canvas to render layers so they can see their work.
+  useEffect(() => {
+    if (typeof window.vanta.onRpc !== 'function') return
+    const target = (id: string | undefined) => {
+      const nodes = designRef.current
+      const onPage = nodes.filter((node) => (node.pageId || DEFAULT_PAGE.id) === activePageRef.current)
+      // No id: the most recently added top-level frame on this page, which is usually what was just built.
+      const node = id
+        ? nodes.find((item) => item.id === id)
+        : [...onPage].reverse().find((item) => !item.parentId && (item.type === 'frame' || item.type === 'section'))
+      if (!node) throw new Error(id ? `No layer with id ${id}.` : 'There is no frame on this page to render.')
+      return { node, nodes, onPage: (node.pageId || DEFAULT_PAGE.id) === activePageRef.current }
+    }
+    let savedCamera: Camera | null = null
+    return window.vanta.onRpc(async (method, args) => {
+      // Real pixels: fit the layer in view, hide Scobe's own chrome, and let main photograph the window.
+      if (method === 'beginCapture') {
+        const { id } = (args || {}) as { id?: string }
+        const { node, nodes, onPage } = target(id)
+        const canvas = canvasRef.current
+        if (!onPage) throw new Error('layer is on another page')
+        if (!canvas) throw new Error('the canvas is not open')
+        const box = resolveWorldRect(node, nodes)
+        const area = canvas.getBoundingClientRect()
+        // The sidebars float over the canvas; fit the layer in the part that's actually visible.
+        const shownRects = (selector: string) =>
+          Array.from(document.querySelectorAll(selector))
+            .map((el) => el.getBoundingClientRect())
+            .filter((rect) => rect.width > 1 && rect.height > 1)
+        // The left side is a narrow rail plus a separate panel; take whichever reaches furthest right.
+        const leftCovers = shownRects('.leftbar, .leftbar-rail, .leftbar-panel:not(.is-collapsed)')
+        const rightCovers = shownRects('.rightbar:not(.is-collapsed)')
+        const visibleLeft = Math.max(area.left, ...leftCovers.map((rect) => rect.right))
+        const visibleRight = Math.min(area.right, ...rightCovers.map((rect) => rect.left))
+        const visibleWidth = Math.max(80, visibleRight - visibleLeft)
+        const pad = 32
+        const zoom = clampZoom(Math.min(2, (visibleWidth - pad * 2) / Math.max(1, box.width), (area.height - pad * 2) / Math.max(1, box.height)))
+        const camera: Camera = {
+          zoom,
+          x: visibleLeft - area.left + (visibleWidth - box.width * zoom) / 2 - box.x * zoom,
+          y: (area.height - box.height * zoom) / 2 - box.y * zoom
+        }
+        savedCamera = savedCamera || cameraRef.current
+        applyCamera(camera)
+        document.body.classList.add('scobe-capturing')
+        // Two frames for layout, then time for the zoom re-raster so text is crisp. A covered window
+        // gets no animation frames, so don't wait on them forever (main's capture forces a repaint).
+        await Promise.race([
+          new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))),
+          new Promise((resolve) => window.setTimeout(resolve, 120))
+        ])
+        await new Promise((resolve) => window.setTimeout(resolve, 380))
+        return {
+          id: node.id,
+          name: node.name || node.type,
+          width: Math.round(box.width),
+          height: Math.round(box.height),
+          rect: {
+            x: area.left + camera.x + box.x * zoom,
+            y: area.top + camera.y + box.y * zoom,
+            width: box.width * zoom,
+            height: box.height * zoom
+          }
+        }
+      }
+      if (method === 'endCapture') {
+        document.body.classList.remove('scobe-capturing')
+        if (savedCamera) applyCamera(savedCamera)
+        savedCamera = null
+        return true
+      }
+      if (method === 'renderNode') {
+        const { id, maxEdge } = (args || {}) as { id?: string; maxEdge?: number }
+        const { node, nodes } = target(id)
+        const box = resolveWorldRect(node, nodes)
+        const longest = Math.max(1, box.width, box.height)
+        const scale = Math.max(0.2, Math.min(2, (maxEdge || 1568) / longest))
+        const blob = await exportNodeAsPngBlob(node, nodes, scale)
+        const base64 = await new Promise<string>((resolve, reject) => {
+          const reader = new FileReader()
+          reader.onload = () => resolve(String(reader.result).replace(/^data:[^,]+,/, ''))
+          reader.onerror = () => reject(new Error('Could not read the rendered image.'))
+          reader.readAsDataURL(blob)
+        })
+        return {
+          id: node.id,
+          name: node.name || node.type,
+          base64,
+          width: Math.round(box.width),
+          height: Math.round(box.height),
+          scale: Math.round(scale * 100) / 100
+        }
+      }
+      if (method === 'getTokens') return { tokens: tokensForAgents() }
+      throw new Error(`Unknown canvas request: ${method}`)
+    })
+  }, [])
+
+  // Runs after the panel opens so Create SVG sees the current selection as its references.
+  useEffect(() => {
+    const job = pendingCreateSvgJob.current
+    if (!job || !createSvgOpen || createSvgBusy) return
+    pendingCreateSvgJob.current = null
+    if (job.kind === 'remove-bg') {
+      void runRemoveBackground()
+      return
+    }
+    if (job.kind === 'vectorize') {
+      void runVectorizeImages()
+      return
+    }
+    void runCreateSvg({
+      model: createSvgModel,
+      prompt: job.prompt,
+      n: 1,
+      temperature: 0.4,
+      reasoningEffort: 'medium',
+      instructions:
+        'Clean vector illustration, flat shapes, no raster effects. Fill the entire viewBox edge-to-edge — no white margins or padding around the artwork.',
+      referenceBase64: selectedImageRef?.dataUrl || null
+    })
+  })
 
   useEffect(() => {
     if (!createSvgOpen) {
@@ -3236,6 +3441,28 @@ export function App() {
     if (nextX !== cam.x || nextY !== cam.y) applyCamera({ ...cam, x: nextX, y: nextY })
   }
 
+  useEffect(() => {
+    let inspect = false
+    let xray = false
+    const handle = (event: Event) => {
+      const { action, active } = (event as CustomEvent<{ action: string; active: boolean }>).detail
+      const tabId = dockedTab?.tabId || (codingActive ? SIDEBAR_BROWSER_ID : null)
+      if (!tabId) return
+      if (action === 'snapshot') {
+        void window.vanta.setMesurer(null, null)
+        void window.vanta.setSnapshot(active ? tabId : null)
+        if (active) void window.vanta.focus(tabId)
+      } else {
+        void window.vanta.setSnapshot(null)
+        if (action === 'inspect') inspect = active
+        if (action === 'xray') xray = active
+        void window.vanta.setMesurer(inspect || xray ? tabId : null, inspect || xray ? { inspect, xray } : null)
+      }
+    }
+    window.addEventListener('scobe:docked-browser-tool', handle)
+    return () => { window.removeEventListener('scobe:docked-browser-tool', handle); void window.vanta.setSnapshot(null); void window.vanta.setMesurer(null, null) }
+  }, [dockedTab, codingActive])
+
   const pasteSnapshot = (tabId: string, tree: SnapshotNode) => {
     const frame = browsersRef.current.find(
       (item) => item.id === tabId || item.activeTabId === tabId || item.tabs.some((tab) => tab.id === tabId)
@@ -3614,7 +3841,7 @@ export function App() {
     })
     const offInspect = window.vanta.onInspect(setInspect)
     const offSnapshot = window.vanta.onSnapshot((event) => {
-      if ('tree' in event) pasteSnapshotRef.current(event.tabId, event.tree)
+      if ('tree' in event) { pasteSnapshotRef.current(event.tabId, event.tree); void window.vanta.setSnapshot(null) }
       else if ('error' in event) window.alert(event.error)
       setSnapshotBrowserId(null)
     })
@@ -3622,6 +3849,7 @@ export function App() {
       if (designSavesInFlight > 0) return
       const nodes = reuseUnchangedNodes(designRef.current, incoming)
       if (nodes === designRef.current) return
+      pushDesignHistory(designRef.current)
       designRef.current = nodes
       setDesign(nodes)
       const fileId = activeFileIdRef.current
@@ -3678,7 +3906,7 @@ export function App() {
           current.map((chat) => {
             if (chat.id !== activeChatIdRef.current) return chat
             const last = chat.messages[chat.messages.length - 1]
-            if (last?.role === 'assistant') {
+            if (last?.role === 'assistant' && !last.jevId) {
               return {
                 ...chat,
                 messages: [...chat.messages.slice(0, -1), { role: 'assistant', text: last.text + event.text }]
@@ -4490,6 +4718,7 @@ export function App() {
   }
 
   const chooseTool = (next: DesignTool) => {
+    if (next === 'pen' || next === 'pencil' || next === 'brush') setStrokeColor(instrumentColors[next])
     exitCreateSvg()
     if (toolRef.current === 'pen' && next !== 'pen') finishPen()
     setTool(next)
@@ -4703,6 +4932,8 @@ export function App() {
           }
       persistDesign([...designRef.current, attachToParent(node, designRef.current)])
       setDesignSelectedIds([node.id])
+      setTool('pointer')
+      toolRef.current = 'pointer'
       return
     }
     if (gesture.kind === 'browser') {
@@ -4905,7 +5136,7 @@ export function App() {
       currentTool === 'shape' ? shapeRef.current : currentTool === 'section' ? 'section' : 'frame'
     const count = designRef.current.filter((node) => node.type === type).length + 1
     const name =
-      type === 'frame' ? 'New frame name' : type === 'section' ? `Section ${count}` : `${type[0].toUpperCase()}${type.slice(1)} ${count}`
+      type === 'frame' ? 'Frame' : type === 'section' ? `Section ${count}` : `${type[0].toUpperCase()}${type.slice(1)} ${count}`
     drawRef.current = { id, kind: 'box', type, startX: point.x, startY: point.y }
     setDraft({
       id,
@@ -4916,12 +5147,12 @@ export function App() {
       height: 1,
       name,
       pageId: activePageRef.current,
-      fill: type === 'section' || type === 'frame' ? '#FFFFFF' : type === 'rect' ? '#DDDDDD' : '#D9D9D9',
+      fill: type === 'line' || type === 'arrow' ? undefined : type === 'section' || type === 'frame' ? '#FFFFFF' : type === 'rect' ? '#DDDDDD' : '#D9D9D9',
       fillOpacity: 1,
       opacity: 1,
       radius: type === 'section' ? 2 : 0,
-      stroke: type === 'section' ? '#000000' : undefined,
-      strokeWidth: type === 'section' ? 1 : undefined,
+      stroke: type === 'section' || type === 'line' || type === 'arrow' ? '#000000' : undefined,
+      strokeWidth: type === 'section' || type === 'line' || type === 'arrow' ? 1 : undefined,
       strokeOpacity: type === 'section' ? 0.1 : undefined,
       clipsContent: type === 'frame' ? true : undefined,
       points: type === 'line' || type === 'arrow' ? [point, point] : undefined
@@ -4937,7 +5168,7 @@ export function App() {
     point: PathPoint
   ) => {
     const stroke = strokeRef.current
-    const weight = pathTool === 'brush' ? stroke.brushWeight : pathTool === 'pencil' ? stroke.pencilWeight : 2
+    const weight = pathTool === 'brush' ? stroke.brushWeight : pathTool === 'pencil' ? stroke.pencilWeight : stroke.penWeight
     const style = pathTool === 'brush' ? stroke.brushStyle : pathTool === 'pencil' ? stroke.pencilStyle : 'basic'
     if (pathTool === 'pen' && draftRef.current?.pathTool === 'pen' && drawRef.current?.kind === 'pen') {
       const current = draftRef.current
@@ -4968,6 +5199,7 @@ export function App() {
       pageId: activePageRef.current,
       pathTool,
       brushStyle: style,
+      strokePaint: stroke.paint,
       stroke: stroke.color,
       strokeWidth: weight
     })
@@ -5022,6 +5254,213 @@ export function App() {
       )
       setAgentBusy(false)
     }
+  }
+
+  /** Structure / app actions requested from chat. Values come from the user's words. */
+  const runJevCommand = (id: CommandId, request: string): CommandResult | Promise<CommandResult> => {
+    const selectedNodes = designSelectedRef.current
+      .map((nodeId) => designRef.current.find((node) => node.id === nodeId))
+      .filter((node): node is DesignNode => Boolean(node))
+    const command = commandById(id)
+    const blocked = command ? commandRunnable(command, selectedNodes) : 'Unknown action.'
+    if (blocked) return { error: blocked }
+    const count = selectedNodes.length
+    const layers = `${count} layer${count === 1 ? '' : 's'}`
+    const quotedOr = (pattern: RegExp) => {
+      const quoted = request.match(/["“]([^"”]+)["”]/)?.[1]
+      return (quoted || request.match(pattern)?.[1] || '').trim().replace(/[.!?]+$/, '')
+    }
+    const align = (action: AlignAction, what: string) => {
+      alignSelection(action)
+      return { summary: `Aligned ${what} of ${layers}` }
+    }
+
+    if (id.startsWith('create_')) {
+      const canvas = canvasRef.current
+      const center = canvas
+        ? screenToWorld(cameraRef.current, canvas.clientWidth / 2, canvas.clientHeight / 2)
+        : { x: 120, y: 120 }
+      const host = selectedNodes.length === 1 && (selectedNodes[0].type === 'frame' || selectedNodes[0].type === 'section') ? selectedNodes[0] : null
+      const dims = extractDimensions(request)
+      const color = extractColor(request)
+      const defaults: Record<string, { w: number; h: number }> = {
+        create_rect: { w: 120, h: 120 },
+        create_ellipse: { w: 120, h: 120 },
+        create_frame: { w: 400, h: 300 },
+        create_star: { w: 120, h: 120 },
+        create_polygon: { w: 120, h: 120 },
+        create_text: { w: 80, h: 20 }
+      }
+      const size = defaults[id] || { w: 120, h: 120 }
+      const square = /\b(square|circle)\b/i.test(request)
+      const width = dims?.width ?? (square && dims?.height ? dims.height : size.w)
+      const height = dims?.height ?? (square ? width : size.h)
+      const at = host ? { x: 24, y: 24 } : { x: Math.round(center.x - width / 2), y: Math.round(center.y - height / 2) }
+      const base: DesignNode = {
+        id: crypto.randomUUID(),
+        type: 'rect',
+        x: at.x,
+        y: at.y,
+        width,
+        height,
+        pageId: activePageRef.current,
+        parentId: host?.id || null
+      }
+      let node: DesignNode
+      if (id === 'create_text') {
+        const words = quotedOr(/\b(?:saying|says|that says|reading|with the words|with)\s+(.+)$/i) || 'Text'
+        const fontSize = Number(request.match(/\b(?:size|font)\s*(\d+)/i)?.[1]) || 16
+        node = remeasureText({ ...base, type: 'text', text: words, name: words, fontSize, fontFamily: 'Inter', fontWeight: 400, fill: color || '#000000', textResize: 'auto-width' })
+      } else if (id === 'create_frame') {
+        node = { ...base, type: 'frame', name: 'Frame', fill: color || '#FFFFFF' }
+      } else if (id === 'create_ellipse') {
+        node = { ...base, type: 'ellipse', name: 'Ellipse', fill: color || '#D9D9D9' }
+      } else if (id === 'create_star') {
+        node = { ...base, type: 'star', name: 'Star', starCount: 5, starRatio: 0.382, fill: color || '#D9D9D9' }
+      } else if (id === 'create_polygon') {
+        const sides = /\bhexagon\b/i.test(request) ? 6 : /\bpentagon\b/i.test(request) ? 5 : /\boctagon\b/i.test(request) ? 8 : 3
+        node = { ...base, type: 'polygon', name: sides === 3 ? 'Triangle' : 'Polygon', polygonCount: sides, fill: color || '#D9D9D9' }
+      } else {
+        node = { ...base, type: 'rect', name: 'Rectangle', fill: color || '#D9D9D9' }
+      }
+      persistDesign([...designRef.current, node])
+      setDesignSelectedIds([node.id])
+      setSelectedId(null)
+      return { summary: `Added ${node.name}${host ? ` inside ${host.name || 'the frame'}` : ''}` }
+    }
+
+    switch (id) {
+      case 'duplicate':
+        duplicateSelected()
+        return { summary: `Duplicated ${layers}` }
+      case 'group':
+        frameSelected()
+        return { summary: `Grouped ${layers} in a frame` }
+      case 'wrap_flex':
+        wrapFlexSelected()
+        return { summary: `Wrapped ${layers} in auto layout` }
+      case 'ungroup':
+        ungroupSelected()
+        return { summary: `Ungrouped ${layers}` }
+      case 'bring_front':
+        moveSelectionZ('front')
+        return { summary: `Brought ${layers} to the front` }
+      case 'send_back':
+        moveSelectionZ('back')
+        return { summary: `Sent ${layers} to the back` }
+      case 'align_left':
+        return align('left', 'left edges')
+      case 'align_hcenter':
+        return align('hcenter', 'horizontal centers')
+      case 'align_right':
+        return align('right', 'right edges')
+      case 'align_top':
+        return align('top', 'top edges')
+      case 'align_vcenter':
+        return align('vcenter', 'vertical centers')
+      case 'align_bottom':
+        return align('bottom', 'bottom edges')
+      case 'undo':
+        undoDesign()
+        return { summary: 'Undid the last change' }
+      case 'redo':
+        redoDesign()
+        return { summary: 'Redid the change' }
+      case 'add_page': {
+        const name = quotedOr(/\b(?:called|named|titled)\s+(.+)$/i) || `Page ${pages.length + 1}`
+        const page = { id: crypto.randomUUID(), name, fill: '#EEEEEE', fillDark: '#2C2C2C' }
+        persistPages([...pages, page], page.id)
+        return { summary: `Added page “${name}”` }
+      }
+      case 'go_to_page': {
+        const lower = request.toLowerCase()
+        const byName = [...pages].sort((a, b) => b.name.length - a.name.length).find((page) => lower.includes(page.name.toLowerCase()))
+        const index = Number(lower.match(/\bpage\s+(\d+)\b/)?.[1])
+        const at = pages.findIndex((page) => page.id === activePageRef.current)
+        const page =
+          byName ||
+          (Number.isFinite(index) && index > 0 ? pages[index - 1] : undefined) ||
+          (/\bnext\b/.test(lower) ? pages[at + 1] : /\b(previous|prev|last)\b/.test(lower) ? pages[at - 1] : undefined)
+        if (!page) return { error: `I couldn’t find that page. Pages: ${pages.map((item) => item.name).join(', ')}.` }
+        persistPages(pages, page.id)
+        return { summary: `Switched to “${page.name}”` }
+      }
+      case 'rename_page': {
+        const name = quotedOr(/\b(?:to|as|called)\s+(.+)$/i)
+        if (!name) return { error: 'What should the page be called? Try “rename page to Home”.' }
+        persistPages(pages.map((page) => (page.id === activePageRef.current ? { ...page, name } : page)))
+        return { summary: `Renamed the page to “${name}”` }
+      }
+      case 'create_svg': {
+        if (!quiverConfigured) return { error: 'Create SVG needs a QuiverAI key. Open Create SVG and paste one first.' }
+        const prompt =
+          quotedOr(/\b(?:of|for|showing|that shows|with)\s+(.+)$/i) ||
+          request.replace(/^.*?\b(svg|vector|icon|illustration|logo)\b\s*/i, '').trim() ||
+          request
+        pendingCreateSvgJob.current = { kind: 'create', prompt }
+        setCreateSvgOpen(true)
+        return { summary: `Creating an SVG: ${prompt}` }
+      }
+      case 'remove_background':
+        pendingCreateSvgJob.current = { kind: 'remove-bg' }
+        setCreateSvgOpen(true)
+        return { summary: 'Removing the background…' }
+      case 'vectorize':
+        pendingCreateSvgJob.current = { kind: 'vectorize' }
+        setCreateSvgOpen(true)
+        return { summary: 'Vectorizing the image…' }
+      case 'export': {
+        const lower = request.toLowerCase()
+        const format: ExportFormat = /\bsvg\b/.test(lower) ? 'SVG' : /\bjpe?g\b/.test(lower) ? 'JPG' : /\bpdf\b/.test(lower) ? 'PDF' : 'PNG'
+        const scale = Number(lower.match(/@?(\d(?:\.\d+)?)\s*x\b/)?.[1]) || 1
+        const ids = new Set(selectedNodes.map((node) => node.id))
+        const roots = selectedNodes.filter((node) => !node.parentId || !ids.has(node.parentId))
+        return Promise.all(roots.map((node) => exportNodeSetting(node, { id: 'chat-export', format, scale }, designRef.current))).then(
+          () => ({ summary: `Exported ${roots.length} layer${roots.length === 1 ? '' : 's'} as ${format}${scale !== 1 ? ` @${scale}x` : ''}` })
+        )
+      }
+      case 'open_browser': {
+        const raw = request.match(/\b((?:https?:\/\/)?(?:www\.)?[\w-]+(?:\.[\w-]+)+(?:\/\S*)?)/i)?.[1]
+        if (!raw) return { error: 'Which website? Try “open stripe.com”.' }
+        const url = /^https?:\/\//i.test(raw) ? raw : `https://${raw}`
+        return addBrowser({ url }).then(() => ({ summary: `Opened ${url}` }))
+      }
+      default:
+        return { error: 'That action isn’t wired up yet.' }
+    }
+  }
+
+  /** Multi-step requests go to Claude with the current selection as context. */
+  const delegateToClaude = (request: string): CommandResult => {
+    if (!agentConfiguredRef.current) {
+      return { error: 'Claude needs an API key. Add ANTHROPIC_API_KEY to the project .env (get one at console.anthropic.com/settings/keys) and restart Scobe.' }
+    }
+    if (agentBusy) return { error: 'Claude is still working on the last request.' }
+    const selectedNodes = designSelectedRef.current
+      .map((nodeId) => designRef.current.find((node) => node.id === nodeId))
+      .filter((node): node is DesignNode => Boolean(node))
+    const context = selectedNodes.length
+      ? `\n\n[Canvas context] Selected layers: ${selectedNodes
+          .map((node) => `${node.id} (${node.type}${node.name ? ` “${node.name}”` : ''}, ${Math.round(node.width || 0)}×${Math.round(node.height || 0)})`)
+          .join('; ')}.`
+      : '\n\n[Canvas context] Nothing is selected.'
+    const chatId = activeChatIdRef.current || resolvedChatId
+    const nextHistory = [...(chatHistories.current.get(chatId) || historyRef.current), { role: 'user' as const, text: request + context }]
+    chatHistories.current.set(chatId, nextHistory)
+    historyRef.current = nextHistory
+    sendDesignToMain(designRef.current)
+    setAgentBusy(true)
+    void window.vanta.runAgent(nextHistory).catch((error) => {
+      setChats((current) =>
+        current.map((chat) =>
+          chat.id === chatId
+            ? { ...chat, messages: [...chat.messages, { role: 'system', text: error instanceof Error ? error.message : String(error) }] }
+            : chat
+        )
+      )
+      setAgentBusy(false)
+    })
+    return { summary: 'Claude is building this. Its steps show below.' }
   }
 
   const selectChat = (id: string) => {
@@ -5224,6 +5663,20 @@ export function App() {
             setInspectOn(false)
             setBrowserMeasureId(null)
             setSnapshotBrowserId((current) => (current === selected.id ? null : selected.id))
+          },
+          onCapturePage: () => {
+            const tabId = selected.activeTabId || selected.tabs[0]?.id
+            if (!tabId) return
+            if (typeof window.vanta.snapshotPage !== 'function') {
+              window.alert('Capture page needs a restart. Quit and reopen Scobe, then try again.')
+              return
+            }
+            selectBrowsers([selected.id])
+            setDesignSelectedIds([])
+            setInspectOn(false)
+            setBrowserMeasureId(null)
+            setSnapshotBrowserId(selected.id)
+            void window.vanta.snapshotPage(tabId).catch(() => setSnapshotBrowserId(null))
           }
         },
         dock: selectedTab
@@ -5504,7 +5957,11 @@ export function App() {
             ref={canvasRef}
             className={`canvas${panning ? ' is-panning' : ''}${tool === 'hand' || handMode || spaceHeld ? ' is-hand' : ''}${deepSelectHeld ? ' is-deep-select' : ''}${['frame', 'section', 'browser', 'shape', 'pen', 'pencil', 'brush', 'text', 'text-on-path', 'comment', 'widget'].includes(tool) ? ' is-design' : ''}${pathHoverId && (tool === 'text' || tool === 'text-on-path') ? ' is-text-path' : ''}${jev.picking ? ' is-jev-point' : ''}`}
             data-tool={tool}
-            style={{ background: canvasFill }}
+            style={activePage.fillHidden ? {
+              backgroundColor: theme === 'dark' ? '#252525' : '#ffffff',
+              backgroundImage: theme === 'dark' ? 'repeating-conic-gradient(#303030 0% 25%, transparent 0% 50%)' : 'repeating-conic-gradient(#ededed 0% 25%, transparent 0% 50%)',
+              backgroundSize: '12px 12px'
+            } : { background: canvasFill }}
             onContextMenu={(event) => {
               if (view !== 'canvas') return
               const target = event.target as HTMLElement
@@ -5631,6 +6088,7 @@ export function App() {
                 setActiveCommentId(null)
                 setCommentDraftText('')
               }
+              if (pointerEndedTextEdit(event.nativeEvent)) return
               if (!event.shiftKey) {
                 setDesignSelectedIds([])
                 selectBrowsers([])
@@ -6502,6 +6960,11 @@ export function App() {
                           patched = { ...node, x: rel.x, y: rel.y, width: rect.width, height: rect.height }
                         }
                       }
+                      // A manual text-box resize must stop Fit sizing from replacing the dragged bounds.
+                      if (patched.type === 'text') {
+                        const horizontalOnly = Math.abs((rect.height || 0)-(node.height || 0)) < .5 && Math.abs((rect.width || 0)-(node.width || 0)) > .01
+                        patched = remeasureText({ ...patched, textResize: next.textResize || (horizontalOnly ? 'auto-height' : 'fixed'), layoutSizingH: 'fixed', layoutSizingV: 'fixed' })
+                      }
                       if (patched.layout && patched.layout.mode !== 'none') {
                         const sizingH =
                           Math.abs((patched.width || 0) - (node.width || 0)) > 0.4 || Math.abs(patched.x - node.x) > 0.4
@@ -6846,6 +7309,7 @@ export function App() {
                   busy={agentBusy}
                   poppedOut={chatPoppedOut}
                   onPopOut={popOutAgentsPanel}
+                  jev={jevThread}
                 />
               </div>
             )}
@@ -7064,11 +7528,14 @@ export function App() {
               />
             )}
             <CanvasToolbar
+              onUndo={undoDesign} onRedo={redoDesign}
+              canUndo={designUndoPastRef.current.length > 0 && !isDesignGenerationBusy()}
+              canRedo={designUndoFutureRef.current.length > 0 && !isDesignGenerationBusy()}
               tool={tool}
               shape={shapeKind}
               mode={switchMode}
-              strokeColor={selectedInk?.stroke || strokeColor}
-              strokeWeight={selectedInk?.strokeWidth || (tool === 'brush' ? brushWeight : pencilWeight)}
+              strokeColor={tool === 'pen' || tool === 'pencil' || tool === 'brush' ? instrumentColors[tool] : selectedInk?.stroke || strokeColor}
+              strokeWeight={selectedInk?.strokeWidth || (tool === 'brush' ? brushWeight : tool === 'pen' ? penWeight : pencilWeight)}
               brushStyle={selectedInk?.brushStyle || (tool === 'brush' ? brushStyle : pencilStyle)}
               composerValue={chatInput}
               composerBusy={agentBusy}
@@ -7079,12 +7546,25 @@ export function App() {
                 chooseTool('shape')
               }}
               onMode={chooseMode}
+              drawingPaint={tool === 'pen' || tool === 'pencil' || tool === 'brush' ? instrumentPaints[tool] : undefined}
+              onDrawingPaint={(paint) => {
+                const active = toolRef.current
+                if (active !== 'pen' && active !== 'pencil' && active !== 'brush') return
+                setInstrumentPaints(previous => ({ ...previous, [active]: paint }))
+                const color = paint.type === 'solid' ? paint.color : paint.type === 'gradient' ? paint.stops[0]?.color : undefined
+                if (color) { setStrokeColor(color); setInstrumentColors(previous => ({ ...previous, [active]: color })) }
+                patchSelectedInk({ strokePaint: paint, ...(color ? { stroke: color } : {}) })
+              }}
+              instrumentColors={instrumentColors}
               onStrokeColor={(color) => {
+                const active = toolRef.current
+                if (active === 'pen' || active === 'pencil' || active === 'brush') setInstrumentColors(previous => ({ ...previous, [active]: color }))
                 setStrokeColor(color)
                 patchSelectedInk({ stroke: color })
               }}
               onStrokeWeight={(weight) => {
                 if (tool === 'brush') setBrushWeight(weight)
+                else if (tool === 'pen') setPenWeight(weight)
                 else setPencilWeight(weight)
                 patchSelectedInk({ strokeWidth: weight })
               }}
@@ -7168,6 +7648,7 @@ export function App() {
         onInput={setChatInput}
         onSend={() => void sendChat()}
         onClose={() => setChatPoppedOut(false)}
+        jev={jevThread}
         jevComposer={jevComposer}
         composerExtra={createSvgPanel}
       />

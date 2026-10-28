@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type FormEvent, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from 'react'
+import { useEffect, useId, useRef, useState, type FormEvent, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from 'react'
 import { AnimatePresence, motion, useDragControls, useReducedMotion } from 'motion/react'
 import { ArrowUpwardIcon, CloseRoundedIcon, KeyboardOutlinedIcon, MicNoneOutlinedIcon, NearMeIcon, OpenInNewIcon, TagOutlinedIcon } from './lucideIcons'
 import { normalizeUrl } from '../shared/url'
@@ -8,7 +8,13 @@ import { JevDecisionCard } from './JevViews'
 import type { JevDecision } from './jevEngine'
 import type { VoiceState } from './useVoiceCapture'
 
-export type ChatMessage = { role: 'user' | 'assistant' | 'system'; text: string; jev?: JevDecision }
+export type ChatMessage = {
+  role: 'user' | 'assistant' | 'system'
+  text: string
+  jev?: JevDecision
+  /** Canvas change made from chat; the live decision is looked up by this id. */
+  jevId?: string
+}
 
 export type JevThreadHandlers = {
   onUndo: (decisionId: string) => void
@@ -38,6 +44,8 @@ export type JevComposerProps = {
   onToggleLock?: () => void
   onClearTarget?: () => void
   onSaveKey?: (key: string) => void
+  /** Changes when the draft should be emptied (e.g. the user edited the canvas by hand). */
+  clearTick?: number
 }
 
 export type ChatSession = {
@@ -48,6 +56,43 @@ export type ChatSession = {
 
 export function createChatSession(title = 'New chat'): ChatSession {
   return { id: crypto.randomUUID(), title, messages: [] }
+}
+
+function ChatChangeRow({
+  decision,
+  fallback,
+  onUndo
+}: {
+  decision?: JevDecision
+  fallback: string
+  onUndo?: () => void
+}) {
+  const status = decision?.status || 'applied'
+  const text =
+    status === 'deciding' || status === 'needs-choice'
+      ? 'Working…'
+      : status === 'error'
+        ? decision?.error || 'Couldn’t apply that.'
+        : status === 'noop'
+          ? 'Nothing to change.'
+          : decision?.result || fallback || 'Done.'
+  return (
+    <div className="chat-bubble-row assistant">
+      <div className={`chat-bubble assistant chat-change is-${status}`}>
+        <div className="chat-bubble-label">
+          Scobe
+          {status === 'undone' ? <span className="chat-change-tag">Undone</span> : null}
+          {status === 'error' ? <span className="chat-change-tag">Not applied</span> : null}
+        </div>
+        <div className={`chat-bubble-text${status === 'deciding' || status === 'needs-choice' ? ' muted' : ''}`}>{text}</div>
+        {status === 'applied' && onUndo ? (
+          <button type="button" className="chat-change-undo" onClick={onUndo}>
+            Undo
+          </button>
+        ) : null}
+      </div>
+    </div>
+  )
 }
 
 function ChatThread({
@@ -83,6 +128,16 @@ function ChatThread({
     <div className={`chat-thread${className ? ` ${className}` : ''}`} ref={logRef}>
       <div className="chat-thread-inner">
         {messages.map((item, index) => {
+          if (item.jevId) {
+            return (
+              <ChatChangeRow
+                key={item.jevId}
+                decision={item.jev}
+                fallback={item.text}
+                onUndo={jev && item.jev ? () => jev.onUndo(item.jevId!) : undefined}
+              />
+            )
+          }
           if (item.jev) {
             const decision = item.jev
             jevCount += 1
@@ -278,6 +333,62 @@ export function ChatAgentsPopout({
   )
 }
 
+const MODE_SPRING = { type: 'spring', stiffness: 520, damping: 38, mass: 0.7 } as const
+
+/** Typing / Microphone switch. The white pill slides between the two options. */
+export function InputModeToggle({
+  micOn,
+  onMic,
+  disabled = false
+}: {
+  micOn: boolean
+  onMic?: () => void
+  disabled?: boolean
+}) {
+  const reduceMotion = useReducedMotion()
+  const pillId = useId()
+  const transition = reduceMotion ? { duration: 0 } : MODE_SPRING
+  const options = [
+    { key: 'typing', label: 'Typing', on: !micOn, Icon: KeyboardOutlinedIcon },
+    { key: 'mic', label: 'Microphone', on: micOn, Icon: MicNoneOutlinedIcon }
+  ] as const
+
+  return (
+    <div className="cursor-composer-mode" role="group" aria-label="Input mode">
+      {options.map(({ key, label, on, Icon }) => (
+        <button
+          key={key}
+          type="button"
+          className={on ? 'is-on' : ''}
+          title={label}
+          aria-pressed={on}
+          disabled={disabled}
+          onClick={() => {
+            if (!on) onMic?.()
+          }}
+        >
+          {on ? (
+            <motion.span
+              layoutId={`input-mode-pill-${pillId}`}
+              className="cursor-composer-mode-pill"
+              transition={transition}
+              aria-hidden
+            />
+          ) : null}
+          <motion.span
+            className="cursor-composer-mode-icon"
+            animate={on && !reduceMotion ? { scale: [1, 1.18, 1] } : { scale: 1 }}
+            transition={{ duration: 0.32, ease: 'easeOut' }}
+          >
+            <Icon sx={{ fontSize: 15 }} />
+          </motion.span>
+          <span className="cursor-composer-mode-label">{label}</span>
+        </button>
+      ))}
+    </div>
+  )
+}
+
 export function ChatComposer({
   value,
   onChange,
@@ -303,15 +414,26 @@ export function ChatComposer({
   const text = draft
   const hasText = text.trim().length > 0
   const canSend = hasText
+  const micOn = Boolean(jev?.micOn)
 
   useEffect(() => {
     setDraft(value)
-  }, [value])
+    if (!micOn) return
+    const el = areaRef.current
+    if (!el) return
+    const end = value.length
+    requestAnimationFrame(() => el.setSelectionRange(end, end))
+  }, [value, micOn])
 
   useEffect(() => {
     if (!jev) return
     if (!jev.on) jev.onToggle(true)
   }, [jev])
+
+  const clearTick = jev?.clearTick ?? 0
+  useEffect(() => {
+    if (clearTick) setDraft('')
+  }, [clearTick])
 
   useEffect(() => {
     const el = areaRef.current
@@ -351,11 +473,9 @@ export function ChatComposer({
 
   const [keyDraft, setKeyDraft] = useState('')
   const voiceState = jev?.voiceState || 'off'
-  const micOn = Boolean(jev?.micOn)
   const hearing = voiceState === 'hearing'
-  const hint =
-    placeholder ||
-    (micOn ? 'Speak a change. Pause to apply…' : 'Send follow-up')
+  const voiceError = jev?.voiceError || (micOn && jev?.model?.state === 'error' ? jev.model.error || null : null)
+  const hint = placeholder || (micOn ? 'Start talking…' : 'Send follow-up')
 
   if (jev && jev.configured === false) {
     return (
@@ -417,6 +537,11 @@ export function ChatComposer({
           </div>
         </div>
       ) : null}
+      {voiceError ? (
+        <div className="cursor-composer-voice is-error" role="alert">
+          {voiceError}
+        </div>
+      ) : null}
       <textarea
         ref={areaRef}
         className="cursor-composer-input"
@@ -440,34 +565,7 @@ export function ChatComposer({
           >
             <NearMeIcon sx={{ fontSize: 17 }} />
           </button>
-          {jev ? (
-            <div className="cursor-composer-mode" role="group" aria-label="Input mode">
-              <button
-                type="button"
-                className={!micOn ? 'is-on' : ''}
-                title="Typing"
-                aria-pressed={!micOn}
-                onClick={() => {
-                  if (micOn) jev.onMic()
-                }}
-              >
-                <KeyboardOutlinedIcon sx={{ fontSize: 15 }} />
-                <span>Typing</span>
-              </button>
-              <button
-                type="button"
-                className={micOn ? 'is-on' : ''}
-                title="Microphone"
-                aria-pressed={micOn}
-                onClick={() => {
-                  if (!micOn) jev.onMic()
-                }}
-              >
-                <MicNoneOutlinedIcon sx={{ fontSize: 15 }} />
-                <span>Microphone</span>
-              </button>
-            </div>
-          ) : null}
+          {jev ? <InputModeToggle micOn={micOn} onMic={jev.onMic} /> : null}
         </div>
         <div className="cursor-composer-right">
           <button type="submit" className={`cursor-send${canSend ? ' is-ready' : ''}`} title="Send" disabled={!canSend}>

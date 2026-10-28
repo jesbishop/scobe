@@ -103,7 +103,6 @@ export function ShaderEditor({
   const selects = controls.filter((control): control is SelectControl => control.kind === 'select')
   const sliders = controls.filter((control): control is SliderControl => control.kind === 'slider')
   const mainSliders = sliders.filter((control) => !SIZING_KEYS.has(control.key))
-  const sizing = new Map(sliders.filter((control) => SIZING_KEYS.has(control.key)).map((control) => [control.key, control]))
   const shapeControl = selects.find((control) => control.key === 'shape')
   const otherSelects = selects.filter((control) => control !== shapeControl)
   const label = SHADER_OPTIONS.find((option) => option.id === paint.shader)?.label || 'Shader'
@@ -204,25 +203,19 @@ export function ShaderEditor({
     )
   }
 
-  const sizingField = (key: string, prefix: string) => {
-    const control = sizing.get(key)
-    if (!control) return null
-    const factor = unitFactor(control)
-    const step = (control.step ?? 0.01) * factor
-    const value = paint.params[key] ?? (key === 'scale' ? 1 : 0)
-    return (
-      <PrefixField
-        prefix={prefix}
-        title={control.label}
-        value={Math.round(value * factor * 100) / 100}
-        suffix={control.unit || ''}
-        min={control.min * factor}
-        max={control.max * factor}
-        step={step < 1 ? 1 : step}
-        onCommit={(next) => setParam(key, next / factor)}
-      />
-    )
-  }
+  const round2 = (value: number) => Math.round(value * 100) / 100
+  const offsetField = (key: 'offsetX' | 'offsetY', prefix: string) => (
+    <PrefixField
+      prefix={prefix}
+      title={key === 'offsetX' ? 'Horizontal position' : 'Vertical position'}
+      value={round2(50 + (paint.params[key] ?? 0) * 100)}
+      suffix="%"
+      min={-150}
+      max={250}
+      step={1}
+      onCommit={(next) => setParam(key, (next - 50) / 100)}
+    />
+  )
 
   const shapeSelect = shapeControl && (
     <Row label={shapeControl.label}>
@@ -409,18 +402,34 @@ export function ShaderEditor({
         )}
         {mainSliders.map(sliderRow)}
 
-        {sizing.size > 0 && (
-          <>
-            <Row label="Transform">
-              {sizingField('offsetX', 'X')}
-              {sizingField('offsetY', 'Y')}
-            </Row>
-            <Row label="">
-              {sizingField('scale', 'S')}
-              {sizingField('rotation', 'R')}
-            </Row>
-          </>
-        )}
+        <Row label="Transform">
+          {offsetField('offsetX', 'X')}
+          {offsetField('offsetY', 'Y')}
+        </Row>
+        <Row label="">
+          <PrefixField
+            prefix="R"
+            title="Size"
+            value={round2((paint.params.scale ?? 1) * 100)}
+            suffix="%"
+            min={1}
+            max={400}
+            step={1}
+            onCommit={(next) => setParam('scale', next / 100)}
+          />
+        </Row>
+        <Row label="">
+          <PrefixField
+            prefix="A"
+            title="Angle"
+            value={round2(paint.params.rotation ?? 0)}
+            suffix="°"
+            min={0}
+            max={360}
+            step={1}
+            onCommit={(next) => setParam('rotation', ((next % 360) + 360) % 360)}
+          />
+        </Row>
       </div>
 
       <ShaderFillsPopup

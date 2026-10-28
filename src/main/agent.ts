@@ -1,7 +1,39 @@
+import { existsSync, readFileSync, writeFileSync } from 'node:fs'
+import { join } from 'node:path'
 import Anthropic from '@anthropic-ai/sdk'
 import type { MessageParam, Tool, ToolResultBlockParam } from '@anthropic-ai/sdk/resources/messages'
+import { app } from 'electron'
 import type { AgentEvent } from '../shared/types'
 import { runCanvasTool, type CanvasToolContext } from './canvasTools'
+import { DESIGN_GUIDE } from '../shared/designGuide'
+
+const MODEL = 'claude-sonnet-4-5'
+
+function keyFile(): string {
+  return join(app.getPath('userData'), 'anthropic.json')
+}
+
+function storedKey(): string | null {
+  try {
+    if (!existsSync(keyFile())) return null
+    return (JSON.parse(readFileSync(keyFile(), 'utf8')) as { key?: string }).key?.trim() || null
+  } catch {
+    return null
+  }
+}
+
+function resolveKey(): string | null {
+  return process.env.ANTHROPIC_API_KEY?.trim() || storedKey()
+}
+
+export function agentStatus(): { configured: boolean } {
+  return { configured: Boolean(resolveKey()) }
+}
+
+export function setAgentKey(key: string): { configured: boolean } {
+  writeFileSync(keyFile(), JSON.stringify({ key: key.trim() }), 'utf8')
+  return agentStatus()
+}
 
 const TOOLS: Tool[] = [
   {
@@ -213,6 +245,24 @@ const TOOLS: Tool[] = [
     }
   },
   {
+    name: 'get_tokens',
+    description:
+      'Design tokens from the Tokens panel plus the colors, fonts, sizes, radii and spacing this file already uses most. Call before designing and reuse them.',
+    input_schema: { type: 'object', properties: {} }
+  },
+  {
+    name: 'render_node',
+    description:
+      'Render a design layer (usually the top-level frame you built) to an image so you can see it. Review it against the design guide checklist, fix issues, and render again. Omit id to render the newest top-level frame.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        id: { type: 'string', description: 'Layer id; omit for the newest top-level frame' },
+        maxEdge: { type: 'number', description: 'Longest image edge in px (default 1568)' }
+      }
+    }
+  },
+  {
     name: 'snapshot_to_canvas',
     description: 'Alias of snapshot_browser_to_frame — Scobe Snapshot layered paste onto the canvas.',
     input_schema: {
@@ -231,7 +281,7 @@ const TOOLS: Tool[] = [
   }
 ]
 
-const SYSTEM = `You operate Scobe, an infinite canvas of real website browsers plus a Paper-like design layer.
+const SYSTEM_BASE = `You operate Scobe, an infinite canvas of real website browsers plus a Paper-like design layer.
 
 Browsers: open, list, and navigate URLs. Do not click or type inside pages — there is no computer-use / screenshot click loop.
 
@@ -241,19 +291,42 @@ Design: build UI on the canvas with frames, auto-layout, shapes, and text — li
 - list_design returns parentId, layout, and world bounds.
 - Use snapshot_browser_to_frame / snapshot_to_canvas to bring a live page region into the canvas via Scobe Snapshot (editable layers). Do not flat-screenshot for “snapshot” requests.
 - Design objects sit behind browsers and never replace a live page.
-- Do not close, move, or resize browsers unless the user asks.`
+- Do not close, move, or resize browsers unless the user asks.
+- The user's message may end with a [Canvas context] block listing the selected layers. "This", "it", and "these" mean those layers. Edit them in place with update_design instead of rebuilding them.
+- Start with list_design when you need to see what exists, and get_tokens before designing anything new. Build big things in passes: container frame first, then sections, then content.
+- When you build or restyle a design, finish with render_node on its top-level frame, check the image against the review checklist below, fix what fails, and render again. One review pass at minimum; stop after three.
+- Small single-property edits (one color, one size) don't need a render.
+- Work quickly and silently; after the last tool call, reply with one or two plain sentences saying what you built or changed.`
+
+const SYSTEM_FIELDS = `update_design accepts any of these layer fields in "patch" (omit what you don't change):
+- Geometry: x, y, width, height, rotation (deg), flipX, flipY, aspectLocked, radius, cornerRadii {tl,tr,br,bl}.
+- Fill: fill (hex), fillOpacity (0-1), fills [{type:"solid",color,opacity} | {type:"gradient",gradientKind:"linear"|"radial"|"angular"|"diamond",angle,opacity,stops:[{id,position 0-1,color,opacity}]}].
+- Stroke: stroke (hex), strokeWidth, strokeAlign "inside"|"center"|"outside", strokeDash, strokeGap, strokeCap "none"|"round"|"square", strokeJoin "miter"|"round"|"bevel".
+- Effects: effects [{id,type:"DROP_SHADOW"|"INNER_SHADOW"|"LAYER_BLUR"|"BACKGROUND_BLUR",visible:true,color,opacity 0-1,offsetX,offsetY,radius,spread}].
+- Appearance: opacity (0-1), blendMode (e.g. "Multiply"), visible, locked, name.
+- Text: text, fontFamily (any Google Font), fontSize, fontWeight (100-900), fontStyle "normal"|"italic", fill (text color), lineHeight (px, 0 = auto), letterSpacing + letterSpacingUnit "percent"|"px", textAlign "left"|"center"|"right"|"justify", textAlignVertical "top"|"middle"|"bottom", textDecoration "none"|"underline"|"line-through", textCase "none"|"upper"|"lower"|"title"|"small-caps", textResize "auto-width"|"auto-height"|"fixed", listStyle "none"|"ordered"|"unordered", paragraphSpacing, maxLines, textTruncation.
+- Auto layout on frames: layout {mode:"none"|"horizontal"|"vertical", gap (number or "auto"), padding (number or {t,r,b,l}), alignItems "start"|"center"|"end"|"stretch", justifyContent "start"|"center"|"end"|"space-between", wrap, sizingH/sizingV "fixed"|"hug"}.
+- Children of auto layout: layoutSizingH/layoutSizingV "fixed"|"fill", layoutAbsolute.
+- Constraints: constraintH "left"|"right"|"left-right"|"center"|"scale", constraintV "top"|"bottom"|"top-bottom"|"center"|"scale". Frames: clipsContent.`
+
+const SYSTEM = `${SYSTEM_BASE}
+
+${SYSTEM_FIELDS}
+
+${DESIGN_GUIDE}`
 
 export async function runAgent(
   messages: Array<{ role: 'user' | 'assistant'; text: string }>,
   emit: (event: AgentEvent) => void,
   openBrowser: (url: string) => Promise<string>,
-  resolveBrowserGeometry?: CanvasToolContext['resolveBrowserGeometry']
+  resolveBrowserGeometry?: CanvasToolContext['resolveBrowserGeometry'],
+  canvas?: Pick<CanvasToolContext, 'renderNode' | 'getTokens'>
 ): Promise<void> {
-  const apiKey = process.env.ANTHROPIC_API_KEY
+  const apiKey = resolveKey()
   if (!apiKey) {
     emit({
       type: 'error',
-      message: 'Set ANTHROPIC_API_KEY in a .env file next to the project, then restart Scobe.'
+      message: 'Claude needs an API key. Get one at console.anthropic.com/settings/keys, add ANTHROPIC_API_KEY to the project .env, and restart Scobe.'
     })
     return
   }
@@ -262,12 +335,12 @@ export async function runAgent(
     role: message.role,
     content: message.text
   }))
-  const ctx: CanvasToolContext = { openBrowser, resolveBrowserGeometry }
+  const ctx: CanvasToolContext = { openBrowser, resolveBrowserGeometry, ...canvas }
 
-  for (let step = 0; step < 16; step++) {
+  for (let step = 0; step < 40; step++) {
     const response = await client.messages.create({
-      model: 'claude-sonnet-4-5',
-      max_tokens: 2000,
+      model: MODEL,
+      max_tokens: 8000,
       system: SYSTEM,
       tools: TOOLS,
       messages: thread
@@ -327,6 +400,8 @@ function summarize(name: string, input: unknown): string {
     return String(data.id || data.ids || name)
   }
   if (name === 'move_design') return `${data.id} → ${data.x},${data.y}`
+  if (name === 'render_node') return 'Looking at the result'
+  if (name === 'get_tokens') return 'Reading the file’s colors, type and spacing'
   if (name === 'resize_design') return `${data.id} ${data.width}×${data.height}`
   if (name === 'snapshot_browser_to_frame' || name === 'snapshot_to_canvas') {
     return String(data.browserId || data.selector || '')

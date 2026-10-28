@@ -1,6 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { DesignNode } from '../shared/types'
-import type { JevAnswers } from '../shared/jev'
+import type { JevAnswers, JevQuestions } from '../shared/jev'
+import { capabilityById, choiceQuestion, resolveValue, type LastEdit } from './jevCapabilities'
+import { commandById, type CommandId } from './jevCommands'
+
+export type CommandResult = { summary: string } | { error: string }
 import {
   ACTION_LABELS,
   applyPlan,
@@ -30,6 +34,29 @@ type Ready = { request: string; ctx: JevContext; answers: JevAnswers; meta: Meta
 
 function cloneNodes(nodes: DesignNode[]): DesignNode[] {
   return structuredClone(nodes)
+}
+
+/** Ask Jev one small follow-up when a property's option (e.g. which blend mode) isn't in the words. */
+async function fillPropertyChoices(plan: JevPlan, request: string, state: string): Promise<JevPlan> {
+  if (plan.edit !== 'property' || !plan.properties?.length || !plan.target) return plan
+  const questions: JevQuestions = {}
+  for (const edit of plan.properties) {
+    const cap = capabilityById(edit.id)
+    if (!cap || edit.value !== undefined) continue
+    const resolved = resolveValue(cap, request, plan.target.node)
+    if (resolved.ok || !resolved.needsChoice) continue
+    const question = choiceQuestion(cap)
+    if (question) questions[cap.id] = question
+  }
+  if (!Object.keys(questions).length) return plan
+  const res = await window.vanta.jevAsk(state, questions)
+  return {
+    ...plan,
+    properties: plan.properties.map((edit) => {
+      const answer = res.answers[edit.id]
+      return answer?.type === 'choice' ? { ...edit, value: answer.choice } : edit
+    })
+  }
 }
 
 function decidingSteps(ctx: JevContext): JevStep[] {
@@ -111,11 +138,22 @@ function plannedSteps(
 export function useJev({
   getCanvas,
   persist,
-  onOpenSidebar
+  onOpenSidebar,
+  onRequest,
+  runCommand,
+  delegate,
+  canDelegate
 }: {
   getCanvas: () => JevCanvas
   persist: (nodes: DesignNode[]) => void
   onOpenSidebar?: () => void
+  /** A sent request became a decision; used to log it in chat history. */
+  onRequest?: (decisionId: string, request: string) => void
+  /** Structure / app actions that only App can perform. */
+  runCommand?: (id: CommandId, request: string) => CommandResult | Promise<CommandResult>
+  /** Hand a multi-step request to Claude. */
+  delegate?: (request: string) => CommandResult
+  canDelegate?: () => boolean
 }) {
   const [on, setOnState] = useState(true)
   const [picking, setPickingState] = useState(false)
@@ -125,6 +163,7 @@ export function useJev({
   const [decisions, setDecisions] = useState<JevDecision[]>([])
   const [liveId, setLiveId] = useState<string | null>(null)
   const lastTargetId = useRef<string | null>(null)
+  const lastEditRef = useRef<LastEdit | null>(null)
   const pointerRef = useRef<string | null>(null)
   const lockedRef = useRef(false)
   const snapshots = useRef(new Map<string, DesignNode[]>())
@@ -138,8 +177,8 @@ export function useJev({
   const applyQueue = useRef<Promise<void>>(Promise.resolve())
   const applying = useRef(false)
   const setDraftRef = useRef<(text: string) => void>(() => undefined)
-  const deps = useRef({ getCanvas, persist, onOpenSidebar })
-  deps.current = { getCanvas, persist, onOpenSidebar }
+  const deps = useRef({ getCanvas, persist, onOpenSidebar, onRequest, runCommand, delegate, canDelegate })
+  deps.current = { getCanvas, persist, onOpenSidebar, onRequest, runCommand, delegate, canDelegate }
 
   useEffect(() => {
     void window.vanta.jevStatus().then((status) => setConfigured(status.configured))
@@ -168,7 +207,8 @@ export function useJev({
       ...snap,
       nodes: cloneNodes(baseline.current!),
       pointerId: pointerRef.current,
-      lastTargetId: lastTargetId.current
+      lastTargetId: lastTargetId.current,
+      lastEdit: lastEditRef.current || undefined
     }
   }
 
@@ -199,6 +239,50 @@ export function useJev({
       // Prefer live pointer as the plan target for edits.
       if ((plan.action === 'edit' || plan.action === 'remove') && liveCtx.pointer) {
         plan = { ...plan, target: liveCtx.pointer }
+      }
+      if (plan.action === 'delegate' && !deps.current.canDelegate?.()) {
+        plan = { ...plan, action: plan.fallbackAction && plan.fallbackAction !== 'delegate' ? plan.fallbackAction : 'none' }
+      }
+
+      if (plan.action === 'command' || plan.action === 'delegate') {
+        // Actions run once on send — never while the words are still coming in.
+        if (baseline.current) deps.current.persist(cloneNodes(baseline.current))
+        const label =
+          plan.action === 'command' ? commandById(plan.command || '')?.label || 'Action' : 'Claude builds this'
+        const actionSteps = (title: string, detail: string, state: JevStep['state']): JevStep[] => [
+          { key: 'read', label: 'Read request', tag: 'Mode', title: 'Design instruction', state: 'done' },
+          { key: 'decide', label: 'Choose action', tag: 'Jev', title: ACTION_LABELS[plan.action], detail: label, state: 'done' },
+          { key: 'apply', label: mode === 'preview' ? 'Ready' : 'Run', tag: mode === 'preview' ? 'Send' : 'Run', title, detail, state }
+        ]
+        if (mode === 'preview') {
+          patch(id, (d) => ({
+            ...d,
+            status: 'deciding',
+            meta: meta || d.meta,
+            result: label,
+            steps: actionSteps(label, 'Runs when you send.', 'pending')
+          }))
+          return { ok: true, summary: label }
+        }
+        snapshots.current.set(id, cloneNodes(deps.current.getCanvas().nodes))
+        baseline.current = null
+        ready.current = null
+        const finish = (res: CommandResult) =>
+          patch(id, (d) =>
+            'error' in res
+              ? { ...d, status: 'error', error: res.error, steps: actionSteps(label, res.error, 'done') }
+              : { ...d, status: 'applied', error: undefined, result: res.summary, steps: actionSteps(res.summary, '', 'done') }
+          )
+        try {
+          const run =
+            plan.action === 'command'
+              ? deps.current.runCommand?.(plan.command!, request) ?? { error: 'That action isn’t available here.' }
+              : deps.current.delegate?.(request) ?? { error: 'Claude isn’t set up.' }
+          void Promise.resolve(run).then(finish, (error) => finish({ error: error instanceof Error ? error.message : String(error) }))
+        } catch (error) {
+          finish({ error: error instanceof Error ? error.message : String(error) })
+        }
+        return { ok: true, summary: label }
       }
 
       if (plan.action === 'none') {
@@ -259,6 +343,13 @@ export function useJev({
       snapshots.current.set(id, cloneNodes(baseline.current || canvas.nodes))
       baseline.current = null
       ready.current = null
+      if (plan.edit === 'property' && plan.properties?.length) {
+        // A repeat keeps pointing at the original wording so "again" stays "again" of that edit.
+        const repeated = plan.properties.every((edit) => edit.request)
+        lastEditRef.current = repeated && lastEditRef.current
+          ? lastEditRef.current
+          : { properties: plan.properties.map((edit) => edit.id), request }
+      }
       patch(id, (d) => ({
         ...d,
         status: 'applied',
@@ -355,6 +446,7 @@ export function useJev({
                 steps: decidingSteps(ctx)
               })
               deps.current.onOpenSidebar?.()
+              deps.current.onRequest?.(id, trimmed)
               return id
             })()
           : ensureLiveCard(trimmed, ctx)
@@ -362,12 +454,18 @@ export function useJev({
       try {
         // Send always re-asks. Preview only asks when local fast-path can't handle it
         // (or when refining after a short debounce).
-        if (mode === 'preview') {
-          const local = fastPlanFromRequest(trimmed, ctx)
-          if (local) {
-            paintPlan(decisionId, trimmed, local, 'preview')
-            return
-          }
+        const local = fastPlanFromRequest(trimmed, ctx)
+        if (mode === 'preview' && local) {
+          paintPlan(decisionId, trimmed, local, 'preview')
+          return
+        }
+        // Clearly named actions and properties are deterministic; no need to re-ask Jev on send.
+        if (mode === 'apply' && local && (local.action === 'command' || local.edit === 'property')) {
+          paintPlan(decisionId, trimmed, local, 'apply')
+          liveIdRef.current = null
+          liveRequestRef.current = ''
+          setLiveId(null)
+          return
         }
 
         const res = await window.vanta.jevAsk(ctx.state, questions)
@@ -379,7 +477,12 @@ export function useJev({
           meta: { latencyMs: res.latencyMs, questions: Object.keys(questions).length, model: res.model }
         }
         ready.current = readySource
-        const plan = planFromAnswers(buildContext(trimmed, canvasFromBaseline()), readySource.answers)
+        const plan = await fillPropertyChoices(
+          planFromAnswers(buildContext(trimmed, canvasFromBaseline()), readySource.answers),
+          trimmed,
+          ctx.state
+        )
+        if (gen !== previewGen.current && mode === 'preview') return
         paintPlan(decisionId, trimmed, plan, mode, readySource.meta)
         if (mode === 'apply') {
           liveIdRef.current = null
@@ -406,6 +509,49 @@ export function useJev({
     },
     [paintPlan, patch, upsert]
   )
+
+  /** Bumped when the composer text should be wiped (the user changed the canvas by hand). */
+  const [draftClearTick, setDraftClearTick] = useState(0)
+
+  /**
+   * The user changed the canvas by hand while words were still in the composer: drop the words and the
+   * unsent live preview. `next` is their edit, made on top of the preview; layers they didn't touch go
+   * back to how they were before the preview, so only their own change remains.
+   */
+  const discardForManualEdit = useCallback((next: DesignNode[]): DesignNode[] => {
+    if (applying.current || !liveRequestRef.current.trim()) return next
+    // Re-saves with nothing changed (a field blurred with the same value) aren't hand edits.
+    const shownNow = deps.current.getCanvas().nodes
+    if (next.length === shownNow.length && next.every((node, i) => node === shownNow[i] || JSON.stringify(node) === JSON.stringify(shownNow[i]))) {
+      return next
+    }
+    window.clearTimeout(previewTimer.current)
+    previewGen.current += 1
+    ready.current = null
+    liveRequestRef.current = ''
+    setDraftRef.current('')
+    setDraftClearTick((tick) => tick + 1)
+    if (liveIdRef.current) {
+      const id = liveIdRef.current
+      liveIdRef.current = null
+      setLiveId(null)
+      setDecisions((current) => current.filter((item) => item.id !== id || item.status === 'applied'))
+    }
+    const before = baseline.current
+    baseline.current = null
+    if (!before) return next
+    const original = new Map(before.map((node) => [node.id, node]))
+    const previewed = new Map(deps.current.getCanvas().nodes.map((node) => [node.id, JSON.stringify(node)]))
+    const out: DesignNode[] = []
+    for (const node of next) {
+      const shown = previewed.get(node.id)
+      const untouched = shown !== undefined && shown === JSON.stringify(node)
+      const prior = original.get(node.id)
+      if (untouched && !prior) continue
+      out.push(untouched && prior ? prior : node)
+    }
+    return out
+  }, [])
 
   const clearLiveDraft = useCallback(() => {
     previewGen.current += 1
@@ -678,6 +824,8 @@ export function useJev({
     decisions,
     current,
     voice,
-    toggleMic
+    toggleMic,
+    discardForManualEdit,
+    draftClearTick
   }
 }

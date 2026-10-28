@@ -51,7 +51,8 @@ const SNAPSHOT_SOURCE = `
     error: '',
     cancel: false,
     generation: 0,
-    bound: false
+    bound: false,
+    maxNodes: MAX_NODES
   };
 
   const parentEl = (el) => {
@@ -538,7 +539,7 @@ const SNAPSHOT_SOURCE = `
   };
 
   const buildOne = (el, depth) => {
-    if (count >= MAX_NODES || depth > MAX_DEPTH || skipEl(el)) return null;
+    if (count >= state.maxNodes || depth > MAX_DEPTH || skipEl(el)) return null;
     const style = window.getComputedStyle(el);
     if (!style || style.display === 'none' || style.visibility === 'hidden') return null;
     if (style.display === 'contents') return null;
@@ -963,7 +964,7 @@ const SNAPSHOT_SOURCE = `
   };
 
   /** Lazy images and IntersectionObserver content only load once scrolled into view. */
-  const prime = async (el) => {
+  const prime = async (el, maxSteps) => {
     const imgs = el.querySelectorAll ? Array.from(el.querySelectorAll('img')) : [];
     if (el.tagName === 'IMG') imgs.push(el);
     for (const img of imgs) {
@@ -975,15 +976,16 @@ const SNAPSHOT_SOURCE = `
     const startY = window.scrollY;
     const scroller = document.scrollingElement || document.documentElement;
     const canScroll = scroller && scroller.scrollHeight > vh + 4;
-    const offscreen = rect.y + rect.height > vh + 4 || rect.y < -4;
+    const wholePage = (maxSteps || 16) > 16;
+    const offscreen = wholePage || rect.y + rect.height > vh + 4 || rect.y < -4;
     if (canScroll && offscreen) {
       hud.textContent = 'Loading page…';
-      const top = Math.max(0, rect.y + startY - 40);
-      const bottom = rect.y + startY + rect.height;
+      const top = wholePage ? 0 : Math.max(0, rect.y + startY - 40);
+      const bottom = wholePage ? scroller.scrollHeight : rect.y + startY + rect.height;
       let y = top;
-      for (let step = 0; y < bottom && step < 16; step++) {
+      for (let step = 0; y < Math.max(bottom, wholePage ? scroller.scrollHeight : 0) && step < (maxSteps || 16); step++) {
         window.scrollTo(startX, y);
-        await sleep(90);
+        await sleep(wholePage ? 140 : 90);
         y += vh * 0.85;
       }
       window.scrollTo(startX, startY);
@@ -1050,21 +1052,30 @@ const SNAPSHOT_SOURCE = `
     return interesting(document.body) ? document.body : null;
   };
 
-  const capture = async (el) => {
+  /** \`full\` captures the whole page: more layers, a deeper scroll to load lazy content, full height. */
+  const capture = async (el, full) => {
     if (!el || state.pending) return;
     const gen = ++state.generation;
     state.pending = true;
-    hud.textContent = 'Capturing…';
+    state.maxNodes = full ? MAX_NODES * 3 : MAX_NODES;
+    hud.textContent = full ? 'Capturing page…' : 'Capturing…';
     count = 0;
     rasters.length = 0;
     try {
       box.style.display = 'none';
       label.style.display = 'none';
-      await prime(el);
+      await prime(el, full ? 80 : 16);
       if (gen !== state.generation) return;
-      hud.textContent = 'Capturing…';
+      hud.textContent = full ? 'Capturing page…' : 'Capturing…';
       const tree = buildOne(el, 0);
       if (!tree) throw new Error('Nothing visible to snapshot');
+      if (full) {
+        // body is often only viewport-tall (height: 100%) while the page overflows it.
+        const page = document.scrollingElement || document.documentElement;
+        tree.height = Math.max(tree.height, page.scrollHeight - Math.max(0, tree.absY + window.scrollY));
+        tree.width = Math.max(tree.width, Math.min(page.scrollWidth, window.innerWidth));
+        tree.name = (document.title || location.hostname || 'Page').slice(0, 80);
+      }
       await resolveImages(gen);
       if (gen !== state.generation) return;
       tree.children = (tree.children || []).map(collapse);
@@ -1191,6 +1202,55 @@ const SNAPSHOT_SOURCE = `
         return { status: 'ready', tree, cssWidth: window.innerWidth, cssHeight: window.innerHeight };
       }
       return null;
+    },
+    /**
+     * Snapshot the entire page top to bottom, including everything scrolled out of view.
+     * The result is picked up by consume(), the same as a click Snapshot.
+     */
+    async capturePage() {
+      if (state.pending) return { status: 'busy' };
+      state.cancel = false;
+      state.error = '';
+      state.result = null;
+      const restore = [];
+      const loosen = (el) => {
+        restore.push([el, el.getAttribute('style')]);
+        el.style.setProperty('height', 'auto', 'important');
+        el.style.setProperty('max-height', 'none', 'important');
+        el.style.setProperty('overflow', 'visible', 'important');
+      };
+      try {
+        window.scrollTo(0, 0);
+        await sleep(120);
+        const page = document.scrollingElement || document.documentElement;
+        const vh = window.innerHeight || 800;
+        if (page.scrollHeight <= vh + 4 && document.body) {
+          // App-style layouts scroll an inner panel instead of the page: let that panel grow to full height.
+          let inner = null;
+          let hiddenMost = 40;
+          for (const el of document.body.querySelectorAll('*')) {
+            if (el.closest('[data-vanta-snapshot]')) continue;
+            const hidden = el.scrollHeight - el.clientHeight;
+            if (hidden <= hiddenMost || el.clientHeight < vh * 0.4) continue;
+            const overflowY = window.getComputedStyle(el).overflowY;
+            if (overflowY !== 'auto' && overflowY !== 'scroll') continue;
+            inner = el;
+            hiddenMost = hidden;
+          }
+          if (inner) {
+            for (let cur = inner; cur && cur !== document.documentElement; cur = cur.parentElement) loosen(cur);
+            loosen(document.documentElement);
+            await sleep(250);
+          }
+        }
+        await capture(document.body, true);
+      } finally {
+        for (const [el, css] of restore.reverse()) {
+          if (css == null) el.removeAttribute('style');
+          else el.setAttribute('style', css);
+        }
+      }
+      return { status: 'started' };
     },
     /** Programmatic capture for MCP / agents (same pipeline as click Snapshot). */
     async captureSelector(selector, allowFallback) {

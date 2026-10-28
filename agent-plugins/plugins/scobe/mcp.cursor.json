@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "scobe": {
+      "command": "${env:HOME}${env:USERPROFILE}/.scobe/bin/scobe",
+      "args": ["${env:HOME}${env:USERPROFILE}/.scobe/bridge/scobe-mcp.cjs"],
+      "env": { "ELECTRON_RUN_AS_NODE": "1" }
+    }
+  }
+}

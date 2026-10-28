@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { AnimatePresence, motion, useReducedMotion } from 'motion/react'
-import { ArrowUpwardIcon, AutoAwesomeOutlinedIcon, CheckRoundedIcon, CloseRoundedIcon, ContentCopyOutlinedIcon, KeyboardArrowDownIcon, KeyboardOutlinedIcon, MenuRoundedIcon, MicNoneOutlinedIcon } from './lucideIcons'
+import { ArrowUpwardIcon, AutoAwesomeOutlinedIcon, CheckRoundedIcon, CloseRoundedIcon, ContentCopyOutlinedIcon, KeyboardArrowDownIcon, MenuRoundedIcon } from './lucideIcons'
+import { InputModeToggle } from './ChatView'
 import {
   QUIVER_MODELS,
   type QuiverGenerateInput,
@@ -798,34 +799,7 @@ export function CreateSvgPanel({
 
       <div className="cursor-composer-row">
         <div className="cursor-composer-left">
-          <div className="cursor-composer-mode" role="group" aria-label="Input mode">
-            <button
-              type="button"
-              className={!micOn ? 'is-on' : ''}
-              title="Typing"
-              aria-pressed={!micOn}
-              disabled={busy}
-              onClick={() => {
-                if (micOn) onMic?.()
-              }}
-            >
-              <KeyboardOutlinedIcon sx={{ fontSize: 15 }} />
-              <span>Typing</span>
-            </button>
-            <button
-              type="button"
-              className={micOn ? 'is-on' : ''}
-              title="Microphone"
-              aria-pressed={micOn}
-              disabled={busy}
-              onClick={() => {
-                if (!micOn) onMic?.()
-              }}
-            >
-              <MicNoneOutlinedIcon sx={{ fontSize: 15 }} />
-              <span>Microphone</span>
-            </button>
-          </div>
+          <InputModeToggle micOn={micOn} onMic={onMic} disabled={busy} />
 
           <div className="create-svg-model-wrap">
             <button

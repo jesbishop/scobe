@@ -13,6 +13,8 @@ import {
 } from '../shared/layoutEngine'
 import { normalizeUrl } from '../shared/url'
 import { finishWorking, stageCreate, emitBuild } from './buildBus'
+import { DESIGN_GUIDE } from '../shared/designGuide'
+import { DEFAULT_TOKENS } from '../shared/designTokens'
 
 export type BrowserGeometry = {
   x: number
@@ -28,6 +30,42 @@ export type CanvasToolContext = {
   /** Map window id / tab id → chrome page id (tab id). */
   resolveChromeTabId?: (browserId: string) => string | null
   listBrowsers?: () => unknown
+  /** Render a design layer to PNG in the canvas window (agents review their own work). */
+  renderNode?: (id: string | undefined, maxEdge?: number) => Promise<RenderedNode>
+  /** Tokens from the Tokens panel. */
+  getTokens?: () => Promise<{ tokens: Array<{ name: string; kind: string; value: string }> }>
+}
+
+export type RenderedNode = { id: string; name: string; base64: string; width: number; height: number; scale: number }
+
+/** What the file already uses most, so new work matches it: colors, fonts, sizes, radii, spacing. */
+function fileStyleSummary(nodes: DesignNode[]) {
+  const tally = (values: Array<string | number | undefined | null>, top = 8) => {
+    const counts = new Map<string, number>()
+    for (const value of values) {
+      if (value == null || value === '' || value === 0) continue
+      const key = String(value).toLowerCase()
+      counts.set(key, (counts.get(key) || 0) + 1)
+    }
+    return [...counts.entries()].sort((a, b) => b[1] - a[1]).slice(0, top).map(([value, uses]) => ({ value, uses }))
+  }
+  const texts = nodes.filter((node) => node.type === 'text')
+  const shapes = nodes.filter((node) => node.type !== 'text' && node.type !== 'comment' && node.type !== 'image')
+  const pad = (node: DesignNode) => {
+    const p = node.layout?.padding
+    return typeof p === 'number' ? p : p ? Math.max(p.t, p.r, p.b, p.l) : undefined
+  }
+  return {
+    textColors: tally(texts.map((node) => node.fill)),
+    surfaceColors: tally(shapes.map((node) => node.fill)),
+    strokeColors: tally(shapes.filter((node) => (node.strokeWidth || 0) > 0).map((node) => node.stroke)),
+    fontFamilies: tally(texts.map((node) => node.fontFamily || 'Inter'), 4),
+    fontSizes: tally(texts.map((node) => node.fontSize), 10),
+    fontWeights: tally(texts.map((node) => node.fontWeight), 5),
+    radii: tally(shapes.map((node) => node.radius), 6),
+    gaps: tally(nodes.map((node) => (typeof node.layout?.gap === 'number' ? node.layout.gap : undefined)), 8),
+    paddings: tally(nodes.map(pad), 8)
+  }
 }
 
 export type CanvasToolResult = { content: string; image?: string; createdIds?: string[] }
@@ -216,6 +254,40 @@ export async function runCanvasTool(
 
   if (name === 'list_browsers') {
     return { content: JSON.stringify(ctx.listBrowsers?.() ?? chromeHost.list(), null, 2) }
+  }
+
+  if (name === 'get_design_guide') {
+    return { content: DESIGN_GUIDE }
+  }
+
+  if (name === 'render_node') {
+    if (!ctx.renderNode) throw new Error('Rendering design layers needs the Scobe canvas window open.')
+    const id = input.id ? String(input.id) : undefined
+    const maxEdge = input.maxEdge != null ? Number(input.maxEdge) : undefined
+    const shot = await ctx.renderNode(id, maxEdge)
+    return {
+      content:
+        `Rendered “${shot.name}” (${shot.id}), ${shot.width}×${shot.height} at ${shot.scale}x. ` +
+        'Review it against the design guide checklist: focal point, alignment, spacing rhythm, type sizes, contrast, accent use. Fix what fails, then render again.',
+      image: shot.base64
+    }
+  }
+
+  if (name === 'get_tokens') {
+    const panel = ctx.getTokens ? await ctx.getTokens().catch(() => ({ tokens: [] })) : { tokens: [] }
+    return {
+      content: JSON.stringify(
+        {
+          tokens: panel.tokens,
+          usedInFile: fileStyleSummary(getDesign()),
+          defaultsWhenEmpty: DEFAULT_TOKENS,
+          note:
+            'Reuse tokens first, then what the file already uses most. If both are empty, use defaultsWhenEmpty and the design guide scales.'
+        },
+        null,
+        2
+      )
+    }
   }
 
   if (name === 'add_design_frame' || name === 'create_artboard') {

@@ -12,8 +12,9 @@ import {
   type GradientStop,
   type Paint
 } from '../shared/paint'
-import { AdjustedImage } from './AdjustedImage'
 import { setGradientEdit } from './gradientEdit'
+import { setShaderEdit } from './shaderEdit'
+import { ImageStudio, STUDIO_MIN_HEIGHT, studioHeightFor, studioWidthForHeight, useImageAspect } from './ImageStudio'
 import { ShaderEditor } from './ShaderEditor'
 import {
   checkerboardCss,
@@ -49,9 +50,42 @@ const FORMAT_LABELS: Record<ColorFormat, string> = {
 
 const PICKER_CHECKER = 'repeating-conic-gradient(#e6e6e6 0% 25%, #fff 0% 50%) 50% / 8px 8px'
 
+/** Image editing popup width; the user drags it bigger and it's remembered. Height follows the photo. */
+const STUDIO_SIZE_KEY = 'scobe.imageStudioSize'
+const STUDIO_MIN_WIDTH = 420
+const STUDIO_MAX_WIDTH = 1400
+
+/** Image editing never rises above the app's tab bar. */
+function studioTopLimit(): number {
+  const bar = document.querySelector('.file-tabs')
+  return Math.round(bar?.getBoundingClientRect().bottom ?? 0) + 8
+}
+
+function loadStudioWidth(): number {
+  try {
+    const saved = JSON.parse(localStorage.getItem(STUDIO_SIZE_KEY) || 'null') as { width?: number } | null
+    if (saved && Number.isFinite(saved.width)) return Math.max(STUDIO_MIN_WIDTH, saved.width!)
+  } catch {
+    /* fall back to the default size */
+  }
+  return STUDIO_MIN_WIDTH
+}
+
+function saveStudioWidth(width: number): void {
+  try {
+    localStorage.setItem(STUDIO_SIZE_KEY, JSON.stringify({ width }))
+  } catch {
+    /* storage unavailable; the size just won't persist */
+  }
+}
+
 type Props = {
+  strokeMode?: boolean
+  above?: boolean
   paint: Paint
   pageColors?: Array<{ color: string; opacity: number }>
+  /** Named color sources (the page, then each frame); replaces `pageColors` when given. */
+  colorSets?: ColorSet[]
   onChange: (paint: Paint) => void
   onClose: () => void
   anchor?: DOMRect | null
@@ -68,8 +102,9 @@ type Props = {
 }
 
 export function FillPicker({
-  paint,
+  paint, above = false, strokeMode = false,
   pageColors = [],
+  colorSets,
   onChange,
   onClose,
   anchor,
@@ -86,7 +121,24 @@ export function FillPicker({
     paint.type === 'gradient' ? paint.stops[0]?.id || null : null
   )
   const [pos, setPos] = useState<{ top: number; left: number } | null>(null)
+  const sets: ColorSet[] = colorSets ?? (pageColors.length ? [{ id: 'page', label: 'On this page', colors: pageColors }] : [])
+  const [setId, setSetId] = useState<string | null>(null)
+  const activeSet = sets.find((item) => item.id === setId) || sets[0]
+  const [studioWidth, setStudioWidth] = useState(loadStudioWidth)
+  const resizeAnchor = useRef<{ right: number; bottom: number } | null>(null)
   const root = useRef<HTMLDivElement>(null)
+  const imageStudioRef = useRef(false)
+  imageStudioRef.current = paint.type === 'image' && !strokeMode
+  const studioAspect = useImageAspect(paint.type === 'image' ? paint.imageDataUrl : undefined)
+  const [viewportHeight, setViewportHeight] = useState(() => window.innerHeight)
+  /** Height of everything in the popup except the photo area (tabs, type row, image mode row, padding). */
+  const [studioChrome, setStudioChrome] = useState(200)
+  // Width stops where the photo reaches its tallest, so the popup never widens without the image growing.
+  // The whole popup, chrome included, has to fit between the tab bar and an 8px bottom margin.
+  const studioHeightCap = Math.max(STUDIO_MIN_HEIGHT, viewportHeight - 8 - studioTopLimit() - studioChrome)
+  const studioWidthCap = Math.max(STUDIO_MIN_WIDTH, studioWidthForHeight(studioHeightCap, studioAspect))
+  const popupWidth = Math.min(studioWidth, studioWidthCap)
+  const studioHeight = Math.min(studioHeightFor(popupWidth, studioAspect), studioHeightCap)
   const reduceMotion = useReducedMotion()
   const { exit: _exit, ...enterMotion } = besidePopoverMotion(reduceMotion)
   const type = fillTypeOf(paint)
@@ -112,13 +164,23 @@ export function FillPicker({
   }, [onClose])
 
   useEffect(() => {
+    // Nested pickers (a shader's own colors) pass canvasHandles={false} and must not clear the shader's ring.
+    if (canvasHandles) setShaderEdit(paint.type === 'shader' && !solidOnly ? { paint, onChange } : null)
     if (paint.type !== 'gradient' || solidOnly || !canvasHandles) {
       setGradientEdit(null)
       return
     }
     setGradientEdit({ paint, activeStopId, onChange, onActiveStop: setActiveStopId })
   })
-  useEffect(() => () => setGradientEdit(null), [])
+  const ownsShaderHandles = useRef(canvasHandles)
+  ownsShaderHandles.current = canvasHandles
+  useEffect(
+    () => () => {
+      setGradientEdit(null)
+      if (ownsShaderHandles.current) setShaderEdit(null)
+    },
+    []
+  )
 
   const anchorTop = anchor?.top ?? null
   const anchorLeft = anchor?.left ?? null
@@ -133,6 +195,10 @@ export function FillPicker({
       setPos({ top: 120, left: 80 })
       return
     }
+    if (above) {
+      setPos({ left: Math.max(8, Math.min(window.innerWidth - width - 8, anchorLeft)), top: Math.max(8, anchorTop - height - 10) })
+      return
+    }
     if (beside) {
       const left = Math.max(8, anchorLeft - width - 8)
       const top = Math.max(8, Math.min(window.innerHeight - height - 8, anchorTop))
@@ -144,9 +210,59 @@ export function FillPicker({
     const panelLeft = panel ? panel.getBoundingClientRect().left : anchorLeft - 16
     let left = panelLeft - width - 8
     if (left < 8) left = Math.min(window.innerWidth - width - 8, anchorRight + 8)
-    const top = Math.max(8, Math.min(window.innerHeight - height - 8, anchorTop - 48))
+    const lowest = window.innerHeight - height - 8
+    // Image editing sits on the bottom of the page and grows upward.
+    const top = imageStudioRef.current ? Math.max(studioTopLimit(), lowest) : Math.max(8, Math.min(lowest, anchorTop - 48))
     setPos({ top, left })
-  }, [anchorTop, anchorLeft, anchorRight, tab, type, pageColors.length, beside])
+  }, [anchorTop, anchorLeft, anchorRight, tab, type, sets.length > 0, beside, above])
+
+  useEffect(() => {
+    const onResize = () => setViewportHeight(window.innerHeight)
+    window.addEventListener('resize', onResize)
+    return () => window.removeEventListener('resize', onResize)
+  }, [])
+
+  // Measure the real chrome height so the photo cap leaves room for it.
+  useLayoutEffect(() => {
+    const el = root.current
+    if (!el || paint.type !== 'image' || strokeMode) return
+    // scrollHeight, not offsetHeight: once the popup hits its max-height the visible box stops growing,
+    // which would under-measure the chrome and leave the photo too tall to fit.
+    const chrome = el.scrollHeight - studioHeight
+    if (chrome > 0 && Math.abs(chrome - studioChrome) > 1) setStudioChrome(chrome)
+  })
+
+  // The popup can grow after it's placed (an image's size loads, a different fill type, the window shrinks):
+  // slide it back up so its bottom never runs off the page. Image editing stays pinned to the bottom.
+  useEffect(() => {
+    const el = root.current
+    if (!el) return
+    const keepOnScreen = () => {
+      if (resizeAnchor.current) return
+      const height = el.offsetHeight
+      setPos((current) => {
+        if (!current) return current
+        const lowest = window.innerHeight - height - 8
+        const top = imageStudioRef.current ? Math.max(studioTopLimit(), lowest) : Math.max(8, Math.min(current.top, lowest))
+        return top === current.top ? current : { ...current, top }
+      })
+    }
+    const observer = new ResizeObserver(keepOnScreen)
+    observer.observe(el)
+    window.addEventListener('resize', keepOnScreen)
+    return () => {
+      observer.disconnect()
+      window.removeEventListener('resize', keepOnScreen)
+    }
+  }, [])
+
+  // While resizing from the top-left grip, keep the bottom-right corner where it was.
+  useLayoutEffect(() => {
+    const anchor = resizeAnchor.current
+    const el = root.current
+    if (!anchor || !el) return
+    setPos({ left: anchor.right - el.offsetWidth, top: Math.max(studioTopLimit(), anchor.bottom - el.offsetHeight) })
+  }, [popupWidth, studioHeight])
 
   const activeColor =
     paint.type === 'solid'
@@ -182,31 +298,87 @@ export function FillPicker({
     }
   }
 
+  const imageStudio = paint.type === 'image' && !strokeMode
+
+  // Top-left grip: the bottom-right corner stays put, and pulling left or up both scale the photo.
+  const startStudioResize = (event: ReactPointerEvent) => {
+    if (event.button !== 0 || !pos || !root.current) return
+    event.preventDefault()
+    event.stopPropagation()
+    const startX = event.clientX
+    const startY = event.clientY
+    const start = popupWidth
+    const right = pos.left + root.current.offsetWidth
+    const bottom = pos.top + root.current.offsetHeight
+    // Everything above the photo (tabs, type row, image mode row) stays the same height while resizing.
+    const chromeY = root.current.scrollHeight - studioHeight
+    const tallest = Math.min(studioHeightCap, bottom - studioTopLimit() - chromeY)
+    const maxWidth = Math.min(STUDIO_MAX_WIDTH, right - 8, studioWidthCap, studioWidthForHeight(tallest, studioAspect))
+    resizeAnchor.current = { right, bottom }
+    let latest = start
+    const move = (next: PointerEvent) => {
+      const grow = Math.max(startX - next.clientX, (startY - next.clientY) * studioAspect)
+      latest = clamp(start + grow, STUDIO_MIN_WIDTH, Math.max(STUDIO_MIN_WIDTH, maxWidth))
+      setStudioWidth(latest)
+    }
+    const up = () => {
+      window.removeEventListener('pointermove', move)
+      window.removeEventListener('pointerup', up)
+      document.body.classList.remove('is-studio-resize')
+      resizeAnchor.current = null
+      saveStudioWidth(latest)
+    }
+    document.body.classList.add('is-studio-resize')
+    window.addEventListener('pointermove', move)
+    window.addEventListener('pointerup', up)
+  }
+
   return (
     <motion.div
       ref={root}
-      className={`fill-picker${solidOnly ? ' is-solid-only' : ''}`}
+      className={`fill-picker${solidOnly ? ' is-solid-only' : ''}${imageStudio ? ' is-image-studio' : ''}`}
       style={{
         ...(pos ? { top: pos.top, left: pos.left } : { top: 0, left: 0, visibility: 'hidden' as const }),
+        ...(imageStudio ? { width: popupWidth } : null),
         transformOrigin: 'right top'
       }}
       {...enterMotion}
       onPointerDown={(e) => e.stopPropagation()}
     >
+      {imageStudio && (
+        <span className="fill-picker-resize" title="Drag to resize" onPointerDown={startStudioResize}>
+          <svg width="10" height="10" viewBox="0 0 10 10" fill="none" aria-hidden>
+            <path d="M1.5 8.5l7-7M1.5 4.5l3-3" stroke="currentColor" strokeWidth="1.1" strokeLinecap="round" />
+          </svg>
+        </span>
+      )}
       <div className="fill-picker-head">
         <div className="fill-picker-tabs">
-          <button type="button" className={tab === 'custom' ? 'is-on' : ''} onClick={() => setTab('custom')}>
-            Custom
-          </button>
-          <button type="button" className={tab === 'libraries' ? 'is-on' : ''} onClick={() => setTab('libraries')}>
-            Libraries
-          </button>
+          {strokeMode ? (
+            (['solid', 'gradient'] as const).map(option => <button type="button" key={option} disabled={option === 'gradient' && solidOnly} className={kind === option ? 'is-on' : ''} onClick={() => {
+              if (kind === option) return
+              const next = paintForFillType(option === 'solid' ? 'solid' : 'linear', paint)
+              onChange(next)
+              if (next.type === 'gradient') setActiveStopId(next.stops[0]?.id || null)
+            }}>{option === 'solid' ? 'Solid' : 'Gradient'}</button>)
+          ) : (
+            <>
+              <button type="button" className={tab === 'custom' ? 'is-on' : ''} onClick={() => setTab('custom')}>
+                Custom
+              </button>
+              <button type="button" className={tab === 'libraries' ? 'is-on' : ''} onClick={() => setTab('libraries')}>
+                Libraries
+              </button>
+            </>
+          )}
         </div>
-        <button type="button" className="fill-picker-icon-btn" title="Create style" disabled>
-          <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden>
-            <path d="M8 2.5v11M2.5 8h11" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
-          </svg>
-        </button>
+        {!strokeMode && (
+          <button type="button" className="fill-picker-icon-btn" title="Create style" disabled>
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden>
+              <path d="M8 2.5v11M2.5 8h11" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
+            </svg>
+          </button>
+        )}
         <button type="button" className="fill-picker-icon-btn" title="Close" onClick={onClose}>
           <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden>
             <path d="M3.5 3.5l9 9M12.5 3.5l-9 9" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
@@ -218,58 +390,61 @@ export function FillPicker({
         <div className="fill-picker-empty">Document and team libraries coming soon.</div>
       ) : (
         <>
-          <div className="fill-type-row">
-            {PAINT_KINDS.map((item) => (
-              <button
-                key={item.id}
-                type="button"
-                title={item.fillType ? item.title : `${item.title} (coming soon)`}
-                disabled={!item.fillType || (solidOnly && item.id !== 'solid') || (kinds != null && !kinds.includes(item.id))}
-                className={`fill-type-btn${kind === item.id ? ' is-on' : ''}`}
-                onClick={() => {
-                  if (!item.fillType || kind === item.id) return
-                  const next = paintForFillType(item.fillType, paint)
-                  onChange(next)
-                  if (next.type === 'gradient') setActiveStopId(next.stops[0]?.id || null)
-                }}
-              >
-                <PaintKindIcon id={item.id} />
+          {!strokeMode && (
+            <div className="fill-type-row">
+              {PAINT_KINDS.map((item) => (
+                <button
+                  key={item.id}
+                  type="button"
+                  title={item.fillType ? item.title : `${item.title} (coming soon)`}
+                  disabled={!item.fillType || (solidOnly && item.id !== 'solid') || (kinds != null && !kinds.includes(item.id))}
+                  className={`fill-type-btn${kind === item.id ? ' is-on' : ''}`}
+                  onClick={() => {
+                    if (!item.fillType || kind === item.id) return
+                    const next = paintForFillType(item.fillType, paint)
+                    onChange(next)
+                    if (next.type === 'gradient') setActiveStopId(next.stops[0]?.id || null)
+                  }}
+                >
+                  <PaintKindIcon id={item.id} />
+                </button>
+              ))}
+              <span className="fill-type-spacer" />
+              <button type="button" className="fill-type-btn" title="Blend mode" disabled>
+                <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden>
+                  <path
+                    d="M8 2.2c2.3 2.6 4 4.6 4 6.8a4 4 0 0 1-8 0c0-2.2 1.7-4.2 4-6.8Z"
+                    stroke="currentColor"
+                    strokeWidth="1.2"
+                    strokeLinejoin="round"
+                  />
+                </svg>
               </button>
-            ))}
-            <span className="fill-type-spacer" />
-            <button type="button" className="fill-type-btn" title="Blend mode" disabled>
-              <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden>
-                <path
-                  d="M8 2.2c2.3 2.6 4 4.6 4 6.8a4 4 0 0 1-8 0c0-2.2 1.7-4.2 4-6.8Z"
-                  stroke="currentColor"
-                  strokeWidth="1.2"
-                  strokeLinejoin="round"
-                />
-              </svg>
-            </button>
-            <button
-              type="button"
-              disabled={solidOnly}
-              className={`fill-type-btn${visible ? '' : ' is-on'}`}
-              title={visible ? 'Hide fill' : 'Show fill'}
-              aria-pressed={!visible}
-              onClick={() => onChange({ ...paint, visible: !visible })}
-            >
-              <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden>
-                <path
-                  d="M12.6 5.4A5.5 5.5 0 0 1 5.4 12.6M3.4 10.6a5.5 5.5 0 0 1 7.2-7.2"
-                  stroke="currentColor"
-                  strokeWidth="1.2"
-                  strokeLinecap="round"
-                />
-                <path d="M5.2 7.6c1.6-.2 3 .6 3.6 2.2" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
-                <path d="M2.5 13.5l11-11" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
-              </svg>
-            </button>
-          </div>
+              <button
+                type="button"
+                disabled={solidOnly}
+                className={`fill-type-btn${visible ? '' : ' is-on'}`}
+                title={visible ? 'Hide fill' : 'Show fill'}
+                aria-pressed={!visible}
+                onClick={() => onChange({ ...paint, visible: !visible })}
+              >
+                <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden>
+                  <path
+                    d="M12.6 5.4A5.5 5.5 0 0 1 5.4 12.6M3.4 10.6a5.5 5.5 0 0 1 7.2-7.2"
+                    stroke="currentColor"
+                    strokeWidth="1.2"
+                    strokeLinecap="round"
+                  />
+                  <path d="M5.2 7.6c1.6-.2 3 .6 3.6 2.2" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
+                  <path d="M2.5 13.5l11-11" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
+                </svg>
+              </button>
+            </div>
+          )}
 
           {paint.type === 'gradient' && (
             <GradientEditor
+              strokeMode={strokeMode}
               paint={paint}
               activeStopId={activeStopId}
               onActiveStop={setActiveStopId}
@@ -289,20 +464,16 @@ export function FillPicker({
             />
           )}
 
-          {paint.type === 'image' && <ImageFillEditor paint={paint} onChange={onChange} />}
+          {paint.type === 'image' && <ImageFillEditor paint={paint} onChange={onChange} studioHeight={studioHeight} />}
           {paint.type === 'video' && <VideoFillEditor paint={paint} onChange={onChange} />}
           {paint.type === 'shader' && <ShaderFillEditor paint={paint} onChange={onChange} />}
 
-          {pageColors.length > 0 && (paint.type === 'solid' || paint.type === 'gradient') && (
+          {activeSet && (paint.type === 'solid' || paint.type === 'gradient') && (
             <div className="fill-page-colors">
-              <button type="button" className="fill-page-select">
-                <span>On this page</span>
-                <svg width="8" height="8" viewBox="0 0 8 8" fill="none" aria-hidden>
-                  <path d="M1.5 3 4 5.5 6.5 3" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" />
-                </svg>
-              </button>
+              <ColorSetMenu sets={sets} active={activeSet.id} onPick={setSetId} />
+              {activeSet.colors.length === 0 && <div className="fill-page-empty">No colors in this frame yet.</div>}
               <div className="fill-page-swatches">
-                {pageColors.map(({ color, opacity }) => (
+                {activeSet.colors.map(({ color, opacity }) => (
                   <button
                     key={`${color}:${opacity}`}
                     type="button"
@@ -326,6 +497,105 @@ export function FillPicker({
   )
 }
 
+export type ColorSet = {
+  id: string
+  label: string
+  /** Shown muted after the label, e.g. a frame's size. */
+  detail?: string
+  colors: Array<{ color: string; opacity: number }>
+}
+
+/** Picks which colors the swatches show: the whole page, or one frame on the canvas. */
+function ColorSetMenu({ sets, active, onPick }: { sets: ColorSet[]; active: string; onPick: (id: string) => void }) {
+  const [open, setOpen] = useState(false)
+  const [place, setPlace] = useState<{ left: number; width: number; top?: number; bottom?: number; maxHeight: number } | null>(null)
+  const rootRef = useRef<HTMLDivElement>(null)
+  const current = sets.find((item) => item.id === active) || sets[0]
+
+  useEffect(() => {
+    if (!open) return
+    const onDown = (event: MouseEvent) => {
+      if (!rootRef.current?.contains(event.target as Node)) setOpen(false)
+    }
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        event.stopPropagation()
+        setOpen(false)
+      }
+    }
+    window.addEventListener('mousedown', onDown, true)
+    window.addEventListener('keydown', onKey, true)
+    return () => {
+      window.removeEventListener('mousedown', onDown, true)
+      window.removeEventListener('keydown', onKey, true)
+    }
+  }, [open])
+
+  useLayoutEffect(() => {
+    if (!open) {
+      setPlace(null)
+      return
+    }
+    const rect = rootRef.current?.querySelector('button')?.getBoundingClientRect()
+    if (!rect) return
+    const below = window.innerHeight - rect.bottom - 12
+    const above = rect.top - 12
+    // The swatches sit at the bottom of the popup, so the list usually opens upward over the picker.
+    if (below >= 180 || below >= above) setPlace({ left: rect.left, width: rect.width, top: rect.bottom + 4, maxHeight: below })
+    else setPlace({ left: rect.left, width: rect.width, bottom: window.innerHeight - rect.top + 4, maxHeight: above })
+  }, [open])
+
+  if (!current) return null
+  return (
+    <div className="fill-set-picker" ref={rootRef}>
+      <button
+        type="button"
+        className={`fill-page-select${open ? ' is-open' : ''}`}
+        disabled={sets.length < 2}
+        onClick={() => setOpen((value) => !value)}
+      >
+        <span className="fill-set-current">
+          <span>{current.label}</span>
+          {current.detail ? <span className="fill-set-detail">{current.detail}</span> : null}
+        </span>
+        <svg width="8" height="8" viewBox="0 0 8 8" fill="none" aria-hidden>
+          <path d="M1.5 3 4 5.5 6.5 3" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" />
+        </svg>
+      </button>
+      {open && place && (
+        <div
+          className="fill-scale-menu fill-set-menu"
+          role="menu"
+          style={{ left: place.left, top: place.top, bottom: place.bottom, minWidth: place.width, maxHeight: place.maxHeight }}
+        >
+          {sets.map((item) => (
+            <button
+              key={item.id}
+              type="button"
+              role="menuitemradio"
+              aria-checked={item.id === current.id}
+              onClick={() => {
+                setOpen(false)
+                onPick(item.id)
+              }}
+            >
+              <span className="fill-scale-check" aria-hidden>
+                {item.id === current.id ? (
+                  <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+                    <path d="M3 7.4 5.7 10 11 4.4" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
+                  </svg>
+                ) : null}
+              </span>
+              <span className="fill-set-label">{item.label}</span>
+              {item.detail ? <span className="fill-set-detail">{item.detail}</span> : null}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
 const GRADIENT_KINDS = [
   { id: 'linear', label: 'Linear' },
   { id: 'radial', label: 'Radial' },
@@ -334,11 +604,13 @@ const GRADIENT_KINDS = [
 ] as const
 
 function GradientEditor({
+  strokeMode = false,
   paint,
   activeStopId,
   onActiveStop,
   onChange
 }: {
+  strokeMode?: boolean
   paint: Extract<Paint, { type: 'gradient' }>
   activeStopId: string | null
   onActiveStop: (id: string) => void
@@ -443,7 +715,7 @@ function GradientEditor({
               className="fill-format-menu"
               style={{ top: kindMenuPos.top, left: kindMenuPos.left, minWidth: kindMenuPos.width }}
             >
-              {GRADIENT_KINDS.map((item) => (
+              {GRADIENT_KINDS.filter(item => !strokeMode || item.id === 'linear' || item.id === 'radial').map((item) => (
                 <button
                   key={item.id}
                   type="button"
@@ -1025,13 +1297,14 @@ function ScaleModeMenu({ mode, onPick }: { mode: ScaleMode; onPick: (mode: Scale
 
 function ImageFillEditor({
   paint,
-  onChange
+  onChange,
+  studioHeight
 }: {
   paint: Extract<Paint, { type: 'image' }>
   onChange: (paint: Paint) => void
+  studioHeight: number
 }) {
   const inputRef = useRef<HTMLInputElement>(null)
-  const setAdj = (key: keyof typeof paint, value: number) => onChange({ ...paint, [key]: value })
   const mode = paint.scaleMode || 'fill'
 
   // Figma's rotate button turns the image 90° clockwise; baking it keeps exports and thumbnails in sync.
@@ -1084,17 +1357,7 @@ function ImageFillEditor({
           </svg>
         </button>
       </div>
-      <div
-        className={`fill-media-preview${paint.imageDataUrl ? ' has-image' : ''}`}
-        style={{ background: checkerboardCss(8) }}
-      >
-        {paint.imageDataUrl ? (
-          <AdjustedImage src={paint.imageDataUrl} adjust={paint} fit="contain" className="fill-media-preview-img" />
-        ) : null}
-        <button type="button" onClick={() => inputRef.current?.click()}>
-          {paint.imageDataUrl ? 'Choose image' : 'Upload from computer'}
-        </button>
-      </div>
+      <ImageStudio paint={paint} onChange={onChange} onUpload={() => inputRef.current?.click()} height={studioHeight} />
       <input
         ref={inputRef}
         type="file"
@@ -1110,32 +1373,6 @@ function ImageFillEditor({
           reader.readAsDataURL(file)
         }}
       />
-      {(
-        [
-          ['exposure', 'Exposure'],
-          ['contrast', 'Contrast'],
-          ['saturation', 'Saturation'],
-          ['temperature', 'Temperature'],
-          ['tint', 'Tint'],
-          ['highlights', 'Highlights'],
-          ['shadows', 'Shadows']
-        ] as const
-      ).map(([key, label]) => {
-        const value = Math.round(((paint[key] as number) || 0) * 100)
-        return (
-          <label key={key} className="fill-adj-row" title={`${label} ${value}`}>
-            <span>{label}</span>
-            <input
-              type="range"
-              min={-100}
-              max={100}
-              value={value}
-              onChange={(event) => setAdj(key, Number(event.target.value) / 100)}
-              onDoubleClick={() => setAdj(key, 0)}
-            />
-          </label>
-        )
-      })}
     </div>
   )
 }

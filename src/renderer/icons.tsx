@@ -1,3 +1,4 @@
+import { useId } from 'react'
 import type { CSSProperties, ReactNode, SVGProps } from 'react'
 import logoMarkUrl from './assets/vanta-mark.png'
 import logoWordmarkUrl from './assets/vanta-logo.png'
@@ -263,57 +264,47 @@ export function IconMenu({ size = 16, ...props }: IconProps) {
   )
 }
 
-/** Figma Draw toolbar: fountain-pen nib. */
-export function IconFigmaPen({ size = 22, ...props }: IconProps) {
-  return (
-    <Icon size={size} viewBox="0 0 24 24" {...props}>
-      <path
-        d="M12 2.75 16.55 8.2c1.2 1.42 1.38 3.4.45 4.98L12 21.35 6.99 13.18c-.93-1.58-.75-3.56.46-4.98L12 2.75Z"
-        stroke="currentColor"
-        strokeWidth="1.5"
-        strokeLinejoin="round"
-      />
-      <path d="M12 11.2v9.9" stroke="currentColor" strokeWidth="1.45" strokeLinecap="round" />
-      <circle cx="12" cy="10.05" r="1.12" fill="currentColor" />
-    </Icon>
-  )
+/** Upright drawing instruments with metallic highlights and shaped tips. */
+type DrawingInstrumentProps = IconProps & { inkColor?: string }
+function DrawingInstrument({ kind, inkColor = '#171717', size = 40, ...props }: DrawingInstrumentProps & { kind: 'pen' | 'brush' | 'pencil' }) {
+  const id = useId().replace(/:/g, '')
+  const ink = inkColor
+  const metal = id + 'metal', body = id + 'body', wood = id + 'wood'
+  return <svg width={28} height={size} viewBox="0 0 32 48" fill="none" aria-hidden="true" className={`drawing-instrument instrument-${kind}`} {...props}>
+    <defs>
+      <linearGradient id={metal}><stop stopColor="#a1a1a1"/><stop offset=".25" stopColor="#fafafa"/><stop offset=".52" stopColor="#fff"/><stop offset=".8" stopColor="#d0d0d0"/><stop offset="1" stopColor="#777"/></linearGradient>
+      <linearGradient id={body}><stop stopColor={ink}/><stop offset=".24" stopColor={`color-mix(in srgb, ${ink} 70%, white)`}/><stop offset=".45" stopColor={ink}/><stop offset=".8" stopColor={`color-mix(in srgb, ${ink} 80%, black)`}/><stop offset="1" stopColor={`color-mix(in srgb, ${ink} 80%, white)`}/></linearGradient>
+      <linearGradient id={wood}><stop stopColor="#c9bda6"/><stop offset=".42" stopColor="#f3ead8"/><stop offset=".72" stopColor="#ded2b9"/><stop offset="1" stopColor="#b8a88b"/></linearGradient>
+    </defs>
+    <g transform={kind === 'brush' ? 'matrix(1 0 0 1.121951 0 -5.731707)' : kind === 'pen' ? 'matrix(1 0 0 1.022222 0 -1.044444)' : undefined}>
+    {kind === 'pen' ? <>
+      <rect className="instrument-barrel" x="6" y="35" width="20" height="12" rx="4" fill={'url(#'+body+')'}/>
+      <path d="M8 34 5 23Q12 15 16 2Q20 15 27 23L24 34Z" fill={'url(#'+metal+')'} stroke="#b9b9b9" strokeWidth=".6"/>
+      <path d="M16 3V23M9 30l-2-7 7-12M23 30l2-7-7-12" stroke="#a3a3a3" strokeWidth=".65"/>
+      <circle cx="16" cy="23" r="3.3" fill="#171717"/>
+      <path d="M16 26v7" stroke="#777" strokeWidth=".7"/>
+      <rect x="6" y="33" width="20" height="4" fill={'url(#'+metal+')'}/><path d="M10 39v4" stroke="#777" strokeWidth="1"/>
+    </> : kind === 'brush' ? <>
+      <path d="M5 9Q15 3 27 9L25 21H7Z" fill={'url(#'+body+')'}/>
+      <path d="M8 10v10m3-11v11m4-12v12m4-12v12m4-11v11" stroke="#696969" strokeWidth=".55"/>
+      <path d="M7 16Q16 20 25 16L25 36H7Z" fill={'url(#'+metal+')'} stroke="#bbb" strokeWidth=".6"/>
+      <path d="M8 30h16M8 33h16" stroke="#999" strokeWidth=".7"/>
+      <rect className="instrument-barrel" x="7" y="35" width="18" height="12" rx="4" fill={'url(#'+body+')'}/>
+      <path d="M10 39v4" stroke="#777"/>
+      <path d="M5 9Q15 4 27 9Q19 12 5 9" fill={ink}/>
+    </> : <>
+      <path d="M5 29 16 1 27 29V43Q27 47 23 47H9Q5 47 5 43Z" fill={'url(#'+wood+')'} stroke="#a99d88" strokeWidth=".45"/>
+      <path d="M12 11 16 1 20 11Q16 13 12 11" fill={ink}/>
+      <path className="instrument-barrel" d="M5 29Q8 25 11 29L16 25 21 29Q24 25 27 29V43Q27 47 23 47H9Q5 47 5 43Z" fill={'url(#'+body+')'}/>
+      <path d="M11 29v16M21 29v16" stroke="#707070" strokeWidth=".75"/>
+      <path d="M16 14v10" stroke="#c9baa0" strokeWidth=".6"/>
+    </>}
+    </g>
+  </svg>
 }
-
-/** Figma Draw toolbar: upright marker / ink brush. */
-export function IconFigmaBrush({ size = 22, ...props }: IconProps) {
-  return (
-    <Icon size={size} viewBox="0 0 24 24" {...props}>
-      <rect x="8.05" y="2.85" width="7.9" height="6.55" rx="2.55" fill="currentColor" />
-      <path
-        d="M10.15 3.55v5.15M12 3.35v5.5M13.85 3.55v5.15"
-        stroke="var(--panel, #fff)"
-        strokeWidth="1.05"
-        strokeLinecap="round"
-      />
-      <path
-        d="M8.45 9.15h7.1v10.2c0 1.05-.85 1.85-1.9 1.85h-3.3c-1.05 0-1.9-.8-1.9-1.85V9.15Z"
-        stroke="currentColor"
-        strokeWidth="1.5"
-        strokeLinejoin="round"
-      />
-    </Icon>
-  )
-}
-
-/** Figma Draw toolbar: upright pencil. */
-export function IconFigmaPencil({ size = 22, ...props }: IconProps) {
-  return (
-    <Icon size={size} viewBox="0 0 24 24" {...props}>
-      <path d="M12 2.7 15.15 7.85H8.85L12 2.7Z" fill="currentColor" />
-      <path
-        d="M8.85 7.85h6.3v11.35c0 .85-.7 1.5-1.55 1.5h-3.2c-.85 0-1.55-.65-1.55-1.5V7.85Z"
-        stroke="currentColor"
-        strokeWidth="1.5"
-        strokeLinejoin="round"
-      />
-    </Icon>
-  )
-}
+export function IconFigmaPen(props: DrawingInstrumentProps) { return <DrawingInstrument kind="pen" {...props} /> }
+export function IconFigmaBrush(props: DrawingInstrumentProps) { return <DrawingInstrument kind="brush" {...props} /> }
+export function IconFigmaPencil(props: DrawingInstrumentProps) { return <DrawingInstrument kind="pencil" {...props} /> }
 
 /** Figma-style text-on-path tool: T sitting on a curve. */
 export function IconTextOnPath({ size = 20, ...props }: IconProps) {

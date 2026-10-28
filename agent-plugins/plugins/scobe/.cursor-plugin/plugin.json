@@ -1,0 +1,14 @@
+{
+  "name": "scobe",
+  "displayName": "Scobe",
+  "version": "0.1.0",
+  "description": "Build on a canvas of live browsers and editable frames that Cursor can read and write to.",
+  "author": {
+    "name": "Jesse Bishop"
+  },
+  "homepage": "https://github.com/jesbishop/scobe",
+  "license": "MIT",
+  "keywords": ["cursor", "plugin", "mcp", "design", "canvas"],
+  "logo": "./assets/logo.svg",
+  "mcpServers": "./mcp.cursor.json"
+}

@@ -24,6 +24,16 @@ function categoryFor(presets: SizePreset[], width: number, height: number): stri
   return 'Desktop'
 }
 
+/** A tall page with a down arrow: "the whole page, top to bottom". */
+function FullPageIcon() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden>
+      <rect x="3.5" y="1.5" width="9" height="13" rx="1.5" stroke="currentColor" strokeWidth="1.2" />
+      <path d="M8 4.5v6M5.75 8.5 8 10.75 10.25 8.5" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  )
+}
+
 function DeviceIcon({ category }: { category: string }) {
   if (category === 'Tablet') return <IconTablet />
   if (category === 'Phone') return <IconPhone />
@@ -64,6 +74,8 @@ export function FrameActionBar({
   snapshot?: {
     active: boolean
     onToggle: () => void
+    /** Snapshot the whole page, top to bottom, instead of one clicked element. */
+    onCapturePage?: () => void
   }
   measure?: {
     active: boolean
@@ -290,6 +302,22 @@ export function FrameActionBar({
               <PhotoCameraOutlinedIcon sx={{ fontSize: 16 }} />
               <span>Snapshot</span>
             </button>
+            {snapshot.onCapturePage && (
+              <button
+                type="button"
+                className="frame-action-measure"
+                title="Capture page — snapshot the entire page, top to bottom"
+                onPointerDown={(event) => event.stopPropagation()}
+                onClick={(event) => {
+                  event.preventDefault()
+                  event.stopPropagation()
+                  snapshot.onCapturePage?.()
+                }}
+              >
+                <FullPageIcon />
+                <span>Capture page</span>
+              </button>
+            )}
           </>
         )}
         {dock && (
@@ -335,7 +363,7 @@ export function FrameActionBar({
         </button>
       </div>
       {snapshot?.active && (
-        <div className="frame-action-hint">Click anything on the page to paste it onto the canvas · ↑ parent · ↓ child · Esc</div>
+        <div className="frame-action-hint">Click anything on the page to paste it onto the canvas · ↑ parent · ↓ child · Esc · or Capture page for the whole page</div>
       )}
     </div>
   )

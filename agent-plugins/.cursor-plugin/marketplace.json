@@ -1,0 +1,17 @@
+{
+  "name": "scobe",
+  "owner": {
+    "name": "Jesse Bishop"
+  },
+  "metadata": {
+    "description": "Scobe is an infinite canvas of live browsers and editable frames, driven by your coding agent.",
+    "version": "0.1.0"
+  },
+  "plugins": [
+    {
+      "name": "scobe",
+      "source": "./plugins/scobe",
+      "description": "Connect to the Scobe desktop app using its MCP server."
+    }
+  ]
+}

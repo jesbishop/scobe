@@ -1,6 +1,6 @@
 import type { DesignNode } from '../shared/types'
 import type { JevAnswers, JevChoiceAnswer, JevQuestions } from '../shared/jev'
-import { expandWithDescendants, normalizePadding } from '../shared/layoutEngine'
+import { enableAutoLayoutOnFrame, expandWithDescendants, isAutoLayout, normalizePadding, reflowAutoLayout } from '../shared/layoutEngine'
 import {
   buildComponent,
   buttonPaint,
@@ -14,6 +14,8 @@ import {
   type ButtonVariant,
   type UiKind
 } from './jevComponents'
+import { applyProperties, capabilityById, capabilityQuestions, matchCapabilities, type LastEdit, type PropertyEdit } from './jevCapabilities'
+import { commandById, matchCommand, type CommandId } from './jevCommands'
 
 export type JevStep = {
   key: string
@@ -46,6 +48,8 @@ export type JevCanvas = {
   selectedIds: string[]
   lastTargetId: string | null
   center: { x: number; y: number }
+  /** Previous property edit, for follow-ups like "thicker" or "again". */
+  lastEdit?: LastEdit
 }
 
 type Candidate = { key: string; node: DesignNode; label: string; detail: string }
@@ -58,12 +62,16 @@ export type JevContext = {
   state: string
   contextTitle: string
   contextDetail: string
+  /** Exactly the selected layers (not resolved to components). */
+  selected: DesignNode[]
+  lastEdit?: LastEdit
 }
 
-type Action = 'add' | 'create' | 'edit' | 'remove' | 'none'
+/** `command` runs a structure/app action in App; `delegate` hands the request to Claude. */
+type Action = 'add' | 'create' | 'edit' | 'remove' | 'none' | 'command' | 'delegate'
 type Position = 'end' | 'start' | 'after' | 'before' | 'inside'
 
-const ACTIONS: Record<Action, string> = {
+const ACTIONS: Record<Exclude<Action, 'command' | 'delegate'>, string> = {
   add: 'Add a new element (text field, button, checkbox, heading, description, divider…) into the existing design on the canvas.',
   create:
     'Start a brand-new, separate design (e.g. "make a card", "create a login dialog") because the canvas has no design yet, or the user explicitly asks for a new or another one.',
@@ -107,6 +115,7 @@ type Edit =
   | 'bolder'
   | 'lighter'
   | 'rounder'
+  | 'radius'
   | 'sharper'
   | 'align_center'
   | 'align_left'
@@ -123,18 +132,21 @@ type Edit =
   | 'light'
   | 'horizontal'
   | 'vertical'
+  | 'flex'
   | 'move_up'
   | 'move_down'
   | 'hide'
+  /** Any inspector property from the capability catalog. */
+  | 'property'
 
-const EDITS: Record<Edit, string> = {
+const EDITS: Record<Exclude<Edit, 'property'>, string> = {
   text: 'Change the words: rename, relabel, retitle, change the text, label, title, placeholder or copy.',
   full_width: 'Make it full width / stretch it across / fill the available width.',
   fit_width: 'Make it fit its content / auto width / not full width.',
   wider: 'Make it a bit wider (relative), with no exact pixel size said.',
   narrower: 'Make it a bit narrower / thinner (relative), with no exact pixel size said.',
   size:
-    'Set an exact size in pixels when the user gives numbers: "800×800", "800 by 800", "width 400 height 200", "make it 320px wide", "set height to 48". Prefer this over bigger/smaller whenever dimensions are named.',
+    'Set an exact size in pixels when the user gives numbers: "800×800", "800 by 800", "width 400 height 200", "make it 320px wide", "make this 200px", "set height to 48". A lone pixel value means width. Prefer this over bigger/smaller whenever dimensions are named.',
   color: 'Change it to a specific color (blue, red, green, purple, black, a hex code…).',
   style_primary: 'Make it the primary / solid / filled style.',
   style_secondary: 'Make it the secondary / subtle / gray style.',
@@ -145,7 +157,8 @@ const EDITS: Record<Edit, string> = {
   smaller: 'Make it relatively smaller / shorter with no exact pixel size given.',
   bolder: 'Make the text bold / heavier.',
   lighter: 'Make the text regular weight / not bold.',
-  rounder: 'Round the corners more / make it pill-shaped.',
+  rounder: 'Round the corners, add corner radius, or make it pill-shaped, when no exact pixel radius is given.',
+  radius: 'Set an exact corner radius in pixels: "corner radius 12", "round the corners to 16", "8px radius".',
   sharper: 'Square corners / remove the rounding.',
   align_center: 'Center it / center the content.',
   align_left: 'Align it to the left / start.',
@@ -160,8 +173,9 @@ const EDITS: Record<Edit, string> = {
   uncheck: 'Uncheck it / turn it off.',
   dark: 'Switch it to dark mode / dark theme.',
   light: 'Switch it to light mode / light theme.',
-  horizontal: 'Lay the items out horizontally / side by side / in a row.',
-  vertical: 'Stack the items vertically / in a column.',
+  horizontal: 'Lay the items out horizontally / side by side / in a row. The element already has auto layout.',
+  vertical: 'Stack the items vertically / in a column. The element already has auto layout.',
+  flex: 'Turn the selected layer into a flexbox / auto layout. Use this for "flexbox", "flex", or "auto layout", including when it is not a flex container yet. Row unless they say column.',
   move_up: 'Move it up / earlier / above the previous item.',
   move_down: 'Move it down / later / below the next item.',
   hide: 'Hide it (keep it but make it invisible).'
@@ -254,6 +268,36 @@ export function describeNode(node: DesignNode, nodes: DesignNode[]): string {
   return `${node.type}${name ? ` ${quote(name)}` : words ? ` ${quote(words)}` : ''}`
 }
 
+/** Compact inspector readout so chat and Jev see the layer’s real settings, not just its name. */
+export function describeProperties(node: DesignNode): string {
+  const layout = node.layout
+  const pad = layout ? normalizePadding(layout.padding) : null
+  const bits = [
+    node.type,
+    node.width != null ? `width ${Math.round(node.width)}px` : '',
+    node.height != null ? `height ${Math.round(node.height)}px` : '',
+    node.radius ? `corner radius ${Math.round(node.radius)}px` : 'corners square',
+    node.cornerRadii ? `corners ${node.cornerRadii.tl}/${node.cornerRadii.tr}/${node.cornerRadii.br}/${node.cornerRadii.bl}` : '',
+    node.fill ? `fill ${node.fill}` : '',
+    node.stroke ? `stroke ${node.stroke}${node.strokeWidth ? ` ${node.strokeWidth}px` : ''}` : '',
+    node.opacity != null && node.opacity !== 1 ? `opacity ${node.opacity}` : '',
+    node.rotation ? `rotation ${Math.round(node.rotation)}°` : '',
+    node.fontFamily ? `font ${node.fontFamily}` : '',
+    node.fontSize ? `font size ${node.fontSize}px` : '',
+    node.fontWeight ? `weight ${node.fontWeight}` : '',
+    node.textAlign ? `text align ${node.textAlign}` : '',
+    node.text ? `text ${quote(node.text, 48)}` : '',
+    layout && layout.mode !== 'none'
+      ? `flex ${layout.mode}${layout.wrap ? ' wrap' : ''}${layout.gap != null ? ` gap ${layout.gap}` : ''}${pad ? ` padding ${pad.t}/${pad.r}/${pad.b}/${pad.l}` : ''}`
+      : 'not a flexbox',
+    node.layoutSizingH ? `width sizing ${node.layoutSizingH}` : '',
+    node.layoutSizingV ? `height sizing ${node.layoutSizingV}` : '',
+    node.visible === false ? 'hidden' : '',
+    node.locked ? 'locked' : ''
+  ]
+  return bits.filter(Boolean).join(', ')
+}
+
 export function buildContext(request: string, canvas: JevCanvas): JevContext {
   const nodes = canvas.nodes
   const byId = byIdMap(nodes)
@@ -335,14 +379,13 @@ export function buildContext(request: string, canvas: JevCanvas): JevContext {
     .join('\n')
   const count = root ? descendantsOf(nodes, root.id).filter((n) => !n.uiRole || COMPONENT_ROLES.has(n.uiRole)).length : 0
 
+  const focusCandidate = pointer || selectedCandidates[selectedCandidates.length - 1] || null
   const selectionLine =
     selectedCandidates.length > 1
-      ? `The user has selected ${selectedCandidates.length} elements: ${selectedCandidates.map((item) => `${item.key} (${item.label})`).join(', ')}. Apply the request to these selected elements.`
-      : selectedCandidates.length === 1
-        ? `The user has selected ${selectedCandidates[0].key}: ${selectedCandidates[0].label}. Prefer this as the target of the request.`
-        : pointer
-          ? `The user is pointing at ${pointer.key}: ${pointer.label}.`
-          : 'The user is not pointing at or selecting any element.'
+      ? `The user has selected ${selectedCandidates.length} elements: ${selectedCandidates.map((item) => `${item.key} (${item.label}; ${describeProperties(item.node)})`).join(', ')}. Apply the request to these selected elements.`
+      : focusCandidate
+        ? `The user has selected ${focusCandidate.key}: ${focusCandidate.label}. Current settings: ${describeProperties(focusCandidate.node)}. Apply the request to this layer. Prefer this as the target.`
+        : 'The user is not pointing at or selecting any element.'
 
   const state = [
     `Spoken design request: "${request}"`,
@@ -361,7 +404,9 @@ export function buildContext(request: string, canvas: JevCanvas): JevContext {
     pointer,
     state,
     contextTitle: root ? describeNode(root, nodes).replace(/^“(.*)” card$/, '$1') : 'Empty canvas',
-    contextDetail: root ? `Existing component · ${count} element${count === 1 ? '' : 's'}` : 'Start a new design'
+    contextDetail: root ? `Existing component · ${count} element${count === 1 ? '' : 's'}` : 'Start a new design',
+    selected: selectedNodes,
+    lastEdit: canvas.lastEdit
   }
 }
 
@@ -402,9 +447,23 @@ export function buildQuestions(ctx: JevContext): JevQuestions {
       type: 'choice',
       instructions: 'If something is being added, where should it go relative to the referenced element?',
       criteria: POSITIONS
-    }
+    },
+    multi_step: {
+      type: 'noul',
+      instructions:
+        'Does this request need a whole screen, section, or layout designed, several new elements built, or an open-ended redesign — more than one simple change?',
+      criteria: {
+        true: 'Yes, e.g. "build a login screen", "design a pricing section with three plans", "make a landing page hero", "make this look like Stripe", "create a dashboard".',
+        false: 'No: one change to an existing element, one structure or app action, or adding a single simple component.'
+      }
+    },
+    ...capabilityQuestions()
   }
 }
+
+/** Big build or open-ended redesign wording, used when Jev's multi-step answer is unavailable. */
+const MULTI_STEP =
+  /\b(build|design|create|make|generate|mock ?up|lay ?out)\s+(me\s+)?(a|an|the|some)?\s*([\w-]+\s+){0,4}(screen|section|layout|landing page|dashboard|hero|navbar|nav bar|footer|pricing (section|page|table)|website|onboarding flow)\b|\b(look|feel)\s+like\b|\bredesign\b|\brestyle\b/i
 
 function choice(answers: JevAnswers, key: string): JevChoiceAnswer | null {
   const answer = answers[key]
@@ -468,7 +527,7 @@ export function extractNewText(request: string): string | undefined {
   return m ? capitalize(cleanPhrase(m[1])) || undefined : undefined
 }
 
-const NAMED_COLORS: Record<string, string> = {
+export const NAMED_COLORS: Record<string, string> = {
   // Core
   red: '#dc2626',
   maroon: '#800000',
@@ -557,11 +616,30 @@ export function extractDimensions(request: string): { width?: number; height?: n
   )
   const width = widthOnly ? Number(widthOnly[1] || widthOnly[2]) : undefined
   const height = heightOnly ? Number(heightOnly[1] || heightOnly[2]) : undefined
-  if (width == null && height == null) return undefined
-  return {
-    ...(width != null && Number.isFinite(width) ? { width: clamp(width) } : {}),
-    ...(height != null && Number.isFinite(height) ? { height: clamp(height) } : {})
+  if (width != null || height != null) {
+    return {
+      ...(width != null && Number.isFinite(width) ? { width: clamp(width) } : {}),
+      ...(height != null && Number.isFinite(height) ? { height: clamp(height) } : {})
+    }
   }
+  // "make this 200px" with no axis means the width, unless the number belongs to radius, gap, type, etc.
+  if (/\b(radius|corner|gap|padding|font|opacity|blur|weight)\b/i.test(request)) return undefined
+  const lone = request.match(/\b(\d+(?:\.\d+)?)\s*(?:px|pixels?)\b/i)
+  if (!lone || !Number.isFinite(Number(lone[1]))) return undefined
+  return { width: clamp(Number(lone[1])) }
+}
+
+/** Exact corner radius from "round the corners to 16" or "corner radius 12". */
+export function extractCornerRadius(request: string): number | undefined {
+  const match =
+    request.match(/\bround(?:ed)?\s+(?:the\s+|its\s+)?corners?\s+(?:to|at|by)\s*(\d+(?:\.\d+)?)/i) ||
+    request.match(/\b(?:corner\s*radius|border\s*radius|radius)\s*(?:to|of|=|:)?\s*(\d+(?:\.\d+)?)/i) ||
+    request.match(/\b(\d+(?:\.\d+)?)\s*(?:px|pixels?)?\s*(?:corner\s*)?radius\b/i) ||
+    request.match(/\b(\d+(?:\.\d+)?)\s*(?:px|pixels?)?\s+corners?\b/i)
+  if (!match) return undefined
+  const value = Number(match[1])
+  if (!Number.isFinite(value)) return undefined
+  return Math.max(0, Math.min(9999, Math.round(value)))
 }
 
 function extractVariant(request: string): ButtonVariant | undefined {
@@ -578,11 +656,17 @@ export function isNoise(text: string): boolean {
   return !t || /^(you|thank you|thanks|bye|okay|ok|um+|uh+|hmm+|so)$/.test(t)
 }
 
-/** Splits a dictated paragraph into one instruction per sentence. */
+/** Words that start a new instruction, so "make it bigger and round the corners" is two edits. */
+const INSTRUCTION_VERB =
+  'make|set|add|remove|round|change|turn|give|put|rotate|flip|mirror|center|align|move|nudge|duplicate|hide|show|lock|unlock|bold|underline|italicize|increase|decrease|use|apply|resize|scale|wrap|group|ungroup|send|bring|delete|fill|hug|pause|straighten|tilt|outline|rename|switch|convert|reduce|raise|lower|shrink|grow|copy'
+const CLAUSE_BREAK = new RegExp(`\\s*(?:,\\s*(?:and\\s+|then\\s+|and then\\s+)?|\\s+and\\s+(?:then\\s+)?|\\s+then\\s+|;\\s*)(?=(?:${INSTRUCTION_VERB})\\b)`, 'i')
+
+/** Splits a dictated paragraph into one instruction per sentence, and chained instructions within a sentence. */
 export function splitRequests(text: string): string[] {
   return text
     .split(/(?<=[.!?]["”']?)\s+(?=[A-Z])/)
-    .map((part) => part.trim())
+    .flatMap((sentence) => sentence.split(CLAUSE_BREAK))
+    .map((part) => part.trim().replace(/^(and|then)\s+/i, ''))
     .filter((part) => part && !isNoise(part))
 }
 
@@ -596,6 +680,12 @@ export type JevPlan = {
   position: Position
   confidence: number
   targetConfidence: number
+  /** Set when `edit === 'property'`. */
+  properties?: PropertyEdit[]
+  /** Set when `action === 'command'`. */
+  command?: CommandId
+  /** What to do instead when `delegate` can't reach Claude (no API key). */
+  fallbackAction?: Action
 }
 
 export function planFromAnswers(ctx: JevContext, answers: JevAnswers, override?: Partial<Record<string, string>>): JevPlan {
@@ -605,7 +695,7 @@ export function planFromAnswers(ctx: JevContext, answers: JevAnswers, override?:
   let target = ctx.candidates.find((item) => item.key === targetKey) || null
   // Editing or removing always needs a subject; fall back to what the user points at.
   if (!target && (action === 'edit' || action === 'remove')) target = ctx.pointer
-  return {
+  const plan: JevPlan = {
     action,
     target,
     kind: pick('component', 'text') as UiKind,
@@ -614,6 +704,27 @@ export function planFromAnswers(ctx: JevContext, answers: JevAnswers, override?:
     confidence: override?.action ? 1 : (choice(answers, 'action')?.confidence ?? 0),
     targetConfidence: override?.target ? 1 : (choice(answers, 'target')?.confidence ?? 0)
   }
+  const area = pick('area', 'component')
+  const local = matchCommand(ctx.request, ctx.selected)
+  if (local) return { ...plan, action: 'command', command: local }
+  const multiStep = answers.multi_step?.type === 'noul' ? answers.multi_step.noul > 0.5 : false
+  if (action !== 'none' && (multiStep || MULTI_STEP.test(ctx.request))) {
+    return { ...plan, action: 'delegate', fallbackAction: action }
+  }
+  if (area === 'structure' || area === 'app') {
+    const commandId = choice(answers, `cap_${area}`)?.choice
+    if (commandId && commandById(commandId) && action !== 'none') return { ...plan, action: 'command', command: commandId as CommandId }
+  }
+  if (action === 'edit' && target && area !== 'component') {
+    const capId = choice(answers, `cap_${area}`)?.choice
+    if (capId && capabilityById(capId)) {
+      // The words may name more than one property ("2px dashed red border"); keep them all when Jev's pick is among them.
+      const local = matchCapabilities(ctx.request, target.node, ctx.lastEdit)
+      plan.edit = 'property'
+      plan.properties = local.some((item) => item.id === capId) ? local : [{ id: capId }]
+    }
+  }
+  return plan
 }
 
 /**
@@ -621,6 +732,10 @@ export function planFromAnswers(ctx: JevContext, answers: JevAnswers, override?:
  * Skips the Jev round-trip so typing feels real-time; Send still re-checks with Jev.
  */
 export function fastPlanFromRequest(request: string, ctx: JevContext): JevPlan | null {
+  const command = matchCommand(request, ctx.selected)
+  if (command) {
+    return { action: 'command', command, target: ctx.pointer, kind: 'text', edit: 'text', position: 'end', confidence: 1, targetConfidence: 1 }
+  }
   const target = ctx.pointer
   if (!target) return null
   const base = {
@@ -632,11 +747,21 @@ export function fastPlanFromRequest(request: string, ctx: JevContext): JevPlan |
     targetConfidence: 1
   }
 
+  const properties = matchCapabilities(request, target.node, ctx.lastEdit)
+  if (properties.length) return { ...base, edit: 'property', properties }
+
+  if (extractCornerRadius(request) != null) return { ...base, edit: 'radius' }
   if (extractDimensions(request)) return { ...base, edit: 'size' }
   if (extractColor(request)) return { ...base, edit: 'color' }
   if (extractNewText(request)) return { ...base, edit: 'text' }
 
   const t = request.toLowerCase()
+  if (/\b(flex\s*box|flexbox|auto[-\s]?layout)\b/.test(t) || /\bmake\s+(?:it|this|that)\s+(?:a\s+)?flex\b/.test(t)) {
+    return { ...base, edit: 'flex' }
+  }
+  if (/\bround(?:ed)?\s+(?:the\s+|its\s+)?corners?\b/.test(t) || /\bmake\s+(?:it|this|the\s+corners?)\s+round/.test(t)) {
+    return { ...base, edit: 'rounder' }
+  }
   if (/\bfull[\s-]?width\b/.test(t) || /\bstretch\b/.test(t)) return { ...base, edit: 'full_width' }
   if (/\bfit[\s-]?width\b|\bhug\b|\bauto[\s-]?width\b/.test(t)) return { ...base, edit: 'fit_width' }
   if (/\bwider\b/.test(t)) return { ...base, edit: 'wider' }
@@ -690,7 +815,9 @@ export const ACTION_LABELS: Record<Action, string> = {
   create: 'Start a new design',
   edit: 'Edit the existing component',
   remove: 'Remove from the component',
-  none: 'No design change'
+  none: 'No design change',
+  command: 'Run an action',
+  delegate: 'Hand off to Claude'
 }
 
 function insertAt(nodes: DesignNode[], fresh: DesignNode[], index: number): DesignNode[] {
@@ -804,6 +931,13 @@ function applyEdit(plan: JevPlan, ctx: JevContext, canvas: JevCanvas): ApplyResu
   let nodes = canvas.nodes
   const byId = byIdMap(nodes)
   const picked = plan.target.node
+  if (plan.edit === 'property' && plan.properties?.length) {
+    // Property edits land on exactly what's selected (even a text inside a component), and on every selected layer.
+    const selected = canvas.selectedIds.map((id) => byId.get(id)).filter((node): node is DesignNode => Boolean(node))
+    const coversTarget = selected.some((node) => node.id === picked.id || componentOf(node, byId).id === picked.id)
+    const targets = coversTarget ? selected : [picked]
+    return applyProperties(plan.properties, targets, nodes, ctx.request, (node, all) => describeNode(componentOf(node, byIdMap(all)), all))
+  }
   const target = plan.edit === 'text' ? picked : componentOf(picked, byId)
   const subtree = [target, ...descendantsOf(nodes, target.id)]
   const patches = new Map<string, Partial<DesignNode>>()
@@ -921,11 +1055,18 @@ function applyEdit(plan: JevPlan, ctx: JevContext, canvas: JevCanvas): ApplyResu
       for (const t of texts) patch(t, { fontWeight: plan.edit === 'bolder' ? 700 : 400 })
       break
     case 'rounder':
+    case 'radius':
     case 'sharper': {
       const surface = target.uiRole === 'field' ? find('field-box') : target.uiRole === 'checkbox' ? find('checkbox-box') : target
       if (!surface) break
+      if (plan.edit === 'radius') {
+        const radius = extractCornerRadius(ctx.request)
+        if (radius == null) return { error: 'Which corner radius? Try “round the corners to 12”.' }
+        patch(surface, { radius, cornerRadii: undefined })
+        break
+      }
       const r = surface.radius || 0
-      patch(surface, { radius: plan.edit === 'rounder' ? (r >= 12 ? 999 : r + 6) : 0, cornerRadii: undefined })
+      patch(surface, { radius: plan.edit === 'rounder' ? (r >= 12 ? 999 : r === 0 ? 12 : r + 6) : 0, cornerRadii: undefined })
       break
     }
     case 'align_center':
@@ -996,9 +1137,27 @@ function applyEdit(plan: JevPlan, ctx: JevContext, canvas: JevCanvas): ApplyResu
     case 'horizontal':
     case 'vertical': {
       const host = target.layout ? target : parent
-      if (!host?.layout) return { error: 'That element has no layout direction.' }
+      if (!host?.layout || host.layout.mode === 'none') return { error: 'That element has no layout direction. Say “make this a flexbox” first.' }
       patch(host, { layout: { ...host.layout, mode: plan.edit } })
       break
+    }
+    case 'flex': {
+      const host = target
+      const mode = /\b(vertical|column|stack)\b/i.test(ctx.request) ? 'vertical' : 'horizontal'
+      let working = nodes.map((node) => (node.id === host.id && node.type !== 'frame' ? { ...node, type: 'frame' as const } : node))
+      const frame = working.find((node) => node.id === host.id)
+      if (!frame) return { error: 'Select a layer to turn into a flexbox.' }
+      if (isAutoLayout(frame)) {
+        working = reflowAutoLayout(
+          working.map((node) =>
+            node.id === frame.id && node.layout ? { ...node, layout: { ...node.layout, mode, grid: undefined } } : node
+          )
+        )
+      } else {
+        working = enableAutoLayoutOnFrame(working, frame.id, { mode })
+      }
+      const label = describeNode(frame, working)
+      return { nodes: working, summary: `Made ${label} a flexbox`, touchedId: frame.id }
     }
     case 'move_up':
     case 'move_down': {

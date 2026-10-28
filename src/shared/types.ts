@@ -174,6 +174,12 @@ export type DesignNode = {
   fills?: import('./paint').Paint[]
   opacity?: number
   /** Uniform corner radius. When `cornerRadii` is set, prefer those. */
+  polygonCount?: number
+  starCount?: number
+  starRatio?: number
+  arcStart?: number
+  arcSweep?: number
+  arcInnerRadius?: number
   radius?: number
   /** Independent corner radii (TL / TR / BR / BL), Figma-style. */
   cornerRadii?: {
@@ -188,6 +194,7 @@ export type DesignNode = {
   flipY?: boolean
   /** When true, W/H stay proportional in the inspector and on canvas resize. */
   aspectLocked?: boolean
+  strokePaint?: import('./paint').Paint
   stroke?: string
   strokeWidth?: number
   strokeOpacity?: number

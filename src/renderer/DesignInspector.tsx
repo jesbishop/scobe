@@ -78,12 +78,13 @@ import { measureSelectionGaps } from './selectionSpace'
 import { setSpacingHint, spacingHintProps } from './spacingHint'
 import type { InspectInfo } from '../shared/types'
 import { nodeBounds } from './canvasMath'
-import { FillPicker } from './FillPicker'
+import { FillPicker, type ColorSet } from './FillPicker'
 import { FillRow, SliderField, StrokeWeightIcon } from './InspectorFields'
 import { FrameDevicePicker } from './FrameDevicePicker'
 import { FramePresetsPanel } from './FramePresetsPanel'
 import { ShaderEditor } from './ShaderEditor'
 import { isTextOnPath } from './textPath'
+import { measureTextLines } from './textLayout'
 import { TextAlignIcon, TextVAlignIcon, TypeSettingsIcon, TypeSettingsPopup } from './TypeSettings'
 import { createPortal } from 'react-dom'
 import {
@@ -433,7 +434,7 @@ export function DesignInspector({
           opacity={(node.opacity ?? 1) * 100}
           blend={normalizeBlendMode(node.blendMode)}
           radii={
-            isBox || isText
+            isBox || isText || node.type === 'polygon' || node.type === 'star'
               ? resolveCornerRadii(node, isSection ? 2 : 0)
               : undefined
           }
@@ -443,7 +444,7 @@ export function DesignInspector({
           onOpacity={(opacity) => onPatchNode(node.id, { opacity: opacity / 100 })}
           onBlend={(blendMode) => onPatchNode(node.id, { blendMode })}
           onRadii={
-            isBox || isText
+            isBox || isText || node.type === 'polygon' || node.type === 'star'
               ? (next, mode) => {
                   onPatchNode(node.id, {
                     radius: next.tl,
@@ -453,6 +454,20 @@ export function DesignInspector({
               : undefined
           }
         />
+        {(node.type === 'polygon' || node.type === 'star') && <section className="prop-section">
+          <div className="prop-arc-fields" style={{gridTemplateColumns:node.type === 'star' ? 'repeat(2,minmax(0,1fr))' : 'minmax(0,1fr)'}}>
+            <div><div className="prop-pos-label">Count</div><NumField prefix="⌗" value={node.type === 'star' ? node.starCount ?? 5 : node.polygonCount ?? 3} onChange={value => onPatchNode(node.id,node.type === 'star' ? { starCount:Math.max(3,Math.min(60,Math.round(value))) } : { polygonCount:Math.max(3,Math.min(60,Math.round(value))) })} /></div>
+            {node.type === 'star' && <div><div className="prop-pos-label">Ratio</div><NumField suffix="%" value={(node.starRatio ?? .382)*100} onChange={value => onPatchNode(node.id,{starRatio:Math.max(.01,Math.min(.99,value/100))})} /></div>}
+          </div>
+        </section>}
+        {node.type === 'ellipse' && <section className="prop-section prop-arc-section">
+          <div className="prop-section-head">Arc</div>
+          <div className="prop-arc-fields">
+            <div title="Start angle"><NumField suffix="°" value={node.arcStart || 0} onChange={value => onPatchNode(node.id, { arcStart: ((value % 360) + 360) % 360 })} /><span>Start</span></div>
+            <div title="Sweep"><NumField suffix="%" value={(node.arcSweep ?? 360)/3.6} onChange={value => onPatchNode(node.id, { arcSweep: Math.max(.1, Math.min(360,value*3.6)) })} /><span>Sweep</span></div>
+            <div title="Inner radius"><NumField suffix="%" value={(node.arcInnerRadius || 0)*100} onChange={value => onPatchNode(node.id, { arcInnerRadius: Math.max(0, Math.min(.99,value/100)) })} /><span>Ratio</span></div>
+          </div>
+        </section>}
         {isText && (
           <TextBlock
             node={node}
@@ -460,7 +475,7 @@ export function DesignInspector({
             onPatch={(patch) => onPatchNode(node.id, patch)}
           />
         )}
-        <FillBlock
+        {node.type !== 'line' && node.type !== 'arrow' && <FillBlock
           paints={getNodePaints(node)}
           fallbackHex={fill}
           colorSource={nodes.filter((item) => item.pageId === node.pageId)}
@@ -474,7 +489,7 @@ export function DesignInspector({
               ...(node.type === 'image' && image?.type === 'image' ? { imageDataUrl: image.imageDataUrl } : {})
             })
           }}
-        />
+        />}
         <StrokeBlock
           enabled={Boolean(node.strokeWidth) || isSection}
           hex={stroke}
@@ -509,18 +524,18 @@ export function DesignInspector({
           onOpacity={(strokeOpacity) => onPatchNode(node.id, { strokeOpacity: strokeOpacity / 100 })}
           onAlign={(next) => onPatchNode(node.id, { strokeAlign: next, strokeWidth: node.strokeWidth || 1 })}
           join={node.type === 'path' ? node.strokeJoin || 'round' : 'miter'}
-          cap={node.type === 'path' ? node.strokeCap || 'round' : 'none'}
+          cap={node.type === 'path' ? node.strokeCap || 'round' : node.strokeCap || 'none'}
           onJoin={plainPath ? (strokeJoin) => onPatchNode(node.id, { strokeJoin }) : undefined}
-          onCap={node.type === 'path' && !node.closed ? (strokeCap) => onPatchNode(node.id, { strokeCap }) : undefined}
-          profile={node.type === 'path' ? node.strokeProfile || 'uniform' : 'uniform'}
+          onCap={['path','line','arrow'].includes(node.type) && !node.closed ? (strokeCap) => onPatchNode(node.id, { strokeCap }) : undefined}
+          profile={['path','line','arrow'].includes(node.type) ? node.strokeProfile || 'uniform' : 'uniform'}
           profileFlip={Boolean(node.strokeProfileFlip)}
           onProfile={
-            node.type === 'path'
+            ['path','line','arrow'].includes(node.type)
               ? (strokeProfile) =>
                   onPatchNode(node.id, strokeProfile === 'uniform' ? { strokeProfile: undefined } : { strokeProfile, strokeDash: undefined })
               : undefined
           }
-          onProfileFlip={node.type === 'path' ? () => onPatchNode(node.id, { strokeProfileFlip: !node.strokeProfileFlip }) : undefined}
+          onProfileFlip={['path','line','arrow'].includes(node.type) ? () => onPatchNode(node.id, { strokeProfileFlip: !node.strokeProfileFlip }) : undefined}
           dash={plainPath ? node.strokeDash || 0 : 0}
           gap={node.strokeGap}
           onDash={
@@ -602,6 +617,10 @@ export function DesignInspector({
           }}
           onToggleHidden={() => onPatchPage({ fillHidden: !page.fillHidden })}
         />
+      </section>
+      <section className="prop-section prop-section-mcp">
+        <div className="prop-section-head">MCP</div>
+        <button type="button" className="prop-copy-link" onClick={() => window.dispatchEvent(new Event('scobe:open-mcp'))}>Connect your agent</button>
       </section>
       {inspectOn && inspect && (
         <section className="prop-section">
@@ -1440,6 +1459,12 @@ function LayoutDimsBlock({
   return (
     <section className="prop-section prop-section-layout">
       <div className="prop-section-head">Layout</div>
+      {textMode && <><div className="prop-pos-label">Resizing</div><div className="text-sizing-options" role="group" aria-label="Text resizing">
+        {(['auto-width','auto-height','fixed'] as const).map((value,index) => <button key={value} type="button" title={['Auto width','Auto height','Fixed size'][index]} aria-label={['Auto width','Auto height','Fixed size'][index]} aria-pressed={textResize === value} onClick={() => onChange({textResize:value})}>
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden><path d={index === 0 ? 'M3.5 4.5v7M12.5 4.5v7M4 8h8M5.5 6.5 4 8l1.5 1.5M10.5 6.5 12 8l-1.5 1.5' : index === 1 ? 'M4.5 3.5h7M4.5 12.5h7M8 4v8M6.5 5.5 8 4l1.5 1.5M6.5 10.5 8 12l1.5-1.5' : 'M3.5 3.5h9v9h-9zM5.5 6h5M5.5 8h5M5.5 10h3'} stroke="currentColor" strokeWidth="1" strokeLinecap="square" strokeLinejoin="miter" /></svg>
+        </button>)}
+      </div></>}
+
       {showAbsolute && !textMode && (
         <label className="al-clip prop-layout-absolute">
           <input
@@ -2661,29 +2686,62 @@ function FillBlock({
   const rowRefs = useRef<Array<HTMLDivElement | null>>([])
   const list = paints
 
-  const pageColors = useMemo(() => {
+  // The swatches can show the whole page or any one top-level frame (Figma's "On this page" menu).
+  const colorSets = useMemo<ColorSet[]>(() => {
     if (openIndex == null) return []
-    const out: Array<{ color: string; opacity: number }> = []
-    const seen = new Set<string>()
-    const push = (color: string, opacity: number) => {
-      const hex = toHex(color, '')
-      if (!hex) return
-      const alpha = Math.round(Math.max(0, Math.min(1, opacity)) * 100) / 100
-      const key = `${hex}:${alpha}`
-      if (seen.has(key)) return
-      seen.add(key)
-      out.push({ color: hex, opacity: alpha })
-    }
-    for (const item of colorSource) {
-      for (const paint of getNodePaints(item)) {
-        if (paint.visible === false) continue
-        if (paint.type === 'solid') push(paint.color, paint.opacity)
-        else if (paint.type === 'gradient') for (const stop of paint.stops) push(stop.color, stop.opacity)
+    const collect = (nodes: DesignNode[]) => {
+      const out: ColorSet['colors'] = []
+      const seen = new Set<string>()
+      const push = (color: string, opacity: number) => {
+        const hex = toHex(color, '')
+        if (!hex) return
+        const alpha = Math.round(Math.max(0, Math.min(1, opacity)) * 100) / 100
+        const key = `${hex}:${alpha}`
+        if (seen.has(key)) return
+        seen.add(key)
+        out.push({ color: hex, opacity: alpha })
       }
-      if (item.strokeWidth && item.stroke) push(item.stroke, item.strokeOpacity ?? 1)
-      if (out.length >= 72) break
+      for (const item of nodes) {
+        for (const paint of getNodePaints(item)) {
+          if (paint.visible === false) continue
+          if (paint.type === 'solid') push(paint.color, paint.opacity)
+          else if (paint.type === 'gradient') for (const stop of paint.stops) push(stop.color, stop.opacity)
+        }
+        if (item.strokeWidth && item.stroke) push(item.stroke, item.strokeOpacity ?? 1)
+        if (out.length >= 72) break
+      }
+      return out
     }
-    return out
+    const ids = new Set(colorSource.map((item) => item.id))
+    const children = new Map<string, DesignNode[]>()
+    for (const item of colorSource) {
+      if (!item.parentId) continue
+      const list = children.get(item.parentId)
+      if (list) list.push(item)
+      else children.set(item.parentId, [item])
+    }
+    const subtree = (root: DesignNode) => {
+      const out: DesignNode[] = []
+      const stack = [root]
+      while (stack.length) {
+        const node = stack.pop()!
+        out.push(node)
+        stack.push(...(children.get(node.id) || []))
+      }
+      return out
+    }
+    const frames = colorSource.filter(
+      (item) => (item.type === 'frame' || item.type === 'section') && (!item.parentId || !ids.has(item.parentId))
+    )
+    return [
+      { id: 'page', label: 'On this page', colors: collect(colorSource) },
+      ...frames.map((frame) => ({
+        id: frame.id,
+        label: frame.name || (frame.type === 'section' ? 'Section' : 'Frame'),
+        detail: `${Math.round(frame.width || 0)}×${Math.round(frame.height || 0)}`,
+        colors: collect(subtree(frame))
+      }))
+    ]
   }, [openIndex, colorSource])
 
   const patchAt = (index: number, paint: Paint) => {
@@ -2787,7 +2845,7 @@ function FillBlock({
                 {open && (
                   <FillPicker
                     paint={paint}
-                    pageColors={pageColors}
+                    colorSets={colorSets}
                     anchor={rowRefs.current[index]?.getBoundingClientRect() || null}
                     onChange={(next) => patchAt(index, next)}
                     onClose={() => setOpenIndex(null)}
@@ -2844,6 +2902,7 @@ function PageFillRow({
           type="button"
           className="prop-trail-ico"
           title={hidden ? 'Show page color' : 'Hide page color'}
+          aria-label={hidden ? 'Show page color' : 'Hide page color'}
           aria-pressed={hidden}
           onClick={onToggleHidden}
         >
@@ -5838,7 +5897,7 @@ function TextBlock({
         </div>
         <div className="prop-pos-label prop-type-c1">Line height</div>
         <div className="prop-pos-label prop-type-c2">Letter spacing</div>
-        <label className="prop-type-field prop-type-c1" title="Line height">
+        <label className="prop-type-field prop-type-c1" title="Line height" onMouseEnter={() => window.dispatchEvent(new CustomEvent('scobe:line-height-hint',{detail:node.id}))} onMouseLeave={() => { if (!document.activeElement?.closest('[title="Line height"]')) window.dispatchEvent(new CustomEvent('scobe:line-height-hint',{detail:null})) }} onFocus={() => window.dispatchEvent(new CustomEvent('scobe:line-height-hint',{detail:node.id}))} onBlur={() => window.dispatchEvent(new CustomEvent('scobe:line-height-hint',{detail:null}))}>
           <span className="prop-type-metric-ico" aria-hidden>
             <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
               <path d="M2.5 12h9" stroke="currentColor" strokeWidth="1.1" strokeLinecap="round" />
@@ -5848,6 +5907,19 @@ function TextBlock({
           <input
               value={lineAuto ? 'Auto' : String(node.lineHeight)}
               onFocus={(event) => event.currentTarget.select()}
+              onKeyDown={(event) => {
+                if (event.key !== 'ArrowUp' && event.key !== 'ArrowDown') return
+                event.preventDefault()
+                event.stopPropagation()
+                // From Auto, start at the height the text is actually rendering with.
+                const base = lineAuto
+                  ? Math.round(measureTextLines(node, node.text || 'Text')[0]?.height || size * 1.2)
+                  : node.lineHeight || 0
+                const step = (event.shiftKey ? 10 : 1) * (event.key === 'ArrowUp' ? 1 : -1)
+                onPatch({ lineHeight: Math.max(1, Math.round((base + step) * 100) / 100) })
+                const input = event.currentTarget
+                requestAnimationFrame(() => input.select())
+              }}
               onChange={(event) => {
                 const raw = event.target.value.trim().toLowerCase()
                 if (raw === '' || raw === 'auto' || raw === 'a') {
@@ -6352,7 +6424,7 @@ function SelectionColorsBlock({
   const collectTargets = (from: ColorHit): ColorTargets => {
     const targets: ColorTargets = { fills: [], stops: [], strokes: [] }
     for (const item of subtree) {
-      getNodePaints(item).forEach((paint, index) => {
+      (item.type === 'line' || item.type === 'arrow' ? [] : getNodePaints(item)).forEach((paint, index) => {
         if (paint.visible === false) return
         if (paint.type === 'solid' && matches(from.hex, from.opacity, paint.color, paint.opacity)) {
           targets.fills.push({ id: item.id, index })

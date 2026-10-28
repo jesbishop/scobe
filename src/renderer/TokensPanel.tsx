@@ -3,6 +3,7 @@ import { AnimatePresence, motion, useReducedMotion } from 'motion/react'
 import { AddIcon, KeyboardArrowDownIcon, SearchIcon } from './lucideIcons'
 import { ColorTokenPopup, type ColorToken } from './ColorTokenPopup'
 import { parseHex } from './colorMath'
+import { readTokenGroups, writeTokenGroups } from './tokenStore'
 
 type TokenKind =
   | 'color'
@@ -345,9 +346,12 @@ function TokenAddMenu({
 }
 
 export function TokensPanel() {
-  const [groups, setGroups] = useState(INITIAL_GROUPS)
+  const [groups, setGroups] = useState<TokenGroup[]>(() => (readTokenGroups() as TokenGroup[] | null) || INITIAL_GROUPS)
+  useEffect(() => {
+    writeTokenGroups(groups)
+  }, [groups])
   const [open, setOpen] = useState<Record<string, boolean>>(() =>
-    Object.fromEntries(INITIAL_GROUPS.map((group) => [group.id, true]))
+    Object.fromEntries(groups.map((group) => [group.id, true]))
   )
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [addMenu, setAddMenu] = useState<AddMenuState | null>(null)

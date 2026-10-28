@@ -1,6 +1,10 @@
-import { useEffect, useRef, useState, type ReactNode } from 'react'
+import { paintPreviewCss, type Paint } from '../shared/paint'
+import { createPortal } from 'react-dom'
+import { FillPicker } from './FillPicker'
+import { Undo2, Redo2 } from 'lucide-react'
+import { useEffect, useId, useLayoutEffect, useRef, useState, type ReactNode } from 'react'
 import { AnimatePresence, motion, useReducedMotion } from 'motion/react'
-import { ChangeHistoryIcon, ChatBubbleOutlineOutlinedIcon, CheckIcon, CircleOutlinedIcon, CloseIcon, CropSquareIcon, EastIcon, HorizontalRuleIcon, KeyboardArrowDownIcon, LanguageIcon, NearMeIcon, PanToolIcon, StarBorderIcon, StraightenIcon, TagIcon, TitleIcon, WidgetsOutlinedIcon, ZoomOutMapIcon } from './lucideIcons'
+import { VectorLayerIcon, SearchIcon, ImageLayerIcon, SettingsOutlinedIcon, ViewListIcon, DrawIcon, ChangeHistoryIcon, ChatBubbleOutlineOutlinedIcon, CheckIcon, CircleOutlinedIcon, CloseIcon, CropSquareIcon, EastIcon, HorizontalRuleIcon, KeyboardArrowDownIcon, LanguageIcon, NearMeIcon, PanToolIcon, StarBorderIcon, StraightenIcon, TagIcon, TitleIcon, WidgetsOutlinedIcon, ZoomOutMapIcon } from './lucideIcons'
 import type { BrushStyleId, DesignTool, ShapeKind, SwitchMode } from '../shared/types'
 import { brushById, brushPreviewD, STRETCH_BRUSHES } from './drawBrushes'
 import { IconFigmaBrush, IconFigmaPen, IconFigmaPencil, IconCreateSvg, IconPaperShaders, IconSection, IconTextOnPath } from './icons'
@@ -65,7 +69,7 @@ export function CanvasToolbar({
   tool,
   shape,
   mode,
-  strokeColor,
+  strokeColor, instrumentColors, drawingPaint, onDrawingPaint,
   strokeWeight,
   brushStyle,
   composerValue,
@@ -86,11 +90,18 @@ export function CanvasToolbar({
   jevComposer,
   composerExtra,
   createSvgActive = false,
-  onCreateSvg
+  onCreateSvg, onUndo, onRedo, canUndo = false, canRedo = false
 }: {
+  onUndo?: () => void
+  onRedo?: () => void
+  canUndo?: boolean
+  canRedo?: boolean
   tool: DesignTool
   shape: ShapeKind
   mode: SwitchMode
+  drawingPaint?: Paint
+  onDrawingPaint?: (paint: Paint) => void
+  instrumentColors?: { pen: string; pencil: string; brush: string }
   strokeColor: string
   strokeWeight: number
   brushStyle: BrushStyleId
@@ -114,7 +125,39 @@ export function CanvasToolbar({
   createSvgActive?: boolean
   onCreateSvg?: () => void
 }) {
-  const [menu, setMenu] = useState<'shape' | 'cursor' | 'brushes' | 'text' | 'frame' | 'shaders' | null>(null)
+  const [menu, setMenu] = useState<'shape' | 'cursor' | 'brushes' | 'text' | 'frame' | 'shaders' | 'widgets' | null>(null)
+  useLayoutEffect(() => {
+    const host = root.current
+    if (!host) return
+    let frame = 0
+    const position = () => {
+      const toolbar = host.querySelector('.canvas-toolbar')
+      if (!toolbar) return
+      const bounds = toolbar.getBoundingClientRect()
+      for (const popup of host.querySelectorAll<HTMLElement>('.shape-menu, .brush-picker, .shader-fills-popup:not(.is-beside), .chat-suggestion-popup, .widgets-popup')) {
+        popup.style.maxWidth = Math.max(0, bounds.width) + 'px'
+        popup.style.boxSizing = 'border-box'
+        const rect = popup.getBoundingClientRect()
+        const previous = Number(popup.dataset.toolbarShift || 0)
+        const correction = rect.left < bounds.left ? bounds.left - rect.left : rect.right > bounds.right ? bounds.right - rect.right : 0
+        if (Math.abs(correction) > 0.25) {
+          const shift = previous + correction
+          popup.dataset.toolbarShift = String(shift)
+          popup.style.marginLeft = shift + 'px'
+        }
+      }
+    }
+    const update = () => { cancelAnimationFrame(frame); frame = requestAnimationFrame(position) }
+    const observer = new MutationObserver(update)
+    observer.observe(host, { childList: true, subtree: true })
+    const resize = new ResizeObserver(update)
+    resize.observe(host)
+    window.addEventListener('resize', update)
+    position()
+    // Recheck after entrance motion reaches its final dimensions.
+    const timer = window.setTimeout(position, 250)
+    return () => { observer.disconnect(); resize.disconnect(); cancelAnimationFrame(frame); clearTimeout(timer); window.removeEventListener('resize', update) }
+  }, [menu])
   const [chatMenuOpen, setChatMenuOpen] = useState(false)
   const [composerFocused, setComposerFocused] = useState(false)
   const [composerVisible, setComposerVisible] = useState(true)
@@ -122,9 +165,20 @@ export function CanvasToolbar({
   const prevModeRef = useRef(mode)
   const reduceMotion = useReducedMotion()
   const direction = MODE_ORDER[mode] >= MODE_ORDER[prevModeRef.current] ? 1 : -1
+  const [lastCursor, setLastCursor] = useState<DesignTool>('pointer')
+  const [lastFrame, setLastFrame] = useState<DesignTool>('frame')
+  const [lastText, setLastText] = useState<DesignTool>('text')
+  const selectedCursor = CURSOR.some(item => item.id === tool) ? tool : lastCursor
+  const selectedFrame = FRAME_TOOLS.some(item => item.id === tool) ? tool : lastFrame
+  const selectedText = TEXT_TOOLS.some(item => item.id === tool) ? tool : lastText
+  useEffect(() => {
+    if (CURSOR.some(item => item.id === tool)) setLastCursor(tool)
+    if (FRAME_TOOLS.some(item => item.id === tool)) setLastFrame(tool)
+    if (TEXT_TOOLS.some(item => item.id === tool)) setLastText(tool)
+  }, [tool])
   const ShapeIcon = SHAPES.find((item) => item.id === shape)?.Icon || CropSquareIcon
-  const CursorIcon = CURSOR.find((item) => item.id === tool)?.Icon || NearMeIcon
-  const TextTool = TEXT_TOOLS.find((item) => item.id === tool) || TEXT_TOOLS[0]
+  const CursorIcon = CURSOR.find((item) => item.id === selectedCursor)?.Icon || NearMeIcon
+  const TextTool = TEXT_TOOLS.find((item) => item.id === selectedText) || TEXT_TOOLS[0]
   const textActive = tool === 'text' || tool === 'text-on-path'
   const frameActive = tool === 'frame' || tool === 'section'
   const cursorActive = tool === 'pointer' || tool === 'hand' || tool === 'scale'
@@ -170,8 +224,10 @@ export function CanvasToolbar({
 
   return (
     <div ref={root} className="canvas-toolbar-inner" onPointerDown={(event) => event.stopPropagation()}>
-      {drawing && tool !== 'pen' && mode === 'draw' && (
+      {drawing && mode === 'draw' && (
         <DrawStrokeBar
+          showStyles={tool !== 'pen'}
+          paint={drawingPaint} onPaint={onDrawingPaint}
           color={strokeColor}
           weight={strokeWeight}
           style={brushStyle}
@@ -274,13 +330,13 @@ export function CanvasToolbar({
                           <button
                             key={item.id}
                             type="button"
-                            className={tool === item.id ? 'is-on' : ''}
+                            className={selectedCursor === item.id ? 'is-on' : ''}
                             onClick={() => {
                               onTool(item.id)
                               setMenu(null)
                             }}
                           >
-                            {tool === item.id ? <CheckIcon sx={{ fontSize: 16 }} /> : <span className="shape-check" />}
+                            {selectedCursor === item.id ? <CheckIcon sx={{ fontSize: 16 }} /> : <span className="shape-check" />}
                             <Icon sx={{ fontSize: 18 }} />
                             <span>{item.label}</span>
                             <em>{item.shortcut}</em>
@@ -293,13 +349,13 @@ export function CanvasToolbar({
                 {toolset === 'draw' ? (
                   <>
                     <ToolButton active={tool === 'pen'} title="Pen (P)" onClick={() => onTool('pen')}>
-                      <IconFigmaPen />
+                      <IconFigmaPen inkColor={instrumentColors?.pen || '#000000'} />
                     </ToolButton>
                     <ToolButton active={tool === 'brush'} title="Brush" onClick={() => onTool('brush')}>
-                      <IconFigmaBrush />
+                      <IconFigmaBrush inkColor={instrumentColors?.brush || '#000000'} />
                     </ToolButton>
                     <ToolButton active={tool === 'pencil'} title="Pencil (Shift+P)" onClick={() => onTool('pencil')}>
-                      <IconFigmaPencil />
+                      <IconFigmaPencil inkColor={instrumentColors?.pencil || '#000000'} />
                     </ToolButton>
                   </>
                 ) : null}
@@ -307,20 +363,19 @@ export function CanvasToolbar({
                 <div className="tool-split">
                   <ToolButton
                     active={frameActive}
-                    title={tool === 'section' ? 'Section (Shift+S)' : 'Frame (F)'}
+                    title={selectedFrame === 'section' ? 'Section (Shift+S)' : 'Frame (F)'}
                     onClick={() => {
-                      onTool(frameActive ? tool : 'frame')
+                      onTool(selectedFrame)
                       setMenu(null)
                     }}
                   >
-                    {tool === 'section' ? <IconSection size={20} /> : <TagIcon sx={{ fontSize: 20 }} />}
+                    {selectedFrame === 'section' ? <IconSection size={20} /> : <TagIcon sx={{ fontSize: 20 }} />}
                   </ToolButton>
                   <button
                     type="button"
                     className={menu === 'frame' ? 'tool-caret-btn is-on' : 'tool-caret-btn'}
                     title="Frame menu"
                     onClick={() => {
-                      if (!frameActive) onTool('frame')
                       setMenu((value) => (value === 'frame' ? null : 'frame'))
                     }}
                   >
@@ -328,7 +383,7 @@ export function CanvasToolbar({
                   </button>
                   <ToolbarFlyout open={menu === 'frame'} className="shape-menu" label="Frame tools">
                       {FRAME_TOOLS.map((item) => {
-                        const active = tool === item.id
+                        const active = selectedFrame === item.id
                         return (
                           <button
                             key={item.id}
@@ -401,18 +456,14 @@ export function CanvasToolbar({
                     </ToolbarFlyout>
                 </div>
 
-                {toolset === 'design' ? (
-                  <ToolButton active={tool === 'pen'} title="Pen (P)" onClick={() => onTool('pen')}>
-                    <IconFigmaPen />
-                  </ToolButton>
-                ) : null}
+
 
                 <div className="tool-split">
                   <ToolButton
                     active={textActive}
                     title={TextTool.label}
                     onClick={() => {
-                      onTool(textActive ? tool : 'text')
+                      onTool(selectedText)
                       setMenu(null)
                     }}
                   >
@@ -423,7 +474,6 @@ export function CanvasToolbar({
                     className={menu === 'text' ? 'tool-caret-btn is-on' : 'tool-caret-btn'}
                     title="Text menu"
                     onClick={() => {
-                      if (!textActive) onTool('text')
                       setMenu((value) => (value === 'text' ? null : 'text'))
                     }}
                   >
@@ -432,7 +482,7 @@ export function CanvasToolbar({
                   <ToolbarFlyout open={menu === 'text'} className="shape-menu" label="Text tools">
                       {TEXT_TOOLS.map((item) => {
                         const Icon = item.Icon
-                        const active = tool === item.id
+                        const active = selectedText === item.id
                         return (
                           <button
                             key={item.id}
@@ -461,9 +511,14 @@ export function CanvasToolbar({
                     <StraightenIcon sx={{ fontSize: 20 }} />
                   </ToolButton>
                 ) : null}
-                <ToolButton active={tool === 'widget'} title="Widgets" onClick={() => onTool('widget')}>
-                  <WidgetsOutlinedIcon sx={{ fontSize: 20 }} />
-                </ToolButton>
+                <div className="tool-split">
+                  <ToolButton active={menu === 'widgets'} title="Widgets" onClick={() => setMenu(value => value === 'widgets' ? null : 'widgets')}>
+                    <WidgetsOutlinedIcon sx={{ fontSize: 20 }} />
+                  </ToolButton>
+                  <ToolbarFlyout open={menu === 'widgets'} className="widgets-popup" label="Widgets">
+                    <WidgetsMenu />
+                  </ToolbarFlyout>
+                </div>
                 {onCreateSvg ? (
                   <ToolButton
                     active={createSvgActive}
@@ -522,6 +577,8 @@ export function CanvasToolbar({
                 <KeyboardArrowDownIcon sx={{ fontSize: 16 }} />
               </button>
             ) : null}
+            <button type="button" className="canvas-history-btn" title="Undo (Ctrl/⌘ Z)" aria-label="Undo canvas change" disabled={!canUndo} onClick={onUndo}><Undo2 size={16} /></button>
+            <button type="button" className="canvas-history-btn" title="Redo (Ctrl/⌘ Shift Z)" aria-label="Redo canvas change" disabled={!canRedo} onClick={onRedo}><Redo2 size={16} /></button>
             <ModeSwitch mode={mode} onMode={onMode} />
           </div>
         </div>
@@ -570,7 +627,7 @@ export function CanvasToolbar({
 }
 
 function DrawStrokeBar({
-  color,
+  color, paint, onPaint, showStyles = true,
   weight,
   style,
   open,
@@ -580,6 +637,9 @@ function DrawStrokeBar({
   onToggle,
   onClose
 }: {
+  paint?: Paint
+  onPaint?: (paint: Paint) => void
+  showStyles?: boolean
   color: string
   weight: number
   style: BrushStyleId
@@ -590,13 +650,13 @@ function DrawStrokeBar({
   onToggle: () => void
   onClose: () => void
 }) {
+  const [colorAnchor, setColorAnchor] = useState<DOMRect | null>(null)
+  const colorButton = useRef<HTMLButtonElement>(null)
   const styles = [{ id: 'basic' as const, name: 'Basic' }, ...STRETCH_BRUSHES]
   return (
     <div className="draw-stroke-bar">
-      <label className="draw-color">
-        <span style={{ background: color }} />
-        <input type="color" value={color} onChange={(event) => onColor(event.target.value)} />
-      </label>
+      <button type="button" ref={colorButton} className="draw-color" title="Drawing color" aria-label="Drawing color" aria-expanded={Boolean(colorAnchor)} onMouseDown={event => event.stopPropagation()} onClick={() => setColorAnchor(value => value ? null : colorButton.current!.getBoundingClientRect())}><span style={{ background: paint ? paintPreviewCss(paint) : color }} /></button>
+      {colorAnchor && createPortal(<FillPicker above strokeMode opaque canvasHandles={false} anchor={colorAnchor} paint={paint || { type:'solid', color, opacity:1 }} onChange={next => { if (onPaint) onPaint(next); else if (next.type === 'solid') onColor(next.color) }} onClose={() => setColorAnchor(null)} />, document.body)}
       <div className="draw-weight" title="Weight">
         <SliderField
           icon={<StrokeWeightIcon />}
@@ -606,11 +666,11 @@ function DrawStrokeBar({
           onChange={(next) => onWeight(Math.max(1, Math.min(400, next)))}
         />
       </div>
-      <button type="button" className={open ? 'draw-style-btn is-on' : 'draw-style-btn'} onClick={onToggle}>
-        <BrushPreview style={style} color={color} />
+      <button style={!showStyles ? { display: 'none' } : undefined} type="button" className={open ? 'draw-style-btn is-on' : 'draw-style-btn'} onClick={onToggle}>
+        <BrushPreview style={style} color={color} paint={paint} />
         <KeyboardArrowDownIcon sx={{ fontSize: 16 }} />
       </button>
-      <ToolbarFlyout open={open} className="brush-picker" label="Brushes">
+      <ToolbarFlyout open={showStyles && open} className="brush-picker" label="Brushes">
           <div className="brush-picker-head">
             <strong>Brushes</strong>
             <button type="button" onClick={onClose} title="Close">
@@ -634,7 +694,7 @@ function DrawStrokeBar({
                   {active ? <CheckIcon sx={{ fontSize: 16 }} /> : <span className="shape-check" />}
                   <span className="brush-picker-copy">
                     <em>{item.name}</em>
-                    <BrushPreview style={item.id} color="#111111" />
+                    <BrushPreview style={item.id} color={color} paint={paint} />
                   </span>
                 </button>
               )
@@ -645,12 +705,15 @@ function DrawStrokeBar({
   )
 }
 
-function BrushPreview({ style, color }: { style: BrushStyleId; color: string }) {
+function BrushPreview({ style, color, paint }: { style: BrushStyleId; color: string; paint?: Paint }) {
+  const gradientId = useId().replace(/:/g, '')
+  const gradient = paint?.type === 'gradient' ? paint : null
   const fills = brushPreviewD(style, brushById(style).id === 'basic' ? 5 : 9)
   return (
     <svg className="brush-preview" viewBox="0 0 108 28" width="92" height="24" aria-hidden="true">
+      {gradient && <defs><linearGradient id={gradientId}>{gradient.stops.map(stop => <stop key={stop.id} offset={stop.position} stopColor={stop.color} stopOpacity={stop.opacity * gradient.opacity} />)}</linearGradient></defs>}
       {fills.map((d, index) => (
-        <path key={index} d={d} fill={color} />
+        <path key={index} d={d} fill={gradient ? 'url(#' + gradientId + ')' : color} />
       ))}
     </svg>
   )
@@ -679,9 +742,9 @@ function ToolbarFlyout({
           data-chrome-overlay=""
           role="menu"
           aria-label={label}
-          initial={reduceMotion ? { opacity: 0, x: '-50%' } : { opacity: 0, y: 10, scale: 0.96, x: '-50%' }}
+          initial={reduceMotion ? { opacity: 0, x: '-50%' } : { opacity: 0, y: 4, scale: 0.99, x: '-50%' }}
           animate={{ opacity: 1, y: 0, scale: 1, x: '-50%' }}
-          exit={reduceMotion ? { opacity: 0, x: '-50%' } : { opacity: 0, y: 6, scale: 0.98, x: '-50%' }}
+          exit={reduceMotion ? { opacity: 0, x: '-50%' } : { opacity: 0, y: 3, scale: 0.995, x: '-50%' }}
           transition={spring}
           style={{ transformOrigin: 'bottom center' }}
         >
@@ -708,4 +771,50 @@ function ToolButton({
       {children}
     </button>
   )
+}
+
+const WIDGET_GROUPS = [
+  { title: 'Design helpers', items: ['Rename layers', 'Make an image'] },
+  { title: 'Image editing', items: ['Edit image with prompt', 'Remove background', 'Boost resolution'] },
+  { title: 'Design tools', items: ['Replace content', 'Add interactions'] },
+  { title: 'Riffing and writing', items: ['Rewrite this…', 'Shorten', 'Translate to…'] }
+]
+const WIDGET_RECENTS_KEY = 'scobe:widget-recents:v1'
+const WIDGET_NAMES = new Set(WIDGET_GROUPS.flatMap(group => group.items))
+function readWidgetRecents(): string[] {
+  try {
+    const saved: unknown = JSON.parse(localStorage.getItem(WIDGET_RECENTS_KEY) || '[]')
+    return Array.isArray(saved) ? [...new Set(saved.filter((item): item is string => typeof item === 'string' && WIDGET_NAMES.has(item)))].slice(0, 3) : []
+  } catch { return [] }
+}
+function WidgetGlyph({ name }: { name: string }) {
+  const Icon = name === 'Rename layers' ? ViewListIcon
+    : name.includes('image') || name === 'Remove background' ? ImageLayerIcon
+    : name === 'Translate to…' ? LanguageIcon
+    : name === 'Add interactions' ? EastIcon
+    : name === 'Replace content' ? SettingsOutlinedIcon
+    : name === 'Boost resolution' ? ZoomOutMapIcon : DrawIcon
+  return <Icon sx={{ fontSize: 16 }} />
+}
+function WidgetsMenu() {
+  const [query, setQuery] = useState('')
+  const [tab, setTab] = useState('All')
+  const [notice, setNotice] = useState('')
+  const [recents, setRecents] = useState(readWidgetRecents)
+  const groups = recents.length ? [{ title: 'Recents', items: recents }, ...WIDGET_GROUPS] : WIDGET_GROUPS
+  const choose = (item: string) => {
+    const next = [item, ...recents.filter(recent => recent !== item)].slice(0, 3)
+    setRecents(next)
+    try { localStorage.setItem(WIDGET_RECENTS_KEY, JSON.stringify(next)) } catch { /* Session history remains available. */ }
+    setNotice(item + ' is coming soon.')
+  }
+  return <>
+    <div className="widgets-search"><SearchIcon sx={{ fontSize: 16 }} /><input aria-label="Search widgets" placeholder="Search" value={query} onChange={event => setQuery(event.target.value)} /><ImageLayerIcon sx={{ fontSize: 16 }} /></div>
+    <div className="widgets-tabs" role="tablist" aria-label="Widget categories">{['All', 'Assets', 'Plugins & widgets'].map(item => <button type="button" role="tab" aria-selected={tab === item} className={tab === item ? 'is-on' : ''} key={item} onClick={() => { setTab(item); setNotice('') }}>{item}</button>)}</div>
+    <div className="widgets-list">{tab === 'Assets' ? <p className="widgets-empty">Your assets will appear here.</p> : groups.map(group => {
+      const items = group.items.filter(item => item.toLowerCase().includes(query.toLowerCase()))
+      return items.length ? <section key={group.title}><h3>{group.title}</h3>{items.map(item => <button type="button" key={item} onClick={() => choose(item)}><span className="widgets-glyph" aria-hidden><WidgetGlyph name={item} /></span><span>{item}</span><em>AI</em></button>)}</section> : null
+    })}{tab !== 'Assets' && !groups.some(group => group.items.some(item => item.toLowerCase().includes(query.toLowerCase()))) && <p className="widgets-empty">No matching widgets.</p>}</div>
+    {notice && <div className="widgets-notice" role="status">{notice}</div>}
+  </>
 }

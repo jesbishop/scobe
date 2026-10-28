@@ -479,6 +479,16 @@ export class BrowserHost {
     }, 140)
   }
 
+  /** Snapshot the whole page (not just one element). The result arrives through the normal Snapshot poll. */
+  async snapshotPage(id: string): Promise<void> {
+    const page = this.require(id)
+    if (this.snapshotId !== id) this.setSnapshot(id)
+    await page.view.webContents.executeJavaScript(
+      `${SNAPSHOT_SCRIPT}; window.__vantaSnapshot && (window.__vantaSnapshot.enable(), window.__vantaSnapshot.capturePage());`,
+      true
+    )
+  }
+
   /**
    * Run the real Snapshot pipeline (DOM → layered SnapshotNode tree) without the
    * interactive click UI. Used by MCP when agents ask to bring a page region into the canvas.

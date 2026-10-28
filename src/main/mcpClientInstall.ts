@@ -58,7 +58,13 @@ function clearCloudMcpConfirmed(agentId: CodingAgentId): void {
   writeJsonFile(cloudPrefPath(), doc)
 }
 
+function codexLocalStatus(): AgentMcpLinkStatus {
+  return { agentId: 'codex', state: codexHasVanta() ? 'connected' : 'off', localUrl: VANTA_MCP_URL,
+    detail: codexConfigPath(), setupSnippet: 'codex mcp add scobe --url ' + VANTA_MCP_URL }
+}
 function enrich(status: AgentMcpLinkStatus): AgentMcpLinkStatus {
+  if (status.agentId === 'codex') return { ...codexLocalStatus(), ...status }
+
   const publicUrl = getPublicMcpUrl() || undefined
   const installUrl = publicUrl ? buildCursorInstallMcpUrl(publicUrl) : undefined
   const deeplinkUrl = publicUrl ? buildCursorMcpDeeplink(publicUrl) : undefined
@@ -334,7 +340,7 @@ export function getAgentMcpLinkStatus(agentId: CodingAgentId): AgentMcpLinkStatu
     case 'claude-code':
       return cloudLinkState(agentId, claudeHasVanta(), claudeConfigPath())
     case 'codex':
-      return cloudLinkState(agentId, codexHasVanta(), codexConfigPath())
+      return codexLocalStatus()
     case 'v0':
       return enrich(v0Status(v0PrefConnected()))
     default:
@@ -343,6 +349,7 @@ export function getAgentMcpLinkStatus(agentId: CodingAgentId): AgentMcpLinkStatu
 }
 
 export async function connectAgentMcp(agentId: CodingAgentId): Promise<AgentMcpLinkStatus> {
+  if (agentId === 'codex') { connectCodex(); return codexLocalStatus() }
   clearCloudMcpConfirmed(agentId)
   const publicUrl = await ensureMcpTunnel()
   // Write configs only after tunnel URL is known so agents get a reachable HTTPS endpoint.
@@ -352,9 +359,6 @@ export async function connectAgentMcp(agentId: CodingAgentId): Promise<AgentMcpL
       break
     case 'claude-code':
       connectClaude()
-      break
-    case 'codex':
-      connectCodex()
       break
     case 'v0':
       setV0Pref(true)

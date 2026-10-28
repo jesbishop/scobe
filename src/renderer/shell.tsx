@@ -1,7 +1,8 @@
+import { createPortal } from 'react-dom'
 import { useEffect, useRef, useState, type ComponentType, type CSSProperties, type PointerEvent as ReactPointerEvent, type ReactNode } from 'react'
 import { TokensPanel } from './TokensPanel'
 import { AnimatePresence, motion, useReducedMotion } from 'motion/react'
-import { AccessTimeIcon, AddIcon, ArrowForwardIcon, ChangeHistoryIcon, ChatBubbleOutlineOutlinedIcon, CheckIcon, CircleOutlinedIcon, CloseIcon, CropSquareIcon, DescriptionOutlinedIcon, DrawIcon, EastIcon, FrameIcon, FullscreenExitIcon, FullscreenIcon, HorizontalRuleIcon, ImageLayerIcon, Inventory2OutlinedIcon, KeyboardArrowDownIcon, LanguageIcon, MoreHorizIcon, SearchIcon, SettingsOutlinedIcon, StarBorderIcon, TitleIcon, VectorLayerIcon, ViewListIcon, ViewModuleIcon, WidgetsOutlinedIcon } from './lucideIcons'
+import { PhotoCameraOutlinedIcon, StraightenIcon, CenterFocusStrongIcon, GridOnIcon, AccessTimeIcon, AddIcon, ArrowForwardIcon, ChangeHistoryIcon, ChatBubbleOutlineOutlinedIcon, CheckIcon, CircleOutlinedIcon, CloseIcon, CropSquareIcon, DescriptionOutlinedIcon, DrawIcon, EastIcon, FrameIcon, FullscreenExitIcon, FullscreenIcon, HorizontalRuleIcon, ImageLayerIcon, Inventory2OutlinedIcon, KeyboardArrowDownIcon, LanguageIcon, MoreHorizIcon, SearchIcon, SettingsOutlinedIcon, StarBorderIcon, TitleIcon, VectorLayerIcon, ViewListIcon, ViewModuleIcon, WidgetsOutlinedIcon } from './lucideIcons'
 import type { BrowserFrame, DesignNode, DesignPage, DesignTool, InspectInfo } from '../shared/types'
 import { CURRENT_USER } from '../shared/comments'
 import type { FramePreset } from '../shared/framePresets'
@@ -117,6 +118,84 @@ function SidebarUiToggle({
       onClick={onClick}
     >
       <IconSidebarPanel side={side} size={iconSize} />
+    </button>
+  )
+}
+
+/** File name that turns into an inline rename field on click, like Figma's file title. */
+function FileNameField({
+  name,
+  onRename,
+  variant
+}: {
+  name: string
+  onRename: (name: string) => void
+  variant: 'header' | 'chip'
+}) {
+  const [editing, setEditing] = useState(false)
+  const [draft, setDraft] = useState(name)
+  const cancelled = useRef(false)
+
+  useEffect(() => {
+    if (!editing) setDraft(name)
+  }, [name, editing])
+
+  const finish = () => {
+    if (cancelled.current) {
+      cancelled.current = false
+      setDraft(name)
+      setEditing(false)
+      return
+    }
+    const next = draft.trim()
+    if (next && next !== name) onRename(next)
+    setEditing(false)
+  }
+
+  if (editing) {
+    return (
+      <input
+        autoFocus
+        className={`file-name-input is-${variant}`}
+        value={draft}
+        aria-label="Rename file"
+        spellCheck={false}
+        style={variant === 'chip' ? { width: `${Math.max(6, draft.length + 2)}ch` } : undefined}
+        onChange={(event) => setDraft(event.target.value)}
+        onFocus={(event) => event.currentTarget.select()}
+        onBlur={finish}
+        onPointerDown={(event) => event.stopPropagation()}
+        onKeyDown={(event) => {
+          event.stopPropagation()
+          if (event.key === 'Enter') {
+            event.preventDefault()
+            event.currentTarget.blur()
+          }
+          if (event.key === 'Escape') {
+            cancelled.current = true
+            event.currentTarget.blur()
+          }
+        }}
+      />
+    )
+  }
+
+  return (
+    <button
+      type="button"
+      className={`file-name-btn is-${variant}`}
+      title="Rename file"
+      onClick={(event) => {
+        event.stopPropagation()
+        setEditing(true)
+      }}
+    >
+      <span className="file-name-text">{name}</span>
+      {variant === 'header' ? (
+        <span className="file-name-caret" aria-hidden>
+          <IconCaret size={12} />
+        </span>
+      ) : null}
     </button>
   )
 }
@@ -438,10 +517,12 @@ export function LeftSidebar({
   onSideBrowserHole: (id: string, el: HTMLDivElement | null) => void
   onChromeLayout?: () => void
 }) {
-  const [editingFileName, setEditingFileName] = useState(false)
-  const skipFileRename = useRef(false)
+  useEffect(() => {
+    const openMcp = () => onCodingPopup(true)
+    window.addEventListener('scobe:open-mcp', openMcp)
+    return () => window.removeEventListener('scobe:open-mcp', openMcp)
+  }, [onCodingPopup])
   const codingSidebar = Boolean(codingActive && tab === 'coding-agents')
-  const codingGate = tab === 'coding-agents' && !codingActive
   const dockedTabSidebar = Boolean(dockedTab && tab === 'tabs')
   const leftBrowserSidebar = codingSidebar || dockedTabSidebar
   const hasOpenTabs = browsers.some((frame) => frame.tabs.length > 0)
@@ -584,7 +665,7 @@ export function LeftSidebar({
     >
       <nav className="leftbar-rail">
         <div className="leftbar-rail-top">
-          {RAIL.map((item) => {
+          {RAIL.filter((item) => item.id !== 'coding-agents').map((item) => {
             const Icon = item.icon
             const railActive =
               item.id === 'tabs'
@@ -674,48 +755,7 @@ export function LeftSidebar({
               transition={sectionTransition}
             >
               <div className="leftbar-filename">
-                {editingFileName ? (
-                  <input
-                    autoFocus
-                    className="leftbar-filename-input"
-                    defaultValue={fileName}
-                    aria-label="Rename file"
-                    onFocus={(event) => event.currentTarget.select()}
-                    onBlur={(event) => {
-                      if (skipFileRename.current) {
-                        skipFileRename.current = false
-                        setEditingFileName(false)
-                        return
-                      }
-                      const next = event.currentTarget.value.trim()
-                      if (next && next !== fileName) onRenameFile(next)
-                      setEditingFileName(false)
-                    }}
-                    onKeyDown={(event) => {
-                      if (event.key === 'Enter') {
-                        event.preventDefault()
-                        event.currentTarget.blur()
-                      }
-                      if (event.key === 'Escape') {
-                        skipFileRename.current = true
-                        event.currentTarget.blur()
-                      }
-                    }}
-                  />
-                ) : (
-                  <button
-                    type="button"
-                    className="leftbar-filename-btn"
-                    title="Double-click to rename"
-                    onDoubleClick={(event) => {
-                      event.preventDefault()
-                      setEditingFileName(true)
-                    }}
-                  >
-                    <span className="leftbar-filename-text">{fileName}</span>
-                    <IconCaret size={12} />
-                  </button>
-                )}
+                <FileNameField name={fileName} onRename={onRenameFile} variant="header" />
               </div>
               <SidebarUiToggle side="left" expanded iconSize={18} onClick={onTogglePanel} />
             </motion.div>
@@ -800,19 +840,6 @@ export function LeftSidebar({
           <div className="leftbar-body">
             <input className="panel-search" placeholder="Search" />
             <p className="panel-note">Search across files, layers, and browsers will land here.</p>
-          </div>
-        )}
-        {codingGate && (
-          <div className="leftbar-body ca-agents-gate">
-            <section className="ca-agents-gate-mcp">
-              <h3 className="ca-agents-gate-label">MCP</h3>
-              <button type="button" className="ca-agents-gate-connect" onClick={() => onCodingPopup(true)}>
-                Connect your agent
-              </button>
-              <p className="ca-agents-gate-note">
-                Set up Scobe MCP first. The coding agent opens fullscreen in this sidebar after you finish.
-              </p>
-            </section>
           </div>
         )}
         {tab === 'coding-agents' && codingActive && (
@@ -969,26 +996,30 @@ export function LeftSidebar({
       </motion.div>
       <AnimatePresence>
         {!panelOpen && !codingFullscreen && (
-          <motion.button
-            type="button"
+          <motion.div
             key="left-ui-chip"
-            className="sidebar-ui-chip left"
-            title="Expand UI Ctrl+Shift+\\"
-            aria-label="Expand UI"
-            onClick={onTogglePanel}
+            className="sidebar-ui-chip left is-file-chip"
             initial={leftChipMotion.initial}
             animate={leftChipMotion.animate}
             exit={leftChipMotion.exit}
             transition={chipSpring}
           >
-            <span className="sidebar-ui-chip-name">{fileName}</span>
-            <IconSidebarPanel side="left" size={17} />
-          </motion.button>
+            <FileNameField name={fileName} onRename={onRenameFile} variant="chip" />
+            <button
+              type="button"
+              className="collapsed-left-ui-toggle"
+              title="Expand UI Ctrl+Shift+\\"
+              aria-label="Expand UI"
+              onClick={onTogglePanel}
+            >
+              <IconSidebarPanel side="left" size={17} />
+            </button>
+          </motion.div>
         )}
       </AnimatePresence>
       <ConnectAgentModal
         open={codingPopup}
-        initialAgentId={codingRecents[0]?.agentId || 'cursor'}
+        initialAgentId={codingRecents[0]?.agentId || 'codex'}
         onClose={() => onCodingPopup(false)}
         onDone={(agentId, openUrl) => {
           onCodingPopup(false)
@@ -1304,6 +1335,23 @@ function DockedBrowserRail({
   onAddBrowser: () => void
   onMinimize: () => void
 }) {
+  const [inspectPopup, setInspectPopup] = useState(false)
+  const [inspection, setInspection] = useState({ inspect: false, xray: false })
+  const popupRoot = useRef<HTMLDivElement>(null)
+  const reduceMotion = useReducedMotion()
+  useEffect(() => {
+    if (!inspectPopup) return
+    const close = (event: PointerEvent) => { if (!popupRoot.current?.contains(event.target as Node)) setInspectPopup(false) }
+    const key = (event: KeyboardEvent) => { if (event.key === 'Escape') setInspectPopup(false) }
+    window.addEventListener('pointerdown', close)
+    window.addEventListener('keydown', key)
+    return () => { window.removeEventListener('pointerdown', close); window.removeEventListener('keydown', key) }
+  }, [inspectPopup])
+  const toggleInspection = (action: 'inspect' | 'xray') => {
+    const active = !inspection[action]
+    setInspection(value => ({ ...value, [action]: active }))
+    window.dispatchEvent(new CustomEvent('scobe:docked-browser-tool', { detail: { action, active } }))
+  }
   return (
     <div className="ca-agent-rail" data-chrome-overlay="">
       {!hideFullscreen && (
@@ -1329,6 +1377,14 @@ function DockedBrowserRail({
       >
         <LanguageIcon sx={{ fontSize: 18 }} />
       </button>
+      <button type="button" className="ca-agent-rail-btn" title="Snapshot to canvas" aria-label="Snapshot to canvas" onClick={() => window.dispatchEvent(new CustomEvent('scobe:docked-browser-tool', { detail: { action: 'snapshot', active: true } }))}><PhotoCameraOutlinedIcon sx={{ fontSize:18 }} /></button>
+      <div className="ca-inspect-control" ref={popupRoot}>
+        <button type="button" className="ca-agent-rail-btn" title="Measure and inspect" aria-label="Measure and inspect" aria-expanded={inspectPopup} onClick={() => setInspectPopup(value => !value)}><StraightenIcon sx={{ fontSize:18 }} /></button>
+        <AnimatePresence>{inspectPopup && <motion.div className="ca-inspect-popup" data-chrome-overlay="" role="menu" aria-label="Inspection options" initial={{ opacity:0, x:reduceMotion ? 0 : 4 }} animate={{ opacity:1, x:0 }} exit={{ opacity:0 }} transition={{ duration:0.15 }}>
+          <button type="button" role="menuitemcheckbox" aria-checked={inspection.inspect} onClick={() => toggleInspection('inspect')}><CenterFocusStrongIcon sx={{ fontSize:16 }} /><span>Inspect</span><span>{inspection.inspect ? '✓' : ''}</span></button>
+          <button type="button" role="menuitemcheckbox" aria-checked={inspection.xray} onClick={() => toggleInspection('xray')}><GridOnIcon sx={{ fontSize:16 }} /><span>X-ray</span><span>{inspection.xray ? '✓' : ''}</span></button>
+        </motion.div>}</AnimatePresence>
+      </div>
       {!fullscreen && (
         <SidebarUiToggle
           side="left"
@@ -1793,12 +1849,7 @@ export function RightSidebar({
           <div className="rightbar-chrome">
             <div className="rightbar-chrome-row">
               <SidebarUiToggle side="right" expanded iconSize={18} onClick={onToggle} />
-              <div className="rightbar-avatars" title="Account">
-                <button type="button" className="rightbar-user">
-                  <span className="avatar sm rightbar-avatar-secondary">J</span>
-                  <IconCaret size={12} />
-                </button>
-              </div>
+              <SidebarProfile />
               <span className="rightbar-chrome-spacer" />
               <button type="button" className="rightbar-zoom" title="Reset zoom" onClick={onZoom}>
                 {zoom}%
@@ -1847,20 +1898,10 @@ export function RightSidebar({
       <ShapeCaptureOverlay nodes={nodes} excludeIds={selectedIds} />
       <AnimatePresence>
         {!open && !hideExpandChip && (
-          <motion.button
-            type="button"
-            key="right-ui-chip"
-            className="sidebar-ui-chip right"
-            title="Expand UI"
-            aria-label="Expand UI"
-            onClick={onToggle}
-            initial={rightChipMotion.initial}
-            animate={rightChipMotion.animate}
-            exit={rightChipMotion.exit}
-            transition={chipSpring}
-          >
-            <IconSidebarPanel side="right" size={17} />
-          </motion.button>
+          <motion.div key="right-ui-chip" className="sidebar-ui-chip right is-profile-chip" initial={rightChipMotion.initial} animate={rightChipMotion.animate} exit={rightChipMotion.exit} transition={chipSpring}>
+            <button type="button" className="collapsed-right-ui-toggle" title="Expand UI" aria-label="Expand UI" onClick={onToggle}><IconSidebarPanel side="right" size={17} /></button>
+            <SidebarProfile />
+          </motion.div>
         )}
       </AnimatePresence>
     </>
@@ -2585,4 +2626,31 @@ function FileThumbPreview({ seed, name }: { seed: string; name: string }) {
       <div className="home-thumb-label">{name.slice(0, 18)}</div>
     </div>
   )
+}
+
+function SidebarProfile() {
+  const [open,setOpen]=useState(false)
+  const [spotlight,setSpotlight]=useState(false)
+  const [position,setPosition]=useState({left:0,top:0})
+  const trigger=useRef<HTMLButtonElement>(null)
+  const popup=useRef<HTMLDivElement>(null)
+  const reduceMotion=useReducedMotion()
+  const place=()=>{const rect=trigger.current?.getBoundingClientRect();if(rect)setPosition({left:Math.max(8,Math.min(window.innerWidth-268,rect.right-260)),top:rect.bottom+8})}
+  useEffect(()=>{
+    if(!open)return
+    place()
+    const outside=(event:PointerEvent)=>{const target=event.target as Node;if(!trigger.current?.contains(target)&&!popup.current?.contains(target))setOpen(false)}
+    const key=(event:KeyboardEvent)=>{if(event.key==='Escape'){setOpen(false);trigger.current?.focus()}}
+    window.addEventListener('pointerdown',outside);window.addEventListener('keydown',key);window.addEventListener('resize',place)
+    return()=>{window.removeEventListener('pointerdown',outside);window.removeEventListener('keydown',key);window.removeEventListener('resize',place)}
+  },[open])
+  useEffect(()=>{document.body.classList.toggle('scobe-local-spotlight',spotlight);return()=>document.body.classList.remove('scobe-local-spotlight')},[spotlight])
+  const avatar=<span className="sidebar-profile-avatar" style={{background:CURRENT_USER.color}}>{CURRENT_USER.avatarUrl?<img src={CURRENT_USER.avatarUrl} alt=""/>:CURRENT_USER.initial}</span>
+  return <div className="rightbar-avatars">
+    <button ref={trigger} type="button" className="sidebar-profile-trigger" aria-label="Your profile" aria-expanded={open} aria-haspopup="dialog" onClick={()=>{place();setOpen(value=>!value)}}>{avatar}<span className="sidebar-profile-chevron"><IconCaret size={12}/></span></button>
+    {createPortal(<AnimatePresence>{open&&<motion.div ref={popup} className="sidebar-profile-popup" data-chrome-overlay="" role="dialog" aria-label="Your profile" style={position} initial={{opacity:0,y:reduceMotion?0:-4,scale:reduceMotion?1:.99}} animate={{opacity:1,y:0,scale:1}} exit={{opacity:0}} transition={{duration:.15}}>
+      <div className="sidebar-profile-person">{avatar}<span>{CURRENT_USER.name} <span className="sidebar-profile-you">(You)</span></span></div>
+      <button type="button" className="sidebar-profile-spotlight" aria-pressed={spotlight} title="Highlight your local canvas" onClick={()=>{setSpotlight(value=>!value);setOpen(false)}}>{spotlight?'Stop spotlight':'Spotlight me'}</button>
+    </motion.div>}</AnimatePresence>,document.body)}
+  </div>
 }

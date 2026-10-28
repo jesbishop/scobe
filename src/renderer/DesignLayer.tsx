@@ -20,6 +20,8 @@ import { childIndexOf, isGridLayout, layersAtPoint, nodeIndexOf, resolveWorldRec
 import { GridLayoutOverlay, gridOverlayTarget } from './GridLayoutOverlay'
 import { GradientHandles } from './GradientHandles'
 import { useGradientEdit } from './gradientEdit'
+import { ShaderHandles } from './ShaderHandles'
+import { useShaderEdit } from './shaderEdit'
 import { layoutGridBands } from '../shared/layoutGrids'
 import { getNodePaints, gradientCss } from '../shared/paint'
 import {
@@ -204,7 +206,7 @@ function SelectionChrome({
       : undefined
   return createPortal(
     <div
-      className={`design-chrome${outline ? ' has-outline' : ''}${thin ? ' is-thin' : ''}`}
+      className={`design-chrome${node.type === 'text' ? ' is-text' : ''}${outline ? ' has-outline' : ''}${thin ? ' is-thin' : ''}`}
       style={{
         left: box.x,
         top: box.y,
@@ -221,24 +223,38 @@ function SelectionChrome({
   )
 }
 
+/** Content stacking follows tree order; selection chrome is rendered separately. */
 function stackingZIndex(
-  node: DesignNode,
-  selectedIds: Set<string>,
-  byId: Map<string, DesignNode>
-): number | undefined {
-  if (selectedIds.has(node.id)) return 40
-  let depth = 0
-  let parentId = node.parentId
-  const seen = new Set<string>()
-  while (parentId) {
-    if (seen.has(parentId)) break
-    seen.add(parentId)
-    depth += 1
-    // Keep children above a selected ancestor frame so they don't disappear under it.
-    if (selectedIds.has(parentId)) return 40 + depth
-    parentId = byId.get(parentId)?.parentId
+  _node: DesignNode,
+  _selectedIds: Set<string>,
+  _byId: Map<string, DesignNode>
+): number {
+  return 1
+}
+
+/** Preserve sibling order while always painting a parent before its descendants. */
+function parentFirstPaintOrder(nodes: DesignNode[]): DesignNode[] {
+  const byId = new Map(nodes.map(node => [node.id, node]))
+  const children = new Map<string, DesignNode[]>()
+  for (const node of nodes) {
+    if (node.parentId && byId.has(node.parentId)) {
+      const siblings = children.get(node.parentId) || []
+      siblings.push(node)
+      children.set(node.parentId, siblings)
+    }
   }
-  return undefined
+  const result: DesignNode[] = []
+  const seen = new Set<string>()
+  const visit = (node: DesignNode) => {
+    if (seen.has(node.id)) return
+    seen.add(node.id)
+    result.push(node)
+    for (const child of children.get(node.id) || []) visit(child)
+  }
+  for (const node of nodes) if (!node.parentId || !byId.has(node.parentId)) visit(node)
+  // Broken or cyclic imported trees still render once without recursion loops.
+  for (const node of nodes) visit(node)
+  return result
 }
 
 function isShownInTree(node: DesignNode, byId: Map<string, DesignNode>): boolean {
@@ -277,6 +293,30 @@ function layoutGridZIndex(
     if (inside) z = Math.max(z, stackingZIndex(node, selectedIds, byId) ?? 1)
   }
   return z
+}
+
+/** CSS border style for a dashed or dotted stroke; null when the stroke is solid. */
+function strokeDashStyle(node: DesignNode): 'dashed' | 'dotted' | null {
+  if (!node.strokeDash || node.strokeDash <= 0) return null
+  return node.strokeDash <= 1.5 ? 'dotted' : 'dashed'
+}
+
+/** SVG dash pattern for shapes and lines; dots use round caps so they read as dots. */
+function svgDashProps(node: DesignNode): { strokeDasharray?: string; strokeLinecap?: 'round' } {
+  if (!node.strokeDash || node.strokeDash <= 0) return {}
+  return {
+    strokeDasharray: `${node.strokeDash} ${node.strokeGap ?? node.strokeDash}`,
+    ...(node.strokeDash <= 1.5 ? { strokeLinecap: 'round' as const } : {})
+  }
+}
+
+/** Text strokes trace the glyphs. Outside doubles the width and paints it under the fill so only the outer half shows. */
+function textStrokeCss(node: DesignNode): CSSProperties {
+  const width = node.strokeWidth || 0
+  if (width <= 0) return {}
+  const color = withAlpha(toHex(node.stroke, '#1A1A1A'), node.strokeOpacity ?? 1)
+  if (node.strokeAlign === 'outside') return { WebkitTextStroke: `${width * 2}px ${color}`, paintOrder: 'stroke fill' }
+  return { WebkitTextStroke: `${width}px ${color}` }
 }
 
 /** Inside/center strokes on boxes paint as their own layer so fills, media, and children never cover them. */
@@ -361,7 +401,9 @@ function StrokeOverlay({
         height: height + outset * 2,
         zIndex,
         borderRadius: borderRadiusCss({ tl: grow(radii.tl), tr: grow(radii.tr), br: grow(radii.br), bl: grow(radii.bl) }),
-        boxShadow: `inset 0 0 0 ${strokeWidth}px ${color}`,
+        ...(strokeDashStyle(node)
+          ? { border: `${strokeWidth}px ${strokeDashStyle(node)} ${color}`, boxSizing: 'border-box' as const }
+          : { boxShadow: `inset 0 0 0 ${strokeWidth}px ${color}` }),
         opacity: node.opacity ?? 1,
         transform: transform || undefined,
         ...(selected
@@ -522,6 +564,13 @@ function ResizeHandles({
   )
 }
 
+const textEditEndingClicks = new WeakSet<Event>()
+
+/** True when this pointerdown closed a text editor; that click keeps the text selected (Figma-style). */
+export function pointerEndedTextEdit(event: Event): boolean {
+  return textEditEndingClicks.has(event)
+}
+
 export function DesignLayer({
   nodes,
   selectedIds,
@@ -597,7 +646,7 @@ export function DesignLayer({
   onMove: (id: string, worldX: number, worldY: number, snap?: boolean) => void
   onMoveEnd?: (id: string) => void
   onClickRelease?: (id: string) => void
-  onResize: (id: string, next: { x: number; y: number; width: number; height: number; world?: boolean }) => void
+  onResize: (id: string, next: { x: number; y: number; width: number; height: number; world?: boolean; textResize?: DesignNode['textResize'] }) => void
   onScaleStart: () => void
   onScale: (origin: { x: number; y: number }, factor: number) => void
   onEdit: (id: string, patch: Partial<DesignNode>) => void
@@ -619,7 +668,7 @@ export function DesignLayer({
   const byId = new Map(nodes.map((node) => [node.id, node]))
   const revealing = new Set([...(revealIds || []), ...(revealId ? [revealId] : [])])
   const building = new Set(buildingIds || [])
-  const renderList = [...nodes, draft].filter((node): node is DesignNode => Boolean(node))
+  const renderList = parentFirstPaintOrder([...nodes, draft].filter((node): node is DesignNode => Boolean(node)))
   const strokeSlots = liftedStrokeSlots(renderList, selected, byId)
   const group = selectedIds.length > 1 ? unionWorldBounds(nodes.filter((node) => selected.has(node.id)), nodes) : null
   const spacing = tool === 'pointer' && selectedIds.length >= 1 ? measureSelectionGaps(nodes, selectedIds) : null
@@ -630,6 +679,7 @@ export function DesignLayer({
   const pads = tool === 'pointer' && onPad && !isGridLayout(padFrame) ? measurePaddingBands(nodes, selectedIds) : []
   const spacingHint = useSpacingHint()
   const gradientEdit = useGradientEdit()
+  const shaderEdit = useShaderEdit()
   const blurEdit = useBlurEdit()
   const [chromeHost, setChromeHost] = useState<HTMLDivElement | null>(null)
   const alignTarget = tool === 'pointer' && onLayoutAlign ? measureAlignTarget(nodes, selectedIds) : null
@@ -774,6 +824,15 @@ export function DesignLayer({
           if (!node) return null
           const box = resolveWorldRect(node, nodes)
           return <GradientHandles box={box} transform={nodeTransformCss(node, nodes, box)} edit={gradientEdit} />
+        })()}
+      {shaderEdit &&
+        !gradientEdit &&
+        selectedIds.length === 1 &&
+        (() => {
+          const node = nodes.find((item) => item.id === selectedIds[0])
+          if (!node) return null
+          const box = resolveWorldRect(node, nodes)
+          return <ShaderHandles box={box} transform={nodeTransformCss(node, nodes, box)} edit={shaderEdit} />
         })()}
       {blurEdit &&
         !gradientEdit &&
@@ -1301,7 +1360,7 @@ function DrawnPath({
   selected: boolean
   /** Frame-style selection box: outline, corner handles and size label. */
   showBox: boolean
-  onResize: (id: string, next: { x: number; y: number; width: number; height: number; world?: boolean }) => void
+  onResize: (id: string, next: { x: number; y: number; width: number; height: number; world?: boolean; textResize?: DesignNode['textResize'] }) => void
   pathHover?: boolean
   hoverPoint?: PathPoint | null
   tool: DesignTool
@@ -1312,7 +1371,9 @@ function DrawnPath({
 }) {
   const points = node.points || []
   // Older drawings kept their ink color in `fill`; only treat `fill` as a fill once a stroke color exists.
-  const color = toHex(node.stroke || node.fill, '#1A1A1A')
+  const inkGradient = node.strokePaint?.type === 'gradient' ? node.strokePaint : null
+  const inkId = 'stroke-' + node.id.replace(/[^a-zA-Z0-9_-]/g, '')
+  const color = inkGradient ? 'url(#' + inkId + ')' : node.strokePaint?.type === 'solid' ? node.strokePaint.color : toHex(node.stroke || node.fill, '#1A1A1A')
   const fillPaints = node.stroke
     ? getNodePaints(node).flatMap((paint) => {
         if (paint.visible === false) return []
@@ -1420,6 +1481,7 @@ function DrawnPath({
         window.addEventListener('pointerup', up)
       }}
     >
+      {inkGradient && <defs>{inkGradient.gradientKind === 'radial' ? <radialGradient id={inkId}>{inkGradient.stops.map(stop => <stop key={stop.id} offset={stop.position} stopColor={stop.color} stopOpacity={stop.opacity * inkGradient.opacity} />)}</radialGradient> : <linearGradient id={inkId} x1={inkGradient.handles?.start.x ?? (0.5 - Math.cos(inkGradient.angle * Math.PI / 180) / 2)} y1={inkGradient.handles?.start.y ?? (0.5 - Math.sin(inkGradient.angle * Math.PI / 180) / 2)} x2={inkGradient.handles?.end.x ?? (0.5 + Math.cos(inkGradient.angle * Math.PI / 180) / 2)} y2={inkGradient.handles?.end.y ?? (0.5 + Math.sin(inkGradient.angle * Math.PI / 180) / 2)}>{inkGradient.stops.map(stop => <stop key={stop.id} offset={stop.position} stopColor={stop.color} stopOpacity={stop.opacity * inkGradient.opacity} />)}</linearGradient>}</defs>}
       {showBox && (
         <rect
           className="draw-hit-box"
@@ -1782,7 +1844,7 @@ function DesignItem({
   onMoveEnd?: (id: string) => void
   /** Pointer released without dragging (click). */
   onClickRelease?: (id: string) => void
-  onResize: (id: string, next: { x: number; y: number; width: number; height: number; world?: boolean }) => void
+  onResize: (id: string, next: { x: number; y: number; width: number; height: number; world?: boolean; textResize?: DesignNode['textResize'] }) => void
   onScaleStart: () => void
   onScale: (origin: { x: number; y: number }, factor: number) => void
   onEdit: (id: string, patch: Partial<DesignNode>) => void
@@ -1872,6 +1934,7 @@ function DesignItem({
       const el = editRef.current
       if (!target || !el || el.contains(target)) return
       if (target.closest('.rightbar, .fill-picker, .prop-blend-menu')) return
+      textEditEndingClicks.add(event)
       if (document.activeElement === el) el.blur()
       else finishEditRef.current?.()
     }
@@ -1948,7 +2011,12 @@ function DesignItem({
               ? scaleBox.y
               : scaleBox.y + scaleBox.height / 2
         }
-        onScale(origin, scaleFactorFromDrag(origin, startCorner, dx, dy))
+        const center = { x: scaleBox.x + scaleBox.width/2, y: scaleBox.y + scaleBox.height/2 }
+        const rotatedOrigin = applyMat(screenMatrix, origin.x-center.x, origin.y-center.y)
+        const rotatedCorner = applyMat(screenMatrix, startCorner.x-center.x, startCorner.y-center.y)
+        const worldOrigin = { x:center.x+rotatedOrigin.x, y:center.y+rotatedOrigin.y }
+        const worldCorner = { x:center.x+rotatedCorner.x, y:center.y+rotatedCorner.y }
+        onScale(worldOrigin, scaleFactorFromDrag(worldOrigin, worldCorner, dx, dy))
         return
       }
       onResize(start.moveId || node.id, {
@@ -1964,6 +2032,7 @@ function DesignItem({
             ratio: start.width / Math.max(1, start.height)
           }
         ),
+        ...(node.type === 'text' ? { textResize: start.handle === 'e' || start.handle === 'w' ? 'auto-height' as const : 'fixed' as const } : {}),
         world: true
       })
       return
@@ -2029,7 +2098,12 @@ function DesignItem({
               ? scaleBox.y
               : scaleBox.y + scaleBox.height / 2
         }
-        onScale(origin, scaleFactorFromDrag(origin, startCorner, dx, dy))
+        const center = { x: scaleBox.x + scaleBox.width/2, y: scaleBox.y + scaleBox.height/2 }
+        const rotatedOrigin = applyMat(screenMatrix, origin.x-center.x, origin.y-center.y)
+        const rotatedCorner = applyMat(screenMatrix, startCorner.x-center.x, startCorner.y-center.y)
+        const worldOrigin = { x:center.x+rotatedOrigin.x, y:center.y+rotatedOrigin.y }
+        const worldCorner = { x:center.x+rotatedCorner.x, y:center.y+rotatedCorner.y }
+        onScale(worldOrigin, scaleFactorFromDrag(worldOrigin, worldCorner, dx, dy))
         return
       }
       onResize(node.id, {
@@ -2045,6 +2119,7 @@ function DesignItem({
             ratio: start.width / Math.max(1, start.height)
           }
         ),
+        ...(node.type === 'text' ? { textResize: start.handle === 'e' || start.handle === 'w' ? 'auto-height' as const : 'fixed' as const } : {}),
         world: true
       })
     }
@@ -2059,7 +2134,7 @@ function DesignItem({
 
   // Figma: drag just outside a corner to spin around the centre; Shift snaps to 15°.
   const startRotate = (handle: Handle) => (event: ReactPointerEvent<HTMLSpanElement>) => {
-    if (drafting || !canDragNode(tool)) return
+    if (drafting || (!canDragNode(tool) && tool !== 'scale')) return
     event.preventDefault()
     event.stopPropagation()
     onSelect(node.id, false)
@@ -2155,7 +2230,7 @@ function DesignItem({
     const height = isDraft
       ? Math.max(1, node.height || 1)
       : textResize === 'fixed'
-        ? Math.max(fontSize, node.height || metrics.height)
+        ? Math.max(1, node.height || metrics.height)
         : metrics.height
     const draftDragged = isDraft && (width > metrics.width + 12 || height > metrics.height + 8)
     const textPaint = getNodePaints(node).find((paint) => paint.visible !== false)
@@ -2223,6 +2298,7 @@ function DesignItem({
                 : 'flex-start',
           overflow: node.textTruncation || textResize === 'fixed' ? 'hidden' : undefined,
           color: textColor,
+          ...textStrokeCss(node),
           background: 'transparent',
           whiteSpace: wraps ? 'pre-wrap' : 'pre',
           wordBreak: wraps ? 'break-word' : undefined
@@ -2240,6 +2316,7 @@ function DesignItem({
         }}
       >
         <EffectOverlays node={node} radius={0} width={width} height={height} />
+        <TextLineHeightFeedback node={node} />
         {node.editing ? (
           <div
             ref={editRef}
@@ -2254,8 +2331,8 @@ function DesignItem({
               onEdit(node.id, {
                 text,
                 name: text || 'Text',
-                width: textResize === 'auto-width' ? size.width : Math.max(node.width || size.width, size.width),
-                height: textResize === 'fixed' ? Math.max(node.height || size.height, size.height) : size.height
+                width: textResize === 'auto-width' ? size.width : node.width || size.width,
+                height: textResize === 'fixed' ? node.height || size.height : size.height
               })
             }}
             onBlur={() => {
@@ -2280,7 +2357,7 @@ function DesignItem({
         ) : isDraft ? null : (
           <span
             className={`design-text-label${node.textTruncation ? ' is-truncate' : ''}`}
-            style={{ whiteSpace: wraps ? 'pre-wrap' : 'pre', ...textBlockStyle(node) }}
+            style={{ whiteSpace: wraps ? 'pre-wrap' : 'pre', ...textBlockStyle(node), maxWidth:'100%', minWidth:0, overflowWrap:wraps ? 'anywhere' : undefined, flexShrink:0 }}
           >
             {paragraphs
               ? paragraphs.map((para, index) => (
@@ -2444,7 +2521,7 @@ function DesignItem({
         )
       )
   )
-  const name = node.name || (isSection ? 'Section' : isFrame ? 'New frame name' : node.type)
+  const name = node.name || (isSection ? 'Section' : isFrame ? 'Frame' : node.type)
   const labelColor = isSection ? toHex(node.stroke, '#000000') : undefined
   const showWorkingChrome = Boolean(
     building && (isFrame || isSection) && !node.parentId && !hasBuildContent
@@ -2472,13 +2549,13 @@ function DesignItem({
 
   const beginRename = () => {
     skipNameBlurCommit.current = false
-    setNameDraft(node.name || 'New frame name')
+    setNameDraft(node.name || 'Frame')
     setRenaming(true)
   }
 
   const commitRename = () => {
     if (!renaming) return
-    const next = nameDraft.trim() || 'New frame name'
+    const next = nameDraft.trim() || 'Frame'
     setRenaming(false)
     if (next !== (node.name || '')) onEdit(node.id, { name: next })
   }
@@ -2486,7 +2563,7 @@ function DesignItem({
   const cancelRename = () => {
     skipNameBlurCommit.current = true
     setRenaming(false)
-    setNameDraft(node.name || 'New frame name')
+    setNameDraft(node.name || 'Frame')
   }
 
   return (
@@ -2529,6 +2606,7 @@ function DesignItem({
       <PaintLayers
         node={node}
         radius={nodeBorderRadiusCss(node, width, Math.max(1, height), isSection ? 2 : 0)}
+        outline={shapeOutlinePath(node, width, Math.max(1, height))}
       />
       <EffectOverlays
         node={node}
@@ -2627,6 +2705,8 @@ function DesignItem({
           <div className="design-upright" style={uprightStyle}>
             <div className="design-size">{formatSizeLabel(node, width, Math.max(1, height))}</div>
           </div>
+          {!node.locked && tool === 'pointer' && (node.type === 'line' || node.type === 'arrow') && <LineEndpointHandles node={node} box={box} matrix={screenMatrix} onEdit={onEdit} />}
+          {!node.locked && tool === 'pointer' && <ShapeGeometryHandles node={node} width={width} height={Math.max(1, height)} matrix={screenMatrix} onEdit={onEdit} />}
           {!inGridCell && node.type !== 'line' && node.type !== 'arrow' && (
             <ResizeHandles onStart={startHandle} onRotateStart={startRotate} matrix={screenMatrix} />
           )}
@@ -2648,7 +2728,7 @@ function ShapeGraphic({
   height: number
 }) {
   if (node.type === 'frame' || node.type === 'rect' || node.type === 'section') return null
-  const fill = withAlpha(toHex(node.fill, '#D9D9D9'), node.fillOpacity ?? 1)
+  const fill = topPaintIsMedia(node) ? 'none' : withAlpha(toHex(node.fill, '#D9D9D9'), node.fillOpacity ?? 1)
   const strokeWidth = node.strokeWidth || 0
   const stroke = strokeWidth ? withAlpha(toHex(node.stroke, '#1A1A1A'), node.strokeOpacity ?? 1) : 'none'
   const align =
@@ -2662,16 +2742,14 @@ function ShapeGraphic({
   const common = {
     fill,
     stroke,
-    strokeWidth: renderedStroke
+    strokeWidth: renderedStroke,
+    ...(strokeWidth ? svgDashProps(node) : {})
   }
 
   let shape: ReactNode = null
-  if (node.type === 'ellipse') {
-    shape = <ellipse cx={width / 2} cy={height / 2} rx={width / 2} ry={height / 2} {...common} />
-  } else if (node.type === 'polygon') {
-    shape = <polygon points={`${width / 2},0 ${width},${height} 0,${height}`} {...common} />
-  } else if (node.type === 'star') {
-    shape = <polygon points={starPoints(width, height)} {...common} />
+  const outline = shapeOutlinePath(node, width, height)
+  if (outline) {
+    shape = <path d={outline.d} fillRule={outline.evenOdd ? 'evenodd' : undefined} {...common} />
   } else if (node.type === 'line' || node.type === 'arrow') {
     const points = node.points || [
       { x: origin.x, y: origin.y },
@@ -2682,19 +2760,15 @@ function ShapeGraphic({
     const x2 = points[1].x - origin.x
     const y2 = points[1].y - origin.y
     const angle = Math.atan2(y2 - y1, x2 - x1)
-    const head = 12
-    return (
-      <svg className="design-shape-svg" width={width} height={Math.max(1, height)}>
-        <line x1={x1} y1={y1} x2={x2} y2={y2} stroke={toHex(node.stroke || node.fill, '#1A1A1A')} strokeWidth={node.strokeWidth || 2} />
-        {node.type === 'arrow' && (
-          <polygon
-            className="is-filled"
-            fill={toHex(node.fill || node.stroke, '#1A1A1A')}
-            points={`${x2},${y2} ${x2 - head * Math.cos(angle - 0.4)},${y2 - head * Math.sin(angle - 0.4)} ${x2 - head * Math.cos(angle + 0.4)},${y2 - head * Math.sin(angle + 0.4)}`}
-          />
-        )}
-      </svg>
-    )
+    const ink = withAlpha(toHex(node.stroke, '#000000'), node.strokeOpacity ?? 1)
+    const weight = node.strokeWidth ?? 2
+    const head = Math.min(Math.hypot(x2-x1,y2-y1)*.4,Math.max(8,weight*3.5))
+    const profile = node.strokeProfile || 'uniform'
+    const outline = profile !== 'uniform' ? profileOutline([{x:x1,y:y1},{x:x2,y:y2}],false,weight,profile,Boolean(node.strokeProfileFlip),node.strokeCap || 'none') : ''
+    return <svg className="design-shape-svg" width={Math.max(1,width)} height={Math.max(1,height)}>
+      {outline ? <path d={outline} fill={ink} /> : <line x1={x1} y1={y1} x2={x2} y2={y2} stroke={ink} strokeWidth={weight} strokeLinecap={node.strokeCap === 'square' ? 'square' : node.type === 'arrow' || node.strokeCap === 'round' ? 'round' : 'butt'} {...svgDashProps(node)} />}
+      {node.type === 'arrow' && <path d={'M'+(x2-head*Math.cos(angle-.65))+' '+(y2-head*Math.sin(angle-.65))+' L'+x2+' '+y2+' L'+(x2-head*Math.cos(angle+.65))+' '+(y2-head*Math.sin(angle+.65))} fill="none" stroke={ink} strokeWidth={weight} strokeLinecap="round" strokeLinejoin="round" />}
+    </svg>
   }
   if (!shape) return null
   const shadowId = `shape-shadow-${node.id.replace(/[^a-zA-Z0-9_-]/g, '')}`
@@ -2709,9 +2783,9 @@ function ShapeGraphic({
             {node.type === 'ellipse' ? (
               <ellipse cx={width / 2} cy={height / 2} rx={width / 2} ry={height / 2} />
             ) : node.type === 'polygon' ? (
-              <polygon points={`${width / 2},0 ${width},${height} 0,${height}`} />
+              <path d={roundedPolygonPath(polygonPoints(width, height, node.polygonCount ?? 3), node.radius || 0)} />
             ) : (
-              <polygon points={starPoints(width, height)} />
+              <path d={roundedPolygonPath(starPoints(width, height, node.starCount ?? 5, node.starRatio ?? .382), node.radius || 0)} />
             )}
           </clipPath>
         )}
@@ -2724,16 +2798,76 @@ function ShapeGraphic({
   )
 }
 
-function starPoints(width: number, height: number, spikes = 5): string {
+/** Outline of a vector shape in its own box (px), shared by the SVG fill and media clip-paths. */
+function shapeOutlinePath(node: DesignNode, width: number, height: number): { d: string; evenOdd: boolean } | null {
+  if (node.type === 'ellipse') {
+    const sweep = Math.max(0.1, Math.min(360, node.arcSweep ?? 360))
+    const start = (node.arcStart || 0) * Math.PI / 180
+    const end = start + sweep * Math.PI / 180
+    const point = (angle: number, ratio = 1) => ({ x: width / 2 + Math.cos(angle) * width / 2 * ratio, y: height / 2 + Math.sin(angle) * height / 2 * ratio })
+    const a = point(start), b = point(end), inner = Math.max(0, Math.min(.99, node.arcInnerRadius || 0))
+    const ia = point(start, inner), ib = point(end, inner)
+    const fullEnd = point(start + Math.PI)
+    const outer = sweep >= 359.99 ? 'M'+a.x+' '+a.y+' A'+width/2+' '+height/2+' 0 1 1 '+fullEnd.x+' '+fullEnd.y+' A'+width/2+' '+height/2+' 0 1 1 '+a.x+' '+a.y : 'M'+a.x+' '+a.y+' A'+width/2+' '+height/2+' 0 '+(sweep > 180 ? 1 : 0)+' 1 '+b.x+' '+b.y
+    const innerPath = inner ? (sweep >= 359.99 ? ' M'+ia.x+' '+ia.y+' A'+width/2*inner+' '+height/2*inner+' 0 1 0 '+point(start+Math.PI, inner).x+' '+point(start+Math.PI, inner).y+' A'+width/2*inner+' '+height/2*inner+' 0 1 0 '+ia.x+' '+ia.y : ' L'+ib.x+' '+ib.y+' A'+width/2*inner+' '+height/2*inner+' 0 '+(sweep > 180 ? 1 : 0)+' 0 '+ia.x+' '+ia.y) : sweep >= 359.99 ? '' : ' L'+width/2+' '+height/2
+    return { d: outer + innerPath + ' Z', evenOdd: true }
+  }
+  if (node.type === 'polygon') {
+    return { d: roundedPolygonPath(polygonPoints(width, height, node.polygonCount ?? 3), node.radius || 0), evenOdd: false }
+  }
+  if (node.type === 'star') {
+    return { d: roundedPolygonPath(starPoints(width, height, node.starCount ?? 5, node.starRatio ?? .382), node.radius || 0), evenOdd: false }
+  }
+  return null
+}
+
+/** Shader, image, and video fills render as layers, so vector shapes skip their flat SVG fill underneath. */
+function topPaintIsMedia(node: DesignNode): boolean {
+  const top = getNodePaints(node).find((paint) => paint.visible !== false)
+  return (
+    top?.type === 'shader' ||
+    (top?.type === 'image' && Boolean(top.imageDataUrl)) ||
+    (top?.type === 'video' && Boolean(top.videoDataUrl))
+  )
+}
+
+/** Round every convex and concave vertex, clamping the trim to its adjacent edges. */
+function roundedPolygonPath(points: string, radius: number): string {
+  const vertices = points.split(' ').map(pair => { const [x,y]=pair.split(',').map(Number); return {x,y} })
+  if (!vertices.length) return ''
+  if (radius <= 0) return 'M'+vertices.map(p=>p.x+' '+p.y).join(' L')+' Z'
+  const corners = vertices.map((p,i) => {
+    const previous=vertices[(i+vertices.length-1)%vertices.length], next=vertices[(i+1)%vertices.length]
+    const a=Math.hypot(previous.x-p.x,previous.y-p.y), b=Math.hypot(next.x-p.x,next.y-p.y)
+    const cosine=Math.max(-1,Math.min(1,((previous.x-p.x)*(next.x-p.x)+(previous.y-p.y)*(next.y-p.y))/Math.max(.001,a*b)))
+    const trim=Math.min(a*.49,b*.49,radius/Math.max(.01,Math.tan(Math.acos(cosine)/2)))
+    return {p,start:{x:p.x+(previous.x-p.x)*trim/Math.max(.001,a),y:p.y+(previous.y-p.y)*trim/Math.max(.001,a)},end:{x:p.x+(next.x-p.x)*trim/Math.max(.001,b),y:p.y+(next.y-p.y)*trim/Math.max(.001,b)}}
+  })
+  return 'M'+corners[0].start.x+' '+corners[0].start.y+corners.map(c=>' L'+c.start.x+' '+c.start.y+' Q'+c.p.x+' '+c.p.y+' '+c.end.x+' '+c.end.y).join('')+' Z'
+}
+
+function polygonPoints(width: number, height: number, count: number): string {
+  const sides = Math.max(3, Math.min(60, Math.round(count)))
+  const points = Array.from({length:sides}, (_,index) => {
+    const angle = -Math.PI/2 + index*Math.PI*2/sides
+    return { x:Math.cos(angle), y:Math.sin(angle) }
+  })
+  const minX=Math.min(...points.map(p=>p.x)), maxX=Math.max(...points.map(p=>p.x))
+  const minY=Math.min(...points.map(p=>p.y)), maxY=Math.max(...points.map(p=>p.y))
+  return points.map(p => ((p.x-minX)/(maxX-minX)*width)+','+((p.y-minY)/(maxY-minY)*height)).join(' ')
+}
+
+function starPoints(width: number, height: number, spikes = 5, ratio = .382): string {
   const cx = width / 2
   const cy = height / 2
   const outer = Math.min(width, height) / 2
-  const inner = outer * 0.4
+  spikes = Math.max(3, Math.min(60, Math.round(spikes)))
+  const inner = outer * Math.max(.01, Math.min(.99, ratio))
   const points: string[] = []
   for (let i = 0; i < spikes * 2; i++) {
     const radius = i % 2 === 0 ? outer : inner
     const angle = -Math.PI / 2 + (i * Math.PI) / spikes
-    points.push(`${cx + Math.cos(angle) * radius},${cy + Math.sin(angle) * radius}`)
+    points.push(`${cx + Math.cos(angle) * radius * width / Math.min(width,height)},${cy + Math.sin(angle) * radius * height / Math.min(width,height)}`)
   }
   return points.join(' ')
 }
@@ -2801,7 +2935,12 @@ function styleFromNode(
   const strokeColor = withAlpha(stroke, strokeAlpha)
   const liftedStroke = hasLiftedStroke(node)
   const shadowParts: string[] = []
-  if (boxed && strokeWidth > 0 && !isSection && !liftedStroke) {
+  // Box shadows can't dash, so a dashed outside stroke draws as an outline instead.
+  const dashedOutline =
+    boxed && strokeWidth > 0 && !isSection && !liftedStroke && strokeAlign === 'outside' && strokeDashStyle(node)
+      ? `${strokeWidth}px ${strokeDashStyle(node)} ${strokeColor}`
+      : undefined
+  if (boxed && strokeWidth > 0 && !isSection && !liftedStroke && !dashedOutline) {
     if (strokeAlign === 'inside') shadowParts.push(`inset 0 0 0 ${strokeWidth}px ${strokeColor}`)
     else if (strokeAlign === 'outside') shadowParts.push(`0 0 0 ${strokeWidth}px ${strokeColor}`)
     else if (node.type !== 'text' && node.type !== 'image') {
@@ -2881,6 +3020,7 @@ function styleFromNode(
     borderRadius: radiusCss,
     opacity: node.opacity ?? 1,
     boxShadow: boxed ? shadow : undefined,
+    ...(dashedOutline ? { outline: dashedOutline, outlineOffset: 0 } : {}),
     filter: filters.length ? filters.join(' ') : undefined,
     backdropFilter: backdrop,
     WebkitBackdropFilter: backdrop,
@@ -2924,15 +3064,25 @@ function EffectOverlays({
   )
 }
 
-function PaintLayers({ node, radius }: { node: DesignNode; radius: string }) {
+function PaintLayers({
+  node,
+  radius,
+  outline
+}: {
+  node: DesignNode
+  radius: string
+  /** Vector shapes clip their media to the shape itself instead of the bounding box. */
+  outline?: { d: string; evenOdd: boolean } | null
+}) {
   const paints = getNodePaints(node).filter((paint) => paint.visible !== false)
   const top = paints[0]
   const media = paints.filter((paint) => paint.type === 'shader' || (paint.type === 'video' && paint.videoDataUrl))
   const image = top?.type === 'image' && top.imageDataUrl ? top : null
   if (!media.length && !image) return null
   // Frames keep overflow:visible for name labels; clip media here so corner radius still applies.
+  const clipPath = outline ? `path(${outline.evenOdd ? 'evenodd, ' : ''}${JSON.stringify(outline.d)})` : undefined
   return (
-    <div className="design-paint-layers" style={{ borderRadius: radius }}>
+    <div className="design-paint-layers" style={{ borderRadius: outline ? undefined : radius, clipPath }}>
       {image ? (
         <AdjustedImage
           src={image.imageDataUrl}
@@ -3205,4 +3355,90 @@ function resizeTransformedRect(
     width: next.width,
     height: next.height
   }
+}
+
+function ShapeGeometryHandles({ node, width, height, matrix, onEdit }: {
+  node: DesignNode; width: number; height: number; matrix: Mat2;
+  onEdit: (id: string, patch: Partial<DesignNode>) => void
+}) {
+  const [hint, setHint] = useState('')
+  const [hintPoint, setHintPoint] = useState({x:0,y:0})
+  const geometryRoot = useRef<HTMLSpanElement>(null)
+  const cleanupDrag = useRef<(() => void) | null>(null)
+  useEffect(() => () => cleanupDrag.current?.(), [])
+  const radiusShape = node.type === 'rect' || node.type === 'frame'
+  const polygonShape = node.type === 'polygon' || node.type === 'star'
+  if (!radiusShape && !polygonShape && node.type !== 'ellipse') return null
+  const start = (kind: string, x: number, y: number, sx = 1, sy = 1) => (event: ReactPointerEvent<HTMLButtonElement>) => {
+    event.preventDefault(); event.stopPropagation()
+    const zoom = Number(event.currentTarget.closest('.world')?.getAttribute('data-zoom') || '1')
+    cleanupDrag.current?.()
+    const target = event.currentTarget
+    target.setPointerCapture(event.pointerId)
+    const previousCursor = document.body.style.cursor
+    document.body.style.cursor = 'var(--move-tool-cursor)'
+    const origin = { x: event.clientX, y: event.clientY }
+    const initialRadius = node.radius || 0
+    setHintPoint({x:event.clientX+14,y:event.clientY-24})
+    const move = (next: PointerEvent) => {
+      setHintPoint({x:next.clientX+14,y:next.clientY-24})
+      const delta = applyInverse(matrix, (next.clientX-origin.x)/zoom, (next.clientY-origin.y)/zoom)
+      if (kind === 'count') {
+        const count=Math.max(3,Math.min(60,Math.round((node.type === 'star' ? node.starCount ?? 5 : node.polygonCount ?? 3)-delta.y*zoom/12)))
+        onEdit(node.id,node.type === 'star' ? {starCount:count} : {polygonCount:count});setHint('Count '+count)
+      } else if (kind === 'starRatio') {
+        const ratio=Math.max(.01,Math.min(.99,(node.starRatio??.382)-delta.y/(height/2)))
+        onEdit(node.id,{starRatio:ratio});setHint('Ratio '+Math.round(ratio*1000)/10+'%')
+      } else if (kind === 'radius') {
+        const radius = Math.max(0, Math.min(Math.min(width,height)/2, initialRadius + (delta.x*sx + delta.y*sy)/1.2))
+        onEdit(node.id, { radius, cornerRadii: undefined }); setHint('Radius ' + Math.round(radius))
+      } else {
+        const px = x + delta.x - width/2, py = y + delta.y - height/2
+        const angle = ((Math.atan2(py/(height/2), px/(width/2))*180/Math.PI)%360+360)%360
+        if (kind === 'inner') {
+          const ratio = Math.max(0,Math.min(.95,Math.hypot(px/(width/2),py/(height/2))))
+          onEdit(node.id, { arcInnerRadius: ratio }); setHint('Ratio '+Math.round(ratio*100)+'%')
+        } else if (kind === 'start') { onEdit(node.id,{arcStart:angle}); setHint('Start '+Math.round(angle)+'°') }
+        else { const sweep = (angle-(node.arcStart||0)+360)%360; onEdit(node.id,{arcSweep:sweep < 2 ? 360 : sweep}); setHint('Sweep '+Math.round(sweep/3.6)+'%') }
+      }
+    }
+    const up = () => { window.removeEventListener('pointermove',move); window.removeEventListener('pointerup',up); window.removeEventListener('pointercancel',up); if (target.hasPointerCapture(event.pointerId)) target.releasePointerCapture(event.pointerId); document.body.style.cursor = previousCursor; cleanupDrag.current = null; setHint('') }
+    cleanupDrag.current = up
+    window.addEventListener('pointermove',move); window.addEventListener('pointerup',up); window.addEventListener('pointercancel',up)
+  }
+  const point = (angle: number, ratio=1) => ({ x:width/2+Math.cos(angle*Math.PI/180)*width/2*ratio,y:height/2+Math.sin(angle*Math.PI/180)*height/2*ratio })
+  const handle = (kind:string,x:number,y:number,sx=1,sy=1) => <button key={kind+sx+sy} type="button" className="shape-geometry-handle" aria-label={kind === 'radius' ? 'Drag corner radius' : kind === 'count' ? 'Drag point count' : kind === 'starRatio' ? 'Drag star ratio' : 'Drag arc '+kind} title={kind === 'radius' ? 'Radius' : kind === 'count' ? 'Count' : kind === 'starRatio' ? 'Ratio' : 'Arc '+kind} style={{left:x,top:y,cursor:'var(--move-tool-cursor)'}} onPointerDown={start(kind,x,y,sx,sy)} />
+  const displayZoom = Number(geometryRoot.current?.closest('.world')?.getAttribute('data-zoom') || '1')
+  const inset = Math.max(0, Math.min(width/2-4/displayZoom,height/2-4/displayZoom,12/displayZoom+(node.radius||0)*.6))
+  const a=point(node.arcStart||0), b=point((node.arcStart||0)+(node.arcSweep??360)), inner=point(node.arcStart||0, node.arcInnerRadius||0)
+  return <><span ref={geometryRoot} />{radiusShape ? [[inset,inset,1,1],[width-inset,inset,-1,1],[width-inset,height-inset,-1,-1],[inset,height-inset,1,-1]].map(([x,y,sx,sy])=>handle('radius',x,y,sx,sy)) : polygonShape ? <>{handle('radius',width/2,Math.min(height/3,inset))}{handle('count',width*.85,height*.45)}{node.type === 'star' && handle('starRatio',width/2,height/2-(node.starRatio??.382)*height/2)}</> : <><svg className="arc-control-guides" width={width} height={height} viewBox={'0 0 '+width+' '+height} aria-hidden><path d={'M'+a.x+' '+a.y+' L'+width/2+' '+height/2+' L'+b.x+' '+b.y} /></svg>{handle('start',a.x,a.y)}{handle('sweep',b.x,b.y)}{handle('inner',inner.x,inner.y)}</>}{hint && createPortal(<div className="shape-drag-value" style={{left:Math.min(window.innerWidth-110,hintPoint.x),top:Math.max(6,hintPoint.y)}}>{hint}</div>,document.body)}</>
+}
+
+function LineEndpointHandles({node,box,matrix,onEdit}:{node:DesignNode;box:{x:number;y:number;width:number;height:number};matrix:Mat2;onEdit:(id:string,patch:Partial<DesignNode>)=>void}) {
+  const [label,setLabel]=useState<{x:number;y:number;text:string}|null>(null)
+  const points=node.points || [{x:box.x,y:box.y},{x:box.x+box.width,y:box.y+box.height}]
+  const begin=(index:number)=>(event:ReactPointerEvent<HTMLButtonElement>)=>{
+    event.preventDefault();event.stopPropagation()
+    const target=event.currentTarget,zoom=Number(target.closest('.world')?.getAttribute('data-zoom')||1),origin={x:event.clientX,y:event.clientY}
+    target.setPointerCapture(event.pointerId)
+    const move=(next:PointerEvent)=>{
+      const delta=applyInverse(matrix,(next.clientX-origin.x)/zoom,(next.clientY-origin.y)/zoom)
+      const updated=points.map((point,i)=>i===index?{...point,x:point.x+delta.x,y:point.y+delta.y}:point)
+      if(next.shiftKey){const fixed=updated[1-index],moving=updated[index],length=Math.hypot(moving.x-fixed.x,moving.y-fixed.y),angle=Math.round(Math.atan2(moving.y-fixed.y,moving.x-fixed.x)/(Math.PI/12))*Math.PI/12;updated[index]={...moving,x:fixed.x+Math.cos(angle)*length,y:fixed.y+Math.sin(angle)*length}}
+      onEdit(node.id,{points:updated})
+      const dx=updated[1].x-updated[0].x,dy=updated[1].y-updated[0].y
+      setLabel({x:next.clientX+12,y:next.clientY-24,text:Math.round(Math.hypot(dx,dy)*100)/100+' × 0 · '+Math.round(Math.atan2(dy,dx)*180/Math.PI)+'°'})
+    }
+    const up=()=>{window.removeEventListener('pointermove',move);window.removeEventListener('pointerup',up);window.removeEventListener('pointercancel',up);if(target.hasPointerCapture(event.pointerId))target.releasePointerCapture(event.pointerId);setLabel(null)}
+    window.addEventListener('pointermove',move);window.addEventListener('pointerup',up);window.addEventListener('pointercancel',up)
+  }
+  return <><svg className="arc-control-guides" width={Math.max(1,box.width)} height={Math.max(1,box.height)}><path d={'M'+(points[0].x-box.x)+' '+(points[0].y-box.y)+' L'+(points[1].x-box.x)+' '+(points[1].y-box.y)} /></svg>{points.slice(0,2).map((point,index)=><button key={index} type="button" className="shape-geometry-handle" aria-label={index?'Drag line end':'Drag line start'} style={{left:point.x-box.x,top:point.y-box.y,cursor:'var(--move-tool-cursor)'}} onPointerDown={begin(index)} />)}{label&&createPortal(<div className="shape-drag-value" style={{left:label.x,top:label.y}}>{label.text}</div>,document.body)}</>
+}
+
+function TextLineHeightFeedback({node}:{node:DesignNode}) {
+  const [active,setActive]=useState(false)
+  useEffect(()=>{const hint=(event:Event)=>setActive((event as CustomEvent).detail===node.id);window.addEventListener('scobe:line-height-hint',hint);return()=>window.removeEventListener('scobe:line-height-hint',hint)},[node.id])
+  if(!active)return null
+  const lines=measureTextLines(node,node.text||'Text')
+  return <div className="text-line-height-feedback" aria-hidden>{lines.map((line,index)=><div key={index} className="text-line-height-box" style={{left:line.left,top:line.top,width:Math.max(1,line.width),height:line.height}} />)}</div>
 }
