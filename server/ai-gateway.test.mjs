@@ -1,0 +1,48 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { createGateway } from './ai-gateway.mjs';
+const env = { SUPABASE_URL: 'https://auth.example.test', SUPABASE_ANON_KEY: 'public-test', SUPABASE_SERVICE_ROLE_KEY: 'server-test', ANTHROPIC_API_KEY: 'claude-test', ELEVENLABS_API_KEY: 'speech-test', ELEVENLABS_VOICE_IDS: 'approved-voice' };
+async function fixture(mode = '') {
+  const calls = [];
+  const fetcher = async (url, options) => {
+    calls.push({ url, options });
+    if (url.endsWith('/auth/v1/user')) return Response.json(mode === 'invalid' ? {} : { id: 'user-id', email_confirmed_at: '2026-01-01' }, { status: mode === 'invalid' ? 401 : 200 });
+    if (url.includes('/rpc/')) return Response.json(mode === 'quota' ? { message: 'ai_usage_limit' } : null, { status: mode === 'quota' ? 400 : 200 });
+    if (url.includes('anthropic.com')) return new Response('event: message_stop\ndata: {"type":"message_stop"}\n\n', { headers: { 'Content-Type': 'text/event-stream' } });
+    if (url.includes('/voices/')) return Response.json({ name: 'Approved voice' });
+    return new Response(Buffer.from('mock-mp3'));
+  };
+  const server = createGateway(env, fetcher).listen(0, '127.0.0.1');
+  await new Promise(resolve => server.once('listening', resolve));
+  return { calls, base: 'http://127.0.0.1:' + server.address().port, close: () => new Promise(resolve => server.close(resolve)) };
+}
+const request = (body) => ({ method: 'POST', headers: { Authorization: 'Bearer user-session', 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+const chat = { model: 'claude-opus-5-5', max_tokens: 500, stream: true, messages: [{ role: 'user', content: 'hello' }] };
+test('requires verified sign-in before provider access', async () => {
+  const f = await fixture(); try { const result = await fetch(f.base + '/speech/voices'); assert.equal(result.status, 401); assert.equal(f.calls.length, 0); } finally { await f.close(); }
+});
+test('rejects invalid sessions', async () => {
+  const f = await fixture('invalid'); try { const result = await fetch(f.base + '/claude/v1/messages', request(chat)); assert.equal(result.status, 401); assert.equal(f.calls.length, 1); } finally { await f.close(); }
+});
+test('streams chat, replaces user credentials, and reserves usage', async () => {
+  const f = await fixture(); try {
+    const result = await fetch(f.base + '/claude/v1/messages', request(chat)); assert.equal(result.status, 200); assert.match(await result.text(), /message_stop/);
+    const upstream = f.calls.find(call => call.url.includes('anthropic.com')); assert.equal(upstream.options.headers['x-api-key'], env.ANTHROPIC_API_KEY);
+    assert.equal(f.calls.filter(call => call.url.includes('/rpc/')).length, 2);
+    const publicConfig = await (await fetch(f.base + '/config')).text(); assert.ok(!publicConfig.includes(env.ANTHROPIC_API_KEY)); assert.ok(!publicConfig.includes(env.SUPABASE_SERVICE_ROLE_KEY));
+  } finally { await f.close(); }
+});
+test('blocks requests when shared quota is exhausted', async () => {
+  const f = await fixture('quota'); try { const result = await fetch(f.base + '/claude/v1/messages', request(chat)); assert.equal(result.status, 429); assert.ok(!f.calls.some(call => call.url.includes('anthropic.com'))); } finally { await f.close(); }
+});
+test('rejects unsupported models and excessive output', async () => {
+  const f = await fixture(); try { for (const body of [{ ...chat, model: 'unknown' }, { ...chat, max_tokens: 100000 }]) { const result = await fetch(f.base + '/claude/v1/messages', request(body)); assert.equal(result.status, 400); } assert.ok(!f.calls.some(call => call.url.includes('anthropic.com'))); } finally { await f.close(); }
+});
+test('only exposes approved voices and generates speech with server key', async () => {
+  const f = await fixture(); try {
+    const list = await (await fetch(f.base + '/speech/voices', { headers: { Authorization: 'Bearer user-session' } })).json(); assert.deepEqual(list, [{ id: 'approved-voice', name: 'Approved voice' }]);
+    const denied = await fetch(f.base + '/speech/create', request({ text: 'Hello', model: 'eleven_v3', voice: 'private-voice' })); assert.equal(denied.status, 400);
+    const audio = await fetch(f.base + '/speech/create', request({ text: 'Hello', model: 'eleven_v3', voice: 'approved-voice' })); assert.equal(audio.status, 200); assert.equal(await audio.text(), 'mock-mp3');
+    const upstream = f.calls.find(call => call.url.includes('/text-to-speech/')); assert.equal(upstream.options.headers['xi-api-key'], env.ELEVENLABS_API_KEY);
+  } finally { await f.close(); }
+});
