@@ -180,3 +180,23 @@ test('signed thinking history remains append-only, including earlier tool result
   history.at(-2).content[0] = { type: 'redacted_thinking', data: 'signed-redacted-block' };
   assert.equal(JSON.stringify(loop.compactAgentThread(history)), JSON.stringify(history));
 });
+
+test('handoff stops a mixed tool batch before any canvas mutation', async () => {
+  const result = await simulate([tools(call('add_design_frame'), call('connect_canvas_agent'))], undefined, { stopTool: name => name === 'connect_canvas_agent' });
+  assert.equal(result.calls.filter(call => call.name !== 'finish_working_on_nodes').length, 0);
+  assert.ok(result.events.some(event => event.type === 'done'));
+});
+
+test('large build preflight preserves normal conversation and quick edits', () => {
+  const source = ts.transpileModule(readFileSync(new URL('../src/shared/chatBuildPolicy.ts', import.meta.url), 'utf8'), { compilerOptions: { module: ts.ModuleKind.CommonJS } }).outputText;
+  const policy = {}; runInNewContext(source, { exports: policy });
+  for (const request of ['Build a landing page', 'Create a dashboard', 'Continue the landing page', 'Design a mobile screen', 'Redesign the entire canvas']) assert.equal(policy.needsConnectedAgent(request), true, request);
+  for (const request of ['How do I build a landing page?', 'Explain how to design a dashboard', 'Change this text to Build a landing page', 'Create a button for my landing page', 'Make this blue', 'Write code for a dashboard', 'Hello']) assert.equal(policy.needsConnectedAgent(request), false, request);
+});
+
+
+test('quick-edit budget rejects oversized tool batches without partially applying them', async () => {
+  const result = await simulate([tools(call('add_design_frame'), call('add_design_text'))], undefined, { allowTools: names => names.length < 2 });
+  assert.equal(result.calls.filter(call => call.name !== 'finish_working_on_nodes').length, 0);
+  assert.ok(result.events.some(event => event.type === 'done'));
+});

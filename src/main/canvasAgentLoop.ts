@@ -10,6 +10,9 @@ type Options = {
   request: (messages: MessageParam[], onText: (text: string) => void) => Promise<Message>
   execute: (name: string, input: Record<string, unknown>) => Promise<ToolOutput>
   maxSteps?: number
+  stopTool?: (name: string) => boolean
+  allowTools?: (names: string[]) => boolean
+  stepLimitMessage?: string
   remember?: (notes: string[]) => void
 }
 
@@ -82,6 +85,14 @@ export async function runCanvasAgentLoop(options: Options): Promise<void> {
         continue
       }
       const tools = response.content.filter(block => block.type === 'tool_use')
+      if (tools.some(tool => options.stopTool?.(tool.name))) {
+        options.emit({ type: 'done' })
+        return
+      }
+      if (options.allowTools && !options.allowTools(tools.map(tool => tool.name))) {
+        options.emit({ type: 'done' })
+        return
+      }
       thread.push({ role: 'assistant', content: response.content })
       if (!tools.length) {
         const needsReview = pendingFrames.size > 0 || ((created || revision > 1) && renderedRevision < revision)
@@ -137,7 +148,7 @@ export async function runCanvasAgentLoop(options: Options): Promise<void> {
       }
       thread.push({ role: 'user', content: results })
     }
-    options.emit({ type: 'error', message: 'This build reached its step limit. Canvas changes are saved, but the task is unfinished. Ask me to continue from the current design.' })
+    options.emit({ type: 'error', message: options.stepLimitMessage || 'This build reached its step limit. Canvas changes are saved, but the task is unfinished. Ask me to continue from the current design.' })
   } catch (error) {
     options.emit({ type: 'error', message: friendlyAgentError(error) })
   } finally {

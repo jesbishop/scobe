@@ -7,9 +7,10 @@ import type { Tool } from '@anthropic-ai/sdk/resources/messages'
 import { app } from 'electron'
 import type { AgentEvent } from '../shared/types'
 import { runCanvasTool, type CanvasToolContext } from './canvasTools'
-import { chatCanvasTools, validateCanvasTool } from './canvasToolRegistry'
+import { chatCanvasTools, validateCanvasTool, toolAnnotations } from './canvasToolRegistry'
 import { friendlyAgentError, runCanvasAgentLoop } from './canvasAgentLoop'
 import { DESIGN_GUIDE } from '../shared/designGuide'
+import { AGENT_BUILD_REPLY, CHAT_BUILD_POLICY, needsConnectedAgent } from '../shared/chatBuildPolicy'
 
 
 
@@ -39,7 +40,11 @@ export function setAgentKey(key: string): { configured: boolean } {
   return agentStatus()
 }
 
-const TOOLS: Tool[] = chatCanvasTools()
+const TOOLS: Tool[] = [...chatCanvasTools(), {
+  name: 'connect_canvas_agent',
+  description: 'Stop a large canvas build and show the external-agent connection popup. Use before starting full pages, app screens, or complex builds. Normal chat and quick edits stay in Scobe.',
+  input_schema: { type: 'object', properties: {}, additionalProperties: false }
+}]
 const conversationNotes = new Map<string, string[]>()
 
 const SYSTEM_BASE = `You are Scobe’s helpful conversational AI assistant, powered by Claude. Answer questions, explain ideas, brainstorm, and carry on natural multi-turn conversations. Use the conversation history to understand follow-ups. Only call canvas tools when the user asks for canvas work or when inspecting the canvas is needed to answer their question. Never interpret ordinary conversation as an instruction to modify the canvas. For general questions, answer directly with appropriate detail and readable formatting.
@@ -60,7 +65,7 @@ Design: build UI on the canvas with frames, auto-layout, shapes, and text — li
 - Start with get_basic_info and get_tokens before designing. Never enumerate the entire file for a new design. Use get_tree_summary for a relevant subtree and get_node_info for individual layers. list_design is paginated; follow nextOffset only when needed. Build big things in passes: container frame first, then sections, then content. Issue independent tool calls together in one response to reduce round trips. Reuse actual returned layer IDs; never invent IDs.
 - When you build or restyle a design, finish with render_node on its top-level frame, check the image against the review checklist below, fix what fails, and render again. One review pass at minimum; stop after three.
 - Small single-property edits (one color, one size) don't need a render.
-- Complete the full requested scope. A plan or a placeholder frame is not a finished design. For large builds, use consistent reusable sections and group independent tool calls. If a limit stops you, say what remains unfinished. Never claim completion before visual review. Call finish_working_on_nodes after building.
+- Complete only quick, focused edits here. Never claim completion before visual review. Call finish_working_on_nodes after editing.
 - Work quickly and silently; after the last tool call, reply with one or two plain sentences saying what you built or changed.`
 
 const SYSTEM_FIELDS = `update_design accepts any of these layer fields in "patch" (omit what you don't change):
@@ -78,7 +83,9 @@ const SYSTEM = `${SYSTEM_BASE}
 
 ${SYSTEM_FIELDS}
 
-${DESIGN_GUIDE}`
+${DESIGN_GUIDE}
+
+${CHAT_BUILD_POLICY}`
 
 export async function runAgent(
   messages: Array<{ role: 'user' | 'assistant'; text: string }>,
@@ -89,6 +96,16 @@ export async function runAgent(
   model?: string,
   conversationId?: string
 ): Promise<void> {
+  const handoff = () => {
+    emit({ type: 'tool', name: 'connect_canvas_agent', summary: 'Connect your agent for larger canvas builds.' })
+    emit({ type: 'text', text: AGENT_BUILD_REPLY })
+  }
+  const latestRequest = [...messages].reverse().find(message => message.role === 'user')?.text || ''
+  if (needsConnectedAgent(latestRequest)) {
+    handoff()
+    emit({ type: 'done' })
+    return
+  }
   if (conversationId && messages.length <= 1) conversationNotes.delete(conversationId)
   const cloud = gatewayUrl()
   let apiKey: string | null
@@ -103,8 +120,22 @@ export async function runAgent(
   }
   const client = new Anthropic({ apiKey, ...(cloud ? { baseURL: cloud + '/claude', maxRetries: 0, timeout: 300000 } : {}) })
   const ctx: CanvasToolContext = { openBrowser, resolveBrowserGeometry, ...canvas }
+  let editCalls = 0
   await runCanvasAgentLoop({
     messages, emit, summarize,
+    maxSteps: 12,
+    stepLimitMessage: 'This edit needs more work than chat can handle. Your changes are saved. Connect your agent to finish the larger canvas task.',
+    stopTool: name => {
+      if (name !== 'connect_canvas_agent') return false
+      handoff()
+      return true
+    },
+    allowTools: names => {
+      editCalls += names.filter(name => !toolAnnotations(name).readOnlyHint && name !== 'finish_working_on_nodes').length
+      if (editCalls <= 8) return true
+      handoff()
+      return false
+    },
     remember: notes => {
       if (!conversationId || !notes.length) return
       const previous = conversationNotes.get(conversationId) || []

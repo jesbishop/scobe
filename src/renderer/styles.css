@@ -19476,3 +19476,8 @@ body.scobe-capturing [data-chrome-overlay] {
 .cloud-account-button:hover { background:var(--hover); color:var(--text); }
 .cloud-signin-form { display:flex; flex-direction:column; gap:14px; }
 .cloud-signin-form button { border:1px solid var(--line); background:var(--hover); color:var(--text); padding:8px 12px; border-radius:7px; cursor:pointer; }
+.ca-connect-modal.canvas-build-notice { width:min(440px, calc(100vw - 48px)); height:auto; max-height:calc(100vh - 48px); box-shadow:var(--popup-shadow); }
+.canvas-build-notice > p { margin:0; padding:4px 20px 20px; font-size:14px; line-height:1.6; color:var(--text-muted, #777); }
+.canvas-build-notice-actions { display:flex; justify-content:flex-end; flex-wrap:wrap; gap:8px; padding:0 20px 20px; }
+.canvas-build-notice-actions button { border:1px solid var(--border, #ddd); border-radius:8px; padding:9px 12px; background:var(--panel); color:var(--text); font:inherit; cursor:pointer; }
+.canvas-build-notice-actions button.is-primary { background:var(--text); color:var(--panel); border-color:var(--text); }

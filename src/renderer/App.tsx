@@ -3,6 +3,7 @@ import type { Paint } from '../shared/paint'
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent } from 'react'
 import { AnimatePresence, motion, useReducedMotion } from 'motion/react'
 import { BrowserFrame } from './BrowserFrame'
+import { CanvasBuildNotice } from './CanvasBuildNotice'
 import { CanvasToolbar } from './CanvasToolbar'
 import { DesignLayer, pointerEndedTextEdit } from './DesignLayer'
 import { CommentCursor, CommentResolveToast, CommentThreadCard, CURRENT_USER } from './CommentOverlays'
@@ -844,6 +845,8 @@ export function App() {
   const [codingActive, setCodingActive] = useState<ReturnType<typeof loadCodingAgents>['active']>(null)
   const [codingRecents, setCodingRecents] = useState(() => loadCodingAgents().recents)
   const [codingPopup, setCodingPopup] = useState(false)
+  const [canvasBuildNotice, setCanvasBuildNotice] = useState(false)
+  const closeCanvasBuildNotice = useCallback(() => setCanvasBuildNotice(false), [])
   const [tabsPopup, setTabsPopup] = useState(false)
   const [codingFullscreen, setCodingFullscreen] = useState(false)
   const [codingAgentUrl, setCodingAgentUrl] = useState('')
@@ -2680,6 +2683,7 @@ export function App() {
         pushSvg(event.svg, 0)
       }
       if (event.type === 'error') {
+        if (event.message.includes('Connect your agent to finish the larger canvas task')) setCanvasBuildNotice(true)
         // Never surface cancel/terminate in the composer.
         if (!isQuiverCancelMessage(event.message)) setCreateSvgStatus(event.message)
       }
@@ -4010,6 +4014,7 @@ export function App() {
         )
       }
       if (event.type === 'tool') {
+        if (event.name === 'connect_canvas_agent') { setCanvasBuildNotice(true); return }
         setChats((current) =>
           current.map((chat) =>
             chat.id === targetChatId
@@ -5563,7 +5568,7 @@ export function App() {
       agentChatRef.current = null
       setAgentBusy(false)
     })
-    return { summary: 'Claude is building this. Its steps show below.' }
+    return { summary: 'Checking your canvas request. Quick edits stay here; larger builds use your connected agent.' }
   }
 
   const selectChat = (id: string) => {
@@ -7841,6 +7846,7 @@ export function App() {
           {copyToast}
         </div>
       )}
+      <CanvasBuildNotice open={canvasBuildNotice} onClose={closeCanvasBuildNotice} onConnect={() => { setCanvasBuildNotice(false); setCodingPopup(true) }} />
     </div>
   )
 }
