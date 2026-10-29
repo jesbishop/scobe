@@ -10,6 +10,7 @@ const positive = (value, fallback) => { const n = Number(value || fallback); if 
 
 export function validationCategory(detail = {}) {
   const message = typeof detail.error?.message === 'string' ? detail.error.message : '';
+  if (/thinking.*(?:bind|prefix|signature|conversation)|(?:prefix|signature).*thinking/i.test(message)) return 'thinking_binding';
   if (/credit|billing|balance/i.test(message)) return 'billing';
   if (/non.empty|empty.*(?:text|content)|(?:text|content).*empty/i.test(message)) return 'empty_content';
   if (/tool_result|tool_use_id|tool_use.*(?:result|follow)|unexpected.*tool/i.test(message)) return 'tool_history';
@@ -23,6 +24,8 @@ export function validationCategory(detail = {}) {
 // Some streamed responses contain an empty text block before a tool call.
 // Claude rejects that block if it is echoed into the next messages request.
 export function normalizeMessages(messages) {
+  // Do not change a prefix that a later thinking signature authenticates.
+  if (messages.some(message => Array.isArray(message.content) && message.content.some(block => ['thinking', 'redacted_thinking'].includes(block.type)))) return messages;
   return messages.flatMap(message => {
     if (!Array.isArray(message.content)) return typeof message.content === 'string' && !message.content.trim() ? [] : [message];
     const content = message.content.filter(block => block.type !== 'text' || typeof block.text === 'string' && block.text.trim()).map(block => {
@@ -39,6 +42,7 @@ export function normalizeMessages(messages) {
 export function providerFailure(status, detail = {}) {
   const message = typeof detail.error?.message === 'string' ? detail.error.message : '';
   if (validationCategory(detail) === 'billing') return fail(503, 'Scobe’s Claude account has reached its billing or credit limit. The Scobe owner needs to check Anthropic billing before AI work can continue.');
+  if (validationCategory(detail) === 'thinking_binding') return fail(422, 'Claude rejected changes to its earlier conversation context. Update or restart Scobe before continuing this build.');
   if (status === 429) return fail(429, 'Claude is currently rate limited. Your canvas changes are saved; try again shortly.');
   if (status === 529 || status === 503) return fail(503, 'Claude is temporarily overloaded. Your canvas changes are saved; try again shortly.');
   if (status === 401 || status === 403) return fail(502, 'Scobe’s Claude connection needs attention. Your canvas changes are saved.');
@@ -101,7 +105,7 @@ export function createGateway(env = process.env, fetcher = fetch) {
       const body = req.body;
       if (!body || !models.has(body.model) || body.stream !== true || !Array.isArray(body.messages) || !body.messages.length || body.messages.length > 300 || !Number.isInteger(body.max_tokens) || body.max_tokens < 1 || body.max_tokens > 8000) throw fail(400, 'Unsupported chat request.');
       if (body.tools && (!Array.isArray(body.tools) || body.tools.length > 80)) throw fail(400, 'Too many tools.');
-      const payload = { model: body.model, max_tokens: body.max_tokens, messages: normalizeMessages(body.messages), system: body.system, tools: body.tools, stream: true };
+      const payload = { model: body.model, max_tokens: body.max_tokens, messages: normalizeMessages(body.messages), system: body.system, tools: body.tools, stream: true, cache_control: { type: 'ephemeral' } };
       // Reserve a conservative byte-based upper bound, including tool/image payloads. No refunds on failures.
       const factor = body.model.includes('opus') ? 5 : 1;
       await budget(req.scobeUser, 'chat', (Buffer.byteLength(JSON.stringify(payload)) + body.max_tokens) * factor);
