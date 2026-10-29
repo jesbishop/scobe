@@ -108,7 +108,12 @@ export function createGateway(env = process.env, fetcher = fetch) {
     res.on('close', () => controller.abort());
     try {
       const body = req.body;
-      if (!body || !models.has(body.model) || body.stream !== true || !Array.isArray(body.messages) || !body.messages.length || body.messages.length > 300 || !Number.isInteger(body.max_tokens) || body.max_tokens < 1 || body.max_tokens > 8000) throw fail(400, 'Unsupported chat request.');
+      if (!body || typeof body !== 'object') throw fail(400, 'Scobe sent an empty chat request. Please update or restart Scobe.');
+      if (!models.has(body.model)) throw fail(400, 'The selected chat model is not supported. Choose another model.');
+      if (body.stream !== true) throw fail(400, 'Scobe sent an incompatible chat format. Please update or restart Scobe.');
+      if (!Array.isArray(body.messages) || !body.messages.length) throw fail(400, 'Enter a message to start chatting.');
+      if (body.messages.length > 300) throw fail(400, 'This conversation has too many messages for this version of Scobe. Update Scobe or start a new chat; your saved conversation is kept.');
+      if (!Number.isInteger(body.max_tokens) || body.max_tokens < 1 || body.max_tokens > 8000) throw fail(400, 'Scobe requested an unsupported response length. Please update or restart Scobe.');
       if (body.tools && (!Array.isArray(body.tools) || body.tools.length > 80)) throw fail(400, 'Too many tools.');
       const payload = { model: body.model, max_tokens: body.max_tokens, messages: normalizeMessages(body.messages), system: body.system, tools: body.tools, stream: true, cache_control: { type: 'ephemeral' } };
       // Reserve a conservative byte-based upper bound, including tool/image payloads. No refunds on failures.

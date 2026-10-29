@@ -116,3 +116,16 @@ test('development allowance requires both the verified owner account and develop
     } finally { await f.close(); }
   }
 });
+
+
+test('chat validation distinguishes long history from invalid transport without exposing content', async () => {
+  const f = await fixture();
+  try {
+    for (const [body, message] of [[{ ...chat, messages: Array.from({ length: 301 }, () => ({ role: 'user', content: 'private-question' })) }, /too many messages/], [{ ...chat, stream: false }, /incompatible chat format/], [{ ...chat, messages: [] }, /Enter a message/]]) {
+      const response = await fetch(f.base + '/claude/v1/messages', request(body));
+      assert.equal(response.status, 400);
+      const text = await response.text(); assert.match(text, message); assert.ok(!text.includes('private-question'));
+    }
+    assert.ok(!f.calls.some(call => call.url.includes('anthropic.com')));
+  } finally { await f.close(); }
+});
