@@ -8,8 +8,37 @@ const speechModels = new Set(['eleven_v3', 'eleven_multilingual_v2']);
 const fail = (status, message) => Object.assign(new Error(message), { status });
 const positive = (value, fallback) => { const n = Number(value || fallback); if (!Number.isSafeInteger(n) || n < 1) throw Error('Usage limits must be positive integers.'); return n; };
 
+export function validationCategory(detail = {}) {
+  const message = typeof detail.error?.message === 'string' ? detail.error.message : '';
+  if (/credit|billing|balance/i.test(message)) return 'billing';
+  if (/non.empty|empty.*(?:text|content)|(?:text|content).*empty/i.test(message)) return 'empty_content';
+  if (/tool_result|tool_use_id|tool_use.*(?:result|follow)|unexpected.*tool/i.test(message)) return 'tool_history';
+  if (/prefill|last.*assistant|final.*assistant/i.test(message)) return 'assistant_prefill';
+  if (/schema|properties|additionalProperties/i.test(message)) return 'tool_schema';
+  if (/image|base64|png|jpeg/i.test(message)) return 'image';
+  if (/token|context|too long|too large/i.test(message)) return 'context_size';
+  return 'other_validation';
+}
+
+// Some streamed responses contain an empty text block before a tool call.
+// Claude rejects that block if it is echoed into the next messages request.
+export function normalizeMessages(messages) {
+  return messages.flatMap(message => {
+    if (!Array.isArray(message.content)) return typeof message.content === 'string' && !message.content.trim() ? [] : [message];
+    const content = message.content.filter(block => block.type !== 'text' || typeof block.text === 'string' && block.text.trim()).map(block => {
+      if (block.type !== 'tool_result') return block;
+      if (typeof block.content === 'string') return { ...block, content: block.content.trim() ? block.content : '(Tool returned no text.)' };
+      if (!Array.isArray(block.content)) return block;
+      const parts = block.content.filter(part => part.type !== 'text' || typeof part.text === 'string' && part.text.trim());
+      return { ...block, content: parts.length ? parts : '(Tool returned no text.)' };
+    });
+    return content.length ? [{ ...message, content }] : [];
+  });
+}
+
 export function providerFailure(status, detail = {}) {
   const message = typeof detail.error?.message === 'string' ? detail.error.message : '';
+  if (validationCategory(detail) === 'billing') return fail(503, 'Scobe’s Claude account has reached its billing or credit limit. The Scobe owner needs to check Anthropic billing before AI work can continue.');
   if (status === 429) return fail(429, 'Claude is currently rate limited. Your canvas changes are saved; try again shortly.');
   if (status === 529 || status === 503) return fail(503, 'Claude is temporarily overloaded. Your canvas changes are saved; try again shortly.');
   if (status === 401 || status === 403) return fail(502, 'Scobe’s Claude connection needs attention. Your canvas changes are saved.');
@@ -72,7 +101,7 @@ export function createGateway(env = process.env, fetcher = fetch) {
       const body = req.body;
       if (!body || !models.has(body.model) || body.stream !== true || !Array.isArray(body.messages) || !body.messages.length || body.messages.length > 300 || !Number.isInteger(body.max_tokens) || body.max_tokens < 1 || body.max_tokens > 8000) throw fail(400, 'Unsupported chat request.');
       if (body.tools && (!Array.isArray(body.tools) || body.tools.length > 80)) throw fail(400, 'Too many tools.');
-      const payload = { model: body.model, max_tokens: body.max_tokens, messages: body.messages, system: body.system, tools: body.tools, stream: true };
+      const payload = { model: body.model, max_tokens: body.max_tokens, messages: normalizeMessages(body.messages), system: body.system, tools: body.tools, stream: true };
       // Reserve a conservative byte-based upper bound, including tool/image payloads. No refunds on failures.
       const factor = body.model.includes('opus') ? 5 : 1;
       await budget(req.scobeUser, 'chat', (Buffer.byteLength(JSON.stringify(payload)) + body.max_tokens) * factor);
@@ -82,7 +111,7 @@ export function createGateway(env = process.env, fetcher = fetch) {
       if (!upstream.ok || !upstream.body) {
         const detail = await upstream.json().catch(() => ({}));
         // Never log prompts, images, tokens, keys, or the provider's free-form message.
-        console.warn(JSON.stringify({ event: 'claude_request_failed', status: upstream.status, type: detail.error?.type || 'unknown', requestId: upstream.headers.get('request-id') || detail.request_id || null }));
+        console.warn(JSON.stringify({ event: 'claude_request_failed', status: upstream.status, type: detail.error?.type || 'unknown', validation: validationCategory(detail), requestId: upstream.headers.get('request-id') || detail.request_id || null }));
         const error = providerFailure(upstream.status, detail);
         error.publicMessage = true;
         throw error;
