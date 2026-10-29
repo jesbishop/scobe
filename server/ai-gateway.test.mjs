@@ -2,11 +2,11 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createGateway, normalizeMessages, validationCategory } from './ai-gateway.mjs';
 const env = { SUPABASE_URL: 'https://auth.example.test', SUPABASE_ANON_KEY: 'public-test', SUPABASE_SERVICE_ROLE_KEY: 'server-test', ANTHROPIC_API_KEY: 'claude-test', ELEVENLABS_API_KEY: 'speech-test', ELEVENLABS_VOICE_IDS: 'approved-voice' };
-async function fixture(mode = '') {
+async function fixture(mode = '', overrides = {}) {
   const calls = [];
   const fetcher = async (url, options) => {
     calls.push({ url, options });
-    if (url.endsWith('/auth/v1/user')) return Response.json(mode === 'invalid' ? {} : { id: 'user-id', email_confirmed_at: '2026-01-01' }, { status: mode === 'invalid' ? 401 : 200 });
+    if (url.endsWith('/auth/v1/user')) return Response.json(mode === 'invalid' ? {} : { id: 'user-id', email: 'owner@example.test', email_confirmed_at: '2026-01-01' }, { status: mode === 'invalid' ? 401 : 200 });
     if (url.includes('/rpc/')) return Response.json(mode === 'quota' ? { message: 'ai_usage_limit' } : null, { status: mode === 'quota' ? 400 : 200 });
     if (url.includes('anthropic.com')) {
       if (mode === 'bad-context') return Response.json({ error: { type: 'invalid_request_error', message: 'prompt is too long: private-prompt-content' } }, { status: 400 });
@@ -18,7 +18,7 @@ async function fixture(mode = '') {
     if (url.includes('/voices/')) return Response.json({ name: 'Approved voice' });
     return new Response(Buffer.from('mock-mp3'));
   };
-  const server = createGateway(env, fetcher).listen(0, '127.0.0.1');
+  const server = createGateway({ ...env, ...overrides }, fetcher).listen(0, '127.0.0.1');
   await new Promise(resolve => server.once('listening', resolve));
   return { calls, base: 'http://127.0.0.1:' + server.address().port, close: () => new Promise(resolve => server.close(resolve)) };
 }
@@ -97,4 +97,22 @@ test('gateway leaves signed conversation prefixes unchanged and enables automati
     assert.deepEqual(payload.messages, signed);
     assert.deepEqual(payload.cache_control, { type: 'ephemeral' });
   } finally { await f.close(); }
+});
+
+
+test('development allowance requires both the verified owner account and development marker', async () => {
+  for (const [allowed, marker, expected] of [[true, true, 200000000], [true, false, 200000], [false, true, 200000]]) {
+    const f = await fixture('', { DEV_AI_EMAILS: allowed ? 'owner@example.test' : 'someone-else@example.test' });
+    try {
+      const options = request(chat);
+      if (marker) options.headers['x-scobe-development'] = '1';
+      const response = await fetch(f.base + '/claude/v1/messages', options);
+      assert.equal(response.status, 200); await response.text();
+      const reservation = f.calls.filter(call => call.url.includes('/rpc/')).map(call => JSON.parse(call.options.body)).find(body => body.p_bucket === 'chat');
+      assert.equal(reservation.p_user_limit, expected);
+      assert.equal(reservation.p_global_limit, allowed && marker ? 500000000 : 2000000);
+      const upstream = f.calls.find(call => call.url.includes('anthropic.com'));
+      assert.equal(upstream.options.headers['x-scobe-development'], undefined);
+    } finally { await f.close(); }
+  }
 });

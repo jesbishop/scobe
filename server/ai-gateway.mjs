@@ -61,6 +61,8 @@ export function createGateway(env = process.env, fetcher = fetch) {
   const supabase = env.SUPABASE_URL.replace(/\/$/, '');
   if (!supabase.startsWith('https://')) throw Error('SUPABASE_URL must use HTTPS.');
   const allowedVoices = new Set(env.ELEVENLABS_VOICE_IDS.split(',').map(v => v.trim()).filter(Boolean));
+  const developerEmails = new Set((env.DEV_AI_EMAILS || '').split(',').map(value => value.trim().toLowerCase()).filter(Boolean));
+  const developmentChatLimits = [positive(env.DEV_USER_DAILY_CHAT_UNITS, 200000000), positive(env.DEV_GLOBAL_DAILY_CHAT_UNITS, 500000000)];
   const limits = {
     chat: [positive(env.USER_DAILY_CHAT_UNITS, 200000), positive(env.GLOBAL_DAILY_CHAT_UNITS, 2000000)],
     speech: [positive(env.USER_DAILY_SPEECH_CHARACTERS, 15000), positive(env.GLOBAL_DAILY_SPEECH_CHARACTERS, 100000)],
@@ -73,8 +75,8 @@ export function createGateway(env = process.env, fetcher = fetch) {
   app.get('/config', (_req, res) => res.json({ supabaseUrl: supabase, supabaseAnonKey: env.SUPABASE_ANON_KEY }));
   app.use(express.json({ limit: '8mb' }));
   const boundedFetch = (url, options = {}) => fetcher(url, { ...options, signal: options.signal || AbortSignal.timeout(120000), redirect: 'error' });
-  async function budget(user, bucket, units) {
-    const [perUser, global] = limits[bucket];
+  async function budget(user, bucket, units, development = false) {
+    const [perUser, global] = development && bucket === 'chat' ? developmentChatLimits : limits[bucket];
     const result = await boundedFetch(supabase + '/rest/v1/rpc/consume_ai_budget', {
       method: 'POST', headers: { apikey: env.SUPABASE_SERVICE_ROLE_KEY, Authorization: 'Bearer ' + env.SUPABASE_SERVICE_ROLE_KEY, 'Content-Type': 'application/json' },
       body: JSON.stringify({ p_user: user, p_bucket: bucket, p_units: units, p_user_limit: perUser, p_global_limit: global })
@@ -94,6 +96,9 @@ export function createGateway(env = process.env, fetcher = fetch) {
       const user = await result.json();
       if (!user.id || !user.email_confirmed_at) throw fail(401, 'Verify your email to use Scobe AI.');
       req.scobeUser = user.id;
+      // A client flag alone never grants a larger allowance: the verified account
+      // must also be explicitly approved in the server's private configuration.
+      req.scobeDevelopment = req.headers['x-scobe-development'] === '1' && typeof user.email === 'string' && developerEmails.has(user.email.toLowerCase());
       await budget(user.id, 'requests', 1);
       next();
     } catch (error) { next(error); }
@@ -108,7 +113,7 @@ export function createGateway(env = process.env, fetcher = fetch) {
       const payload = { model: body.model, max_tokens: body.max_tokens, messages: normalizeMessages(body.messages), system: body.system, tools: body.tools, stream: true, cache_control: { type: 'ephemeral' } };
       // Reserve a conservative byte-based upper bound, including tool/image payloads. No refunds on failures.
       const factor = body.model.includes('opus') ? 5 : 1;
-      await budget(req.scobeUser, 'chat', (Buffer.byteLength(JSON.stringify(payload)) + body.max_tokens) * factor);
+      await budget(req.scobeUser, 'chat', (Buffer.byteLength(JSON.stringify(payload)) + body.max_tokens) * factor, req.scobeDevelopment);
       const upstream = await boundedFetch('https://api.anthropic.com/v1/messages', {
         method: 'POST', headers: { 'x-api-key': env.ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01', 'Content-Type': 'application/json' }, body: JSON.stringify(payload), signal: AbortSignal.any([controller.signal, AbortSignal.timeout(240000)])
       });
