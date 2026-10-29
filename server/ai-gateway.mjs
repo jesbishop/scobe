@@ -8,6 +8,20 @@ const speechModels = new Set(['eleven_v3', 'eleven_multilingual_v2']);
 const fail = (status, message) => Object.assign(new Error(message), { status });
 const positive = (value, fallback) => { const n = Number(value || fallback); if (!Number.isSafeInteger(n) || n < 1) throw Error('Usage limits must be positive integers.'); return n; };
 
+export function providerFailure(status, detail = {}) {
+  const message = typeof detail.error?.message === 'string' ? detail.error.message : '';
+  if (status === 429) return fail(429, 'Claude is currently rate limited. Your canvas changes are saved; try again shortly.');
+  if (status === 529 || status === 503) return fail(503, 'Claude is temporarily overloaded. Your canvas changes are saved; try again shortly.');
+  if (status === 401 || status === 403) return fail(502, 'Scobe’s Claude connection needs attention. Your canvas changes are saved.');
+  if (status === 404) return fail(422, 'The selected Claude model is unavailable. Choose another model to continue.');
+  if (status === 400 || status === 413) {
+    if (/image|base64|png|jpeg/i.test(message)) return fail(422, 'Claude could not read the canvas preview image. Try continuing without a preview, or render a smaller frame.');
+    if (/token|context|too long|too large/i.test(message)) return fail(422, 'This conversation is too large for Claude. Start a new chat and select the frame you want to continue editing.');
+    return fail(422, 'Claude could not accept this canvas request. Your changes are saved. Please report this message so Scobe can correct the request.');
+  }
+  return fail(502, 'Scobe could not reach Claude. Your canvas changes are saved; try again shortly.');
+}
+
 export function createGateway(env = process.env, fetcher = fetch) {
   const required = ['SUPABASE_URL', 'SUPABASE_ANON_KEY', 'SUPABASE_SERVICE_ROLE_KEY', 'ANTHROPIC_API_KEY', 'ELEVENLABS_API_KEY', 'ELEVENLABS_VOICE_IDS'];
   for (const name of required) if (!env[name]?.trim()) throw Error('Missing server setting: ' + name);
@@ -65,7 +79,14 @@ export function createGateway(env = process.env, fetcher = fetch) {
       const upstream = await boundedFetch('https://api.anthropic.com/v1/messages', {
         method: 'POST', headers: { 'x-api-key': env.ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01', 'Content-Type': 'application/json' }, body: JSON.stringify(payload), signal: AbortSignal.any([controller.signal, AbortSignal.timeout(240000)])
       });
-      if (!upstream.ok || !upstream.body) throw fail(upstream.status === 429 ? 429 : 502, upstream.status === 429 ? 'AI is busy. Please try again shortly.' : 'Scobe could not reach the selected AI model.');
+      if (!upstream.ok || !upstream.body) {
+        const detail = await upstream.json().catch(() => ({}));
+        // Never log prompts, images, tokens, keys, or the provider's free-form message.
+        console.warn(JSON.stringify({ event: 'claude_request_failed', status: upstream.status, type: detail.error?.type || 'unknown', requestId: upstream.headers.get('request-id') || detail.request_id || null }));
+        const error = providerFailure(upstream.status, detail);
+        error.publicMessage = true;
+        throw error;
+      }
       res.status(200).set({ 'Content-Type': 'text/event-stream', 'X-Accel-Buffering': 'no' });
       res.flushHeaders();
       await pipeline(Readable.fromWeb(upstream.body), res);
@@ -97,7 +118,8 @@ export function createGateway(env = process.env, fetcher = fetch) {
   app.use((_req, _res, next) => next(fail(404, 'Not found.')));
   app.use((error, _req, res, _next) => {
     const status = error.status || (error.type === 'entity.too.large' ? 413 : 500);
-    res.status(status).json({ type: 'error', error: { type: status === 401 ? 'authentication_error' : 'api_error', message: status < 500 ? error.message : 'Scobe AI is temporarily unavailable.' } });
+    if (status >= 500) console.warn(JSON.stringify({ event: 'gateway_request_failed', path: _req.path, status, type: error.name || 'Error' }));
+    res.status(status).json({ type: 'error', error: { type: status === 401 ? 'authentication_error' : 'api_error', message: status < 500 || error.publicMessage ? error.message : status === 503 ? 'Scobe could not check the AI usage allowance. Please try again shortly.' : 'Scobe AI is temporarily unavailable.' } });
   });
   return app;
 }
