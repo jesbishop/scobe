@@ -1,15 +1,26 @@
 import { createPortal } from 'react-dom'
 import { AnimatePresence, motion, useReducedMotion } from 'motion/react'
 import { useEffect, useState } from 'react'
-import { CODING_AGENTS, VANTA_BUILD_PROMPT, type AgentMcpLinkStatus, type CodingAgentId } from '../shared/codingAgents'
+import { CODING_AGENTS, VANTA_BUILD_PROMPT, type AgentMcpLinkStatus, type CodingAgentId, type McpAgentId } from '../shared/codingAgents'
 
 const EXTRA_AGENTS = [
- {id:'opencode',name:'OpenCode',domain:'opencode.ai'}, {id:'antigravity',name:'Antigravity',domain:'antigravity.google'},
+ {id:'opencode',name:'OpenCode',domain:'opencode.ai'},
  {id:'copilot',name:'GitHub Copilot',domain:'github.com'}, {id:'vscode',name:'VS Code',domain:'code.visualstudio.com'},
  {id:'other',name:'Other Agents',domain:''}
 ] as const
-const PICKER_AGENTS = [...CODING_AGENTS.filter(a => a.id !== 'v0'), ...EXTRA_AGENTS.map(a => ({...a, favicon:a.domain ? 'https://www.google.com/s2/favicons?domain='+a.domain+'&sz=32' : '',faviconFallback:''}))]
-type PickerAgentId = CodingAgentId | typeof EXTRA_AGENTS[number]['id']
+/** Desktop agents Scobe configures directly (no sidebar web app). */
+const DESKTOP_AGENTS = [
+  {
+    id: 'antigravity' as const,
+    name: 'Antigravity',
+    favicon: 'https://www.google.com/s2/favicons?domain=antigravity.google&sz=64',
+    faviconFallback: 'https://www.google.com/s2/favicons?domain=google.com&sz=64'
+  }
+]
+const PICKER_AGENTS = [...CODING_AGENTS.filter(a => a.id !== 'v0'), ...DESKTOP_AGENTS, ...EXTRA_AGENTS.map(a => ({...a, favicon:a.domain ? 'https://www.google.com/s2/favicons?domain='+a.domain+'&sz=32' : '',faviconFallback:''}))]
+type PickerAgentId = McpAgentId | typeof EXTRA_AGENTS[number]['id']
+/** Agents Scobe connects on this machine: config written locally, no tunnel. */
+const LOCAL_AGENTS: McpAgentId[] = ['codex', 'antigravity']
 const EXAMPLE_PROMPTS = [
   'Create a basic Hello World frame in Scobe',
   'Build a simple landing page hero on the Scobe design canvas',
@@ -60,10 +71,12 @@ export function ConnectAgentModal({
   const [copiedPrompt, setCopiedPrompt] = useState<string | null>(null)
 
   const manualAgent = EXTRA_AGENTS.some(a => a.id === agentId)
-  const backendAgent = agentId as CodingAgentId
+  const backendAgent = agentId as McpAgentId
   const meta = PICKER_AGENTS.find((item) => item.id === agentId) || CODING_AGENTS[0]
   const localCodex = agentId === 'codex'
-  const ready = manualAgent ? true : localCodex ? link?.state === 'connected' : Boolean(link?.publicUrl && (link.tunnelOk !== false || added))
+  const antigravity = agentId === 'antigravity'
+  const localAgent = LOCAL_AGENTS.includes(backendAgent)
+  const ready = manualAgent ? true : localAgent ? link?.state === 'connected' : Boolean(link?.publicUrl && (link.tunnelOk !== false || added))
 
   useEffect(() => {
     if (!open) return
@@ -102,6 +115,11 @@ export function ConnectAgentModal({
       const status = await window.vanta.connectAgentMcp(backendAgent)
       setLink(status)
       if (localCodex) { setAdded(status.state === 'connected'); setToast('Scobe configured. Restart Codex and start a local chat.'); return }
+      if (antigravity) {
+        setAdded(status.state === 'connected')
+        setToast(status.state === 'connected' ? 'Scobe added to Antigravity' : 'Could not write the Antigravity config')
+        return
+      }
       const ok = Boolean(status.publicUrl && status.tunnelOk !== false)
       setAdded(ok || Boolean(status.publicUrl))
       if (status.publicUrl) {
@@ -129,7 +147,7 @@ export function ConnectAgentModal({
   }
 
   const copyPrompt = async (text: string) => {
-    const instructions = localCodex ? 'Use Scobe MCP to build editable UI on the Scobe canvas. Start with get_basic_info and use auto-layout frames. If Scobe tools are unavailable, explain how to reconnect.' : VANTA_BUILD_PROMPT
+    const instructions = localAgent ? 'Use Scobe MCP to build editable UI on the Scobe canvas. Start with get_basic_info and use auto-layout frames. If Scobe tools are unavailable, explain how to reconnect.' : VANTA_BUILD_PROMPT
     const full = `${instructions}\n\nTask: ${text}`
     try {
       await navigator.clipboard.writeText(full)
@@ -142,7 +160,7 @@ export function ConnectAgentModal({
 
   const finish = async () => {
     if (!ready) return
-    if (localCodex || manualAgent) { onClose(); return }
+    if (localAgent || manualAgent) { onClose(); return }
     if (typeof window.vanta.confirmCloudAgentMcp === 'function') {
       try {
         await window.vanta.confirmCloudAgentMcp(backendAgent)
@@ -151,7 +169,7 @@ export function ConnectAgentModal({
       }
     }
     // Cursor: open install-mcp so Vanta is registered under Connectors / MCP.
-    onDone(backendAgent, link?.openUrl || link?.installUrl || undefined)
+    onDone(backendAgent as CodingAgentId, link?.openUrl || link?.installUrl || undefined)
   }
 
   const addLabel =
@@ -161,7 +179,9 @@ export function ConnectAgentModal({
         ? 'Add Scobe to Cursor'
         : agentId === 'codex'
           ? 'Add Scobe to Codex'
-          : 'Add Scobe to v0'
+          : antigravity
+            ? 'Add Scobe to Antigravity'
+            : 'Add Scobe to v0'
 
   return createPortal(
     <AnimatePresence>
@@ -220,10 +240,10 @@ export function ConnectAgentModal({
                   <span>
                     {agentId === 'cursor'
                       ? 'Starts a public tunnel and registers Scobe so it can show under Connectors / MCP.'
-                      : localCodex ? 'Configure the bundled MCP server. No separate download needed.' : `Add Scobe MCP for ${meta.name}.`}
+                      : localAgent ? 'Configure the bundled MCP server. No separate download needed.' : `Add Scobe MCP for ${meta.name}.`}
                   </span>
                   <button type="button" className="ca-connect-add-btn" disabled={busy} onClick={() => void onAdd()}>
-                    {busy ? 'Connecting…' : (added || (localCodex && ready)) ? 'Configured' : addLabel}
+                    {busy ? 'Connecting…' : (added || (localAgent && ready)) ? 'Configured' : addLabel}
                   </button>
                 </div>
                 {manualAgent && <div className="ca-connect-manual">
@@ -242,6 +262,30 @@ export function ConnectAgentModal({
                       catch { setToast('Could not copy. Select the command and copy manually.') }
                     }}>Copy command</button></div>
                   <p>Keep Scobe open. Restart Codex after setup and use a local chat. Cloud tasks cannot use this local connection.</p>
+                  <button type="button" onClick={async () => {
+                    try { setLink(await window.vanta.getAgentMcpLink(backendAgent)) }
+                    catch { setToast('Could not check configuration') }
+                  }}>Check configuration</button>
+                </div>}
+                {antigravity && <div className="ca-connect-manual">
+                  <p>
+                    Writes Scobe into Antigravity’s MCP config
+                    {link?.detail ? <> (<code>{link.detail.replace(/^.*[\\/]\.gemini[\\/]/, '~/.gemini/')}</code>)</> : null}.
+                    Then in Antigravity open … → MCP Servers → Manage MCP Servers and press Refresh.
+                  </p>
+                  <p>Or paste this into View raw config yourself:</p>
+                  <div className="ca-connect-command"><code>{link?.setupSnippet || 'Loading…'}</code>
+                    <button type="button" disabled={!link?.setupSnippet} onClick={async () => {
+                      try { await navigator.clipboard.writeText(link!.setupSnippet!); setToast('Config copied') }
+                      catch { setToast('Could not copy. Select the config and copy manually.') }
+                    }}>Copy config</button></div>
+                  <p><strong>Stop the approval prompts.</strong> Antigravity asks before every MCP tool call unless a rule allows it. Scobe adds this rule for the Antigravity CLI. In the Antigravity app, add it once under Settings → General → Global Permissions → Allow:</p>
+                  <div className="ca-connect-command"><code>{link?.allowRule || 'mcp(scobe/*)'}</code>
+                    <button type="button" onClick={async () => {
+                      try { await navigator.clipboard.writeText(link?.allowRule || 'mcp(scobe/*)'); setToast('Rule copied') }
+                      catch { setToast('Could not copy the rule') }
+                    }}>Copy rule</button></div>
+                  <p>Keep Scobe open while Antigravity uses it.</p>
                   <button type="button" onClick={async () => {
                     try { setLink(await window.vanta.getAgentMcpLink(backendAgent)) }
                     catch { setToast('Could not check configuration') }
@@ -289,7 +333,7 @@ export function ConnectAgentModal({
         </div>
         <div className="ca-connect-foot">
           <span className="ca-connect-learn">
-            {localCodex ? 'Keep Scobe open while using Codex.' : 'Connect Scobe to your preferred agent.'}
+            {localAgent ? `Keep Scobe open while using ${meta.name}.` : 'Connect Scobe to your preferred agent.'}
           </span>
           <button
             type="button"
@@ -307,7 +351,9 @@ export function ConnectAgentModal({
           <span>
             {agentId === 'cursor'
               ? 'Next: Install page → then enable vanta under Connectors / MCP'
-              : 'Confirm in the agent, then continue'}
+              : antigravity
+                ? 'Next: Antigravity → MCP Servers → Refresh, then start a new chat'
+                : 'Confirm in the agent, then continue'}
           </span>
         </div>
       )}

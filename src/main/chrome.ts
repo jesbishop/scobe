@@ -5,6 +5,7 @@ import { normalizeUrl } from '../shared/url'
 import { MESURER_SCRIPT } from './mesurerScript'
 import { SNAPSHOT_SCRIPT } from './snapshotScript'
 import type { SnapshotEvent, SnapshotNode } from '../shared/snapshot'
+import { prepareSvg } from '../shared/svgMarkup'
 import { buildCursorAgentsUrl } from './mcpInstallLinks'
 import { getPublicMcpUrl } from './mcpTunnel'
 
@@ -1035,6 +1036,14 @@ export class BrowserHost {
         if (!data) continue
         if (!node.fetchBg) node.kind = 'image'
         node.fill = { type: 'image', dataUrl: data }
+        if (!node.fetchBg && data.startsWith('data:image/svg+xml;base64,')) {
+          try {
+            const source = Buffer.from(data.slice('data:image/svg+xml;base64,'.length), 'base64').toString('utf8')
+            node.svg = prepareSvg(source, `sv${(svgScopeSeq++).toString(36)}${Date.now().toString(36)}`)
+          } catch {
+            /* keep the image fill */
+          }
+        }
         delete node.shot
       }
     }
@@ -1201,6 +1210,7 @@ type SnapAsset = SnapshotNode & {
 }
 
 let maskSeq = 0
+let svgScopeSeq = 0
 
 async function fetchSvgText(ses: Session, url: string): Promise<string | null> {
   try {

@@ -48,7 +48,8 @@ Design like a senior product designer. Restraint, rhythm and hierarchy beat deco
 - Inputs: height 40-44, 1px border, 12-14 inner padding, label above (14px, 500), helper text below (13px, secondary color).
 - Cards: padding 20-24, radius 12-16, consistent internal gaps. Cards in a row share height and structure.
 - Navigation: 56-72 tall, logo left, 3-6 links, one primary action right.
-- Icons: one style (outline or filled) at 16-20px, aligned to text centers. Never use emoji as icons.
+- Icons: real vector icons from add_icon (Lucide by default; search_icons to find names). One style per screen, 16-20px next to text (24 for standalone), stroke 1.5-2, colored like the text beside them, centered on the text line. Never use emoji, letters or colored dots as icons.
+- Logos, illustrations and custom marks: add_svg with markup or an .svg URL (brand logos: add_icon with "simple-icons:<brand>"). Keep them as vectors, never screenshots.
 
 ## Avoid (looks AI-generated)
 - Purple-to-blue gradients, glowing blobs and gradient text by default.

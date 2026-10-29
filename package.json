@@ -1,7 +1,7 @@
 {
   "name": "vanta",
   "productName": "Scobe",
-  "version": "0.2.0",
+  "version": "0.2.2",
   "description": "Scobe design canvas with live browsers and an MCP server for coding agents.",
   "author": "Jesse Bishop",
   "private": true,
@@ -11,9 +11,15 @@
     "build": "electron-vite build",
     "preview": "electron-vite preview",
     "typecheck": "tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.web.json",
+    "icons": "node scripts/build-icon-index.mjs",
     "dist": "electron-vite build && electron-builder --publish never",
     "dist:win": "electron-vite build && electron-builder --win --publish never",
-    "release": "electron-vite build && electron-builder --publish always"
+    "release": "electron-vite build && electron-builder --publish always",
+    "predist": "node scripts/check-cloud-release.mjs",
+    "predist:win": "node scripts/check-cloud-release.mjs",
+    "prerelease": "node scripts/check-cloud-release.mjs",
+    "test:canvas-agent": "node --test server/canvas-agent.test.mjs",
+    "test:gateway": "node --test server/ai-gateway.test.mjs server/cloud-session.test.mjs"
   },
   "build": {
     "appId": "com.vanta.app",
@@ -45,6 +51,11 @@
         "nsis"
       ],
       "files": [
+        "out/**/*",
+        "resources/**/*",
+        "package.json",
+        "!**/.env",
+        "!**/.env.*",
         "!node_modules/onnxruntime-node/bin/napi-v3/{darwin,linux}/**"
       ]
     },
@@ -65,6 +76,11 @@
         "zip"
       ],
       "files": [
+        "out/**/*",
+        "resources/**/*",
+        "package.json",
+        "!**/.env",
+        "!**/.env.*",
         "!node_modules/onnxruntime-node/bin/napi-v3/{win32,linux}/**"
       ]
     },
@@ -76,8 +92,16 @@
         "AppImage"
       ],
       "files": [
+        "out/**/*",
+        "resources/**/*",
+        "package.json",
+        "!**/.env",
+        "!**/.env.*",
         "!node_modules/onnxruntime-node/bin/napi-v3/{win32,darwin}/**"
       ]
+    },
+    "electronDownload": {
+      "cache": ".build-cache/electron"
     }
   },
   "dependencies": {

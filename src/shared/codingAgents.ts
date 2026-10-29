@@ -1,5 +1,8 @@
 export type CodingAgentId = 'claude-code' | 'cursor' | 'codex' | 'v0'
 
+/** Agents Scobe can wire its MCP into. Desktop-only agents (Antigravity) have no sidebar web app. */
+export type McpAgentId = CodingAgentId | 'antigravity'
+
 export type CodingAgentBinding = {
   id: string
   agentId: CodingAgentId
@@ -11,7 +14,7 @@ export type CodingAgentBinding = {
 export type AgentMcpLinkState = 'off' | 'connected' | 'needs-setup'
 
 export type AgentMcpLinkStatus = {
-  agentId: CodingAgentId
+  agentId: McpAgentId
   state: AgentMcpLinkState
   /** Human-readable detail (config path written, or setup steps for v0). */
   detail?: string
@@ -34,11 +37,13 @@ export type AgentMcpLinkStatus = {
   buildPrompt?: string
   /** Tunnel responded successfully. */
   tunnelOk?: boolean
+  /** Permission rule that lets the agent call every Scobe tool without asking (Antigravity). */
+  allowRule?: string
 }
 
 export const VANTA_BUILD_PROMPT =
   'IMPORTANT: Do NOT use the Cursor canvas skill, read-canvas, write-canvas, or any Cursor canvas. Those edit a different product and will not change what I see. ' +
-  'You must use the Scobe MCP server tools only: get_basic_info, create_artboard, add_design_frame, add_design_rect, add_design_ellipse, add_design_text, set_layout, update_styles, set_text_content, snapshot_browser_to_frame, snapshot_to_canvas, finish_working_on_nodes. ' +
+  'You must use the Scobe MCP server tools only: get_basic_info, create_artboard, add_design_frame, add_design_rect, add_design_ellipse, add_design_text, add_icon, search_icons, add_svg, set_svg_color, set_layout, update_styles, set_text_content, snapshot_browser_to_frame, snapshot_to_canvas, finish_working_on_nodes. ' +
   'When asked to snapshot or bring a page/sidebar into the canvas, call snapshot_browser_to_frame or snapshot_to_canvas (Scobe Snapshot → editable layers). Never paste a flat PNG screenshot for that. ' +
   'If Scobe MCP tools are missing, stop and tell me — do not fall back to Cursor canvas. ' +
   'Start with get_basic_info, then build UI frames with auto-layout on the Scobe design canvas.'

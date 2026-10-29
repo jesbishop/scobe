@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createGateway } from './ai-gateway.mjs';
+import { createGateway, normalizeMessages, validationCategory } from './ai-gateway.mjs';
 const env = { SUPABASE_URL: 'https://auth.example.test', SUPABASE_ANON_KEY: 'public-test', SUPABASE_SERVICE_ROLE_KEY: 'server-test', ANTHROPIC_API_KEY: 'claude-test', ELEVENLABS_API_KEY: 'speech-test', ELEVENLABS_VOICE_IDS: 'approved-voice' };
 async function fixture(mode = '') {
   const calls = [];
@@ -8,7 +8,13 @@ async function fixture(mode = '') {
     calls.push({ url, options });
     if (url.endsWith('/auth/v1/user')) return Response.json(mode === 'invalid' ? {} : { id: 'user-id', email_confirmed_at: '2026-01-01' }, { status: mode === 'invalid' ? 401 : 200 });
     if (url.includes('/rpc/')) return Response.json(mode === 'quota' ? { message: 'ai_usage_limit' } : null, { status: mode === 'quota' ? 400 : 200 });
-    if (url.includes('anthropic.com')) return new Response('event: message_stop\ndata: {"type":"message_stop"}\n\n', { headers: { 'Content-Type': 'text/event-stream' } });
+    if (url.includes('anthropic.com')) {
+      if (mode === 'bad-context') return Response.json({ error: { type: 'invalid_request_error', message: 'prompt is too long: private-prompt-content' } }, { status: 400 });
+      if (mode === 'bad-image') return Response.json({ error: { type: 'invalid_request_error', message: 'Invalid base64 image: private-image-content' } }, { status: 400 });
+      if (mode === 'overloaded') return Response.json({ error: { type: 'overloaded_error', message: 'private-provider-detail' } }, { status: 529 });
+      if (mode === 'provider-auth') return Response.json({ error: { type: 'authentication_error', message: 'private-credential-detail' } }, { status: 401 });
+      return new Response('event: message_stop\ndata: {"type":"message_stop"}\n\n', { headers: { 'Content-Type': 'text/event-stream' } });
+    }
     if (url.includes('/voices/')) return Response.json({ name: 'Approved voice' });
     return new Response(Buffer.from('mock-mp3'));
   };
@@ -44,5 +50,51 @@ test('only exposes approved voices and generates speech with server key', async 
     const denied = await fetch(f.base + '/speech/create', request({ text: 'Hello', model: 'eleven_v3', voice: 'private-voice' })); assert.equal(denied.status, 400);
     const audio = await fetch(f.base + '/speech/create', request({ text: 'Hello', model: 'eleven_v3', voice: 'approved-voice' })); assert.equal(audio.status, 200); assert.equal(await audio.text(), 'mock-mp3');
     const upstream = f.calls.find(call => call.url.includes('/text-to-speech/')); assert.equal(upstream.options.headers['xi-api-key'], env.ELEVENLABS_API_KEY);
+  } finally { await f.close(); }
+});
+
+test('reports context, image, overload, and provider-connection failures without leaking provider details', async () => {
+  for (const [mode, status, message] of [['bad-context', 422, /conversation is too large/], ['bad-image', 422, /preview image/], ['overloaded', 503, /temporarily overloaded/], ['provider-auth', 502, /connection needs attention/]]) {
+    const f = await fixture(mode);
+    try {
+      const response = await fetch(f.base + '/claude/v1/messages', request(chat));
+      assert.equal(response.status, status);
+      const body = await response.text();
+      assert.match(body, message);
+      assert.ok(!body.includes('private-'));
+      assert.equal(f.calls.filter(c => c.url.includes('anthropic.com')).length, 1);
+    } finally { await f.close(); }
+  }
+});
+
+test('removes empty streamed text while preserving tool calls, matching results, and images', () => {
+  const messages = [{ role: 'user', content: 'Build' }, { role: 'assistant', content: [{ type: 'text', text: '' }, { type: 'tool_use', id: 'tool-id', name: 'get_basic_info', input: {} }] },
+    { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'tool-id', content: [{ type: 'text', text: ' ' }, { type: 'image', source: { data: 'image' } }] }] }];
+  const fixed = normalizeMessages(messages);
+  assert.equal(fixed[1].content.length, 1);
+  assert.equal(fixed[1].content[0].id, fixed[2].content[0].tool_use_id);
+  assert.equal(fixed[2].content[0].content[0].type, 'image');
+  assert.equal(messages[1].content.length, 2);
+  assert.equal(normalizeMessages([{ role: 'assistant', content: [{ type: 'text', text: ' ' }] }]).length, 0);
+  assert.equal(normalizeMessages([{ role: 'user', content: [{ type: 'tool_result', tool_use_id: 'tool-id', content: '' }] }])[0].content[0].content, '(Tool returned no text.)');
+});
+
+test('validation diagnostics report only fixed categories, never provider message values', () => {
+  for (const [message, category] of [['private-data text blocks must be non-empty', 'empty_content'], ['Unexpected tool_use_id: secret-id', 'tool_history'], ['credit balance too low', 'billing'], ['tools.0.input_schema properties invalid', 'tool_schema']]) {
+    assert.equal(validationCategory({ error: { message } }), category);
+  }
+});
+
+test('gateway leaves signed conversation prefixes unchanged and enables automatic prompt caching', async () => {
+  const signed = [{ role: 'user', content: 'Request' }, { role: 'assistant', content: [{ type: 'thinking', thinking: '', signature: 'signed' }, { type: 'text', text: '' }, { type: 'tool_use', id: 'tool-id', name: 'get_tokens', input: {} }] },
+    { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'tool-id', content: '{}' }] }];
+  assert.deepEqual(normalizeMessages(signed), signed);
+  const f = await fixture();
+  try {
+    const response = await fetch(f.base + '/claude/v1/messages', request({ ...chat, messages: signed }));
+    assert.equal(response.status, 200); await response.text();
+    const payload = JSON.parse(f.calls.find(c => c.url.includes('anthropic.com')).options.body);
+    assert.deepEqual(payload.messages, signed);
+    assert.deepEqual(payload.cache_control, { type: 'ephemeral' });
   } finally { await f.close(); }
 });

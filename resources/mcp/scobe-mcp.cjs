@@ -16,6 +16,7 @@ const ENDPOINT = `http://127.0.0.1:${PORT}/mcp`
 const CACHE_FILE = join(homedir(), '.scobe', 'mcp-cache.json')
 const OFFLINE_TEXT = 'Scobe is not open. Open the Scobe app, then try again.'
 const FALLBACK_PROTOCOL = '2025-06-18'
+const ICON_URL = 'https://raw.githubusercontent.com/jesbishop/scobe/main/resources/icon.png'
 
 let sessionId = null
 let upstreamStarting = null
@@ -118,7 +119,12 @@ function initializeResult(params) {
   return {
     protocolVersion: params?.protocolVersion || FALLBACK_PROTOCOL,
     capabilities: { tools: { listChanged: false } },
-    serverInfo: { name: 'scobe', title: 'Scobe', version: cache?.version || '0.0.0' },
+    serverInfo: cache?.serverInfo || {
+      name: 'scobe',
+      title: 'Scobe',
+      version: cache?.version || '0.0.0',
+      icons: [{ src: ICON_URL, mimeType: 'image/png', sizes: ['256x256'] }]
+    },
     ...(cache?.instructions ? { instructions: cache.instructions } : {})
   }
 }

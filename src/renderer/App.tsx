@@ -1,3 +1,4 @@
+import { resolveChatModel, type ChatModelId } from '../shared/chatModels'
 import type { Paint } from '../shared/paint'
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent } from 'react'
 import { AnimatePresence, motion, useReducedMotion } from 'motion/react'
@@ -118,6 +119,8 @@ import {
   wrapSelectionInFrame
 } from '../shared/layoutEngine'
 import { applyConstraintsOnParentResize } from '../shared/constraints'
+import { moveLayers, type LayerDropTarget } from '../shared/layerMove'
+import { describeDesignChange, type HistoryEntry, type HistorySource } from './designHistory'
 import { defaultShader, getNodePaints, legacyFromPaints, SHADER_OPTIONS, type ShaderKind } from '../shared/paint'
 
 function findMeasureAnchorAt(
@@ -815,7 +818,19 @@ export function App() {
   const [activeFileId, setActiveFileId] = useState('file-1')
   const [actionAnchor, setActionAnchor] = useState<DOMRect | null>(null)
   const [chatInput, setChatInput] = useState('')
-  const [chats, setChats] = useState<ChatSession[]>(() => [createChatSession()])
+  const [chats, setChats] = useState<ChatSession[]>(() => {
+    try {
+      const saved = JSON.parse(localStorage.getItem('scobe:chats:v1') || 'null')
+      if (Array.isArray(saved) && saved.length && saved.every(chat => typeof chat.id === 'string' && typeof chat.title === 'string' && Array.isArray(chat.messages) && chat.messages.every((m: ChatSession['messages'][number]) => ['user', 'assistant', 'system'].includes(m.role) && typeof m.text === 'string'))) return saved
+    } catch { /* Start a fresh conversation if local history is unavailable. */ }
+    return [createChatSession()]
+  })
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      try { localStorage.setItem('scobe:chats:v1', JSON.stringify(chats)) } catch { /* Storage can be full or unavailable. */ }
+    }, 500)
+    return () => window.clearTimeout(timer)
+  }, [chats])
   const [activeChatId, setActiveChatId] = useState<string | null>(null)
   const [agentBusy, setAgentBusy] = useState(false)
   const [pages, setPages] = useState<DesignPage[]>([{ ...DEFAULT_PAGE }])
@@ -928,6 +943,8 @@ export function App() {
   const activePageRef = useRef(activePageId)
   const draftRef = useRef<DesignNode | null>(null)
   const onCanvasRef = useRef(true)
+  const agentChatRef = useRef<string | null>(null)
+  const agentTextRef = useRef('')
   const historyRef = useRef<Array<{ role: 'user' | 'assistant'; text: string }>>([])
   const activeChatIdRef = useRef<string | null>(activeChatId)
   const chatHistories = useRef(new Map<string, Array<{ role: 'user' | 'assistant'; text: string }>>())
@@ -1347,6 +1364,8 @@ export function App() {
           textOnPath: isTextOnPath(node),
           vector: node.type === 'image' && Boolean(node.svgMarkup?.trim()),
           depth,
+          parentId: node.parentId || null,
+          container: node.type === 'frame' || node.type === 'section',
           hidden: node.visible === false,
           locked: Boolean(node.locked)
         })
@@ -1439,6 +1458,51 @@ export function App() {
   const logCanvasHistory = (text: string) => {
     setChats(current => current.map(chat => chat.id === activeChatIdRef.current ? { ...chat, messages: [...chat.messages, { role: 'assistant' as const, text }] } : chat))
   }
+
+  // Version timeline for the Chat › History panel: one entry per settled change, newest first.
+  const [canvasHistory, setCanvasHistory] = useState<HistoryEntry[]>([])
+  const canvasHistoryRef = useRef<HistoryEntry[]>([])
+  const historyPendingRef = useRef<{ nodes: DesignNode[]; source: HistorySource; label?: string } | null>(null)
+  const historyTimerRef = useRef<number | null>(null)
+  const commitCanvasHistory = (entries: HistoryEntry[]) => {
+    canvasHistoryRef.current = entries
+    setCanvasHistory(entries)
+  }
+  const resetCanvasHistory = (nodes: DesignNode[]) => {
+    if (historyTimerRef.current) window.clearTimeout(historyTimerRef.current)
+    historyTimerRef.current = null
+    historyPendingRef.current = null
+    commitCanvasHistory([
+      { id: crypto.randomUUID(), at: Date.now(), label: 'Opened the file', source: 'you', snapshot: structuredClone(nodes) }
+    ])
+  }
+  const flushCanvasHistory = () => {
+    historyTimerRef.current = null
+    const pending = historyPendingRef.current
+    historyPendingRef.current = null
+    if (!pending) return
+    const entries = canvasHistoryRef.current
+    const label = pending.label || (entries[0] ? describeDesignChange(entries[0].snapshot, pending.nodes) : 'Started the file')
+    if (!label) return
+    const entry: HistoryEntry = {
+      id: crypto.randomUUID(),
+      at: Date.now(),
+      label,
+      source: pending.source,
+      snapshot: structuredClone(pending.nodes)
+    }
+    commitCanvasHistory([entry, ...entries].slice(0, 80))
+  }
+  /** Bursts (a drag, an agent's run of tool calls) settle into one entry. */
+  const noteDesignChange = (nodes: DesignNode[], source: HistorySource, label?: string) => {
+    historyPendingRef.current = { nodes, source, label: label || historyPendingRef.current?.label }
+    if (historyTimerRef.current) window.clearTimeout(historyTimerRef.current)
+    historyTimerRef.current = window.setTimeout(flushCanvasHistory, 600)
+  }
+  const noteDesignChangeRef = useRef(noteDesignChange)
+  noteDesignChangeRef.current = noteDesignChange
+  const resetCanvasHistoryRef = useRef(resetCanvasHistory)
+  resetCanvasHistoryRef.current = resetCanvasHistory
   const pushDesignHistory = (snapshot: DesignNode[]) => {
     designUndoPastRef.current.push(structuredClone(snapshot))
     if (designUndoPastRef.current.length > 80) designUndoPastRef.current.shift()
@@ -1476,6 +1540,7 @@ export function App() {
     if (!prev) return
     designUndoFutureRef.current.push(structuredClone(designRef.current))
     applyDesignSnapshot(prev)
+    noteDesignChange(prev, 'you', 'Undid a change')
     refreshHistory(value => value + 1)
     logCanvasHistory('Undid the last canvas change.')
   }
@@ -1486,11 +1551,15 @@ export function App() {
     if (!next) return
     designUndoPastRef.current.push(structuredClone(designRef.current))
     applyDesignSnapshot(next)
+    noteDesignChange(next, 'you', 'Redid a change')
     refreshHistory(value => value + 1)
     logCanvasHistory('Redid the canvas change.')
   }
 
-  const persistDesign = (next: DesignNode[], opts?: { skipReflow?: boolean; skipHistory?: boolean; fromJev?: boolean }) => {
+  const persistDesign = (
+    next: DesignNode[],
+    opts?: { skipReflow?: boolean; skipHistory?: boolean; fromJev?: boolean; historyLabel?: string }
+  ) => {
     // A hand edit while words sit in the chat composer clears them and their unsent preview.
     if (!opts?.fromJev) next = discardJevDraftRef.current(next)
     const flowed = opts?.skipReflow ? next : reflowAutoLayout(next)
@@ -1512,6 +1581,7 @@ export function App() {
     setDesign(flowed)
     const fileId = activeFileIdRef.current
     if (fileId) designsByFileRef.current[fileId] = flowed
+    if (!opts?.skipHistory) noteDesignChange(flowed, opts?.fromJev ? 'chat' : 'you', opts?.historyLabel)
     if (opts?.skipReflow) return
     if (persistTimer.current) window.clearTimeout(persistTimer.current)
     persistTimer.current = window.setTimeout(() => {
@@ -1670,6 +1740,11 @@ export function App() {
     if (session && !designSelectedIds.includes(session.nodeId)) finishImageCropRef.current(true)
   }, [designSelectedIds])
 
+  const moveLayersInPanel = (ids: string[], target: LayerDropTarget) => {
+    const next = moveLayers(designRef.current, ids, target)
+    if (next) persistDesign(next)
+  }
+
   const reorderDesignChildren = (parentId: string, orderedIds: string[], parentPatch?: Partial<DesignNode>) => {
     const kidIds = new Set(orderedIds)
     const byId = new Map(designRef.current.map((node) => [node.id, node]))
@@ -1736,7 +1811,7 @@ export function App() {
       })
     }
   })
-  const jevThread = { onUndo: jev.undo }
+  const jevThread = { onUndo: jev.undo, onEdit: (index: number, text: string) => { void sendChat(text, index) } }
   discardJevDraftRef.current = jev.discardForManualEdit
 
   // Copy each finished decision into its chat message so history survives after Jev drops old decisions.
@@ -1765,14 +1840,16 @@ export function App() {
     })
   }, [jev.decisions])
   const jevComposer = {
+    chatModel: resolveChatModel(activeChat?.model),
+    onChatModel: (model: ChatModelId) => setChats(current => current.map(chat => chat.id === resolvedChatId ? { ...chat, model } : chat)),
     on: jev.on,
     onToggle: jev.setOn,
     micOn: jev.voice.active,
     onMic: jev.toggleMic,
-    onDraft: jev.preview,
+    onDraft: () => undefined,
     onApplyDraft: (text: string) => {
       setChatInput('')
-      jev.apply(text)
+      void sendChat(text)
     },
     picking: jev.picking,
     onTogglePick: () => {
@@ -2913,7 +2990,18 @@ export function App() {
     setDesignSelectedIds([])
     setDraft(null)
     clearDesignHistory()
+    resetCanvasHistory(next)
     sendDesignToMain(next)
+  }
+
+  const restoreCanvasVersion = (id: string) => {
+    const entries = canvasHistoryRef.current
+    const entry = entries.find((item) => item.id === id)
+    if (!entry || entry === entries[0]) return
+    const time = new Date(entry.at).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })
+    const snapshot = structuredClone(entry.snapshot)
+    persistDesign(snapshot, { historyLabel: `Restored the version from ${time}` })
+    setDesignSelectedIds((ids) => ids.filter((nodeId) => snapshot.some((node) => node.id === nodeId)))
   }
 
   const flashAlignGuides = (guides: AlignGuide[], hold = 0) => {
@@ -3815,6 +3903,7 @@ export function App() {
       designRef.current = nextDesign
       setDesign(nextDesign)
       designsByFileRef.current[activeFileIdRef.current] = nextDesign
+      resetCanvasHistoryRef.current(nextDesign)
       if (workspace.pages?.length) {
         pagesRef.current = workspace.pages
         setPages(workspace.pages)
@@ -3834,6 +3923,7 @@ export function App() {
       designRef.current = nextDesign
       setDesign(nextDesign)
       designsByFileRef.current[activeFileIdRef.current] = nextDesign
+      resetCanvasHistoryRef.current(nextDesign)
       if (workspace.pages?.length) {
         setPages(workspace.pages)
         setActivePageId(workspace.activePageId || workspace.pages[0].id)
@@ -3854,6 +3944,7 @@ export function App() {
       setDesign(nodes)
       const fileId = activeFileIdRef.current
       if (fileId) designsByFileRef.current[fileId] = nodes
+      noteDesignChangeRef.current(nodes, 'agent')
     })
     const offBuild = window.vanta.onBuild((event: BuildUiEvent) => {
       if (event.type === 'mcp:status') {
@@ -3901,53 +3992,58 @@ export function App() {
       }
     })
     const offAgent = window.vanta.onAgent((event: AgentEvent) => {
+      const targetChatId = agentChatRef.current
       if (event.type === 'text') {
+        agentTextRef.current += event.text
         setChats((current) =>
           current.map((chat) => {
-            if (chat.id !== activeChatIdRef.current) return chat
+            if (chat.id !== targetChatId) return chat
             const last = chat.messages[chat.messages.length - 1]
             if (last?.role === 'assistant' && !last.jevId) {
               return {
                 ...chat,
-                messages: [...chat.messages.slice(0, -1), { role: 'assistant', text: last.text + event.text }]
+                messages: [...chat.messages.slice(0, -1), { ...last, text: last.text + event.text }]
               }
             }
-            return { ...chat, messages: [...chat.messages, { role: 'assistant', text: event.text }] }
+            return { ...chat, messages: [...chat.messages, { role: 'assistant', text: event.text, startedAt: Date.now() }] }
           })
         )
       }
       if (event.type === 'tool') {
         setChats((current) =>
           current.map((chat) =>
-            chat.id === activeChatIdRef.current
+            chat.id === targetChatId
               ? { ...chat, messages: [...chat.messages, { role: 'system', text: `${event.name}: ${event.summary}` }] }
               : chat
           )
         )
       }
       if (event.type === 'error') {
+        const finishedAt = Date.now()
+        setChats(current => current.map(chat => chat.id !== targetChatId ? chat : { ...chat, messages: chat.messages.map(message => message.startedAt && !message.finishedAt ? { ...message, finishedAt } : message) }))
+
         setChats((current) =>
           current.map((chat) =>
-            chat.id === activeChatIdRef.current
+            chat.id === targetChatId
               ? { ...chat, messages: [...chat.messages, { role: 'system', text: event.message }] }
               : chat
           )
         )
+        agentChatRef.current = null
         setAgentBusy(false)
       }
       if (event.type === 'done') {
+        const finishedAt = Date.now()
+        setChats(current => current.map(chat => chat.id !== targetChatId ? chat : { ...chat, messages: chat.messages.map(message => message.role === 'assistant' && message.startedAt && !message.finishedAt ? { ...message, finishedAt, createdAt: finishedAt } : message) }))
+        const chatId = agentChatRef.current
+        if (chatId && agentTextRef.current) {
+          const next = [...(chatHistories.current.get(chatId) || []), { role: 'assistant' as const, text: agentTextRef.current }]
+          chatHistories.current.set(chatId, next)
+          if (activeChatIdRef.current === chatId) historyRef.current = next
+        }
+        agentChatRef.current = null
+        agentTextRef.current = ''
         setAgentBusy(false)
-        const last = historyRef.current
-        setChats((current) => {
-          const chat = current.find((item) => item.id === activeChatIdRef.current)
-          const assistant = chat ? [...chat.messages].reverse().find((item) => item.role === 'assistant') : null
-          if (assistant) {
-            const next = [...last, { role: 'assistant' as const, text: assistant.text }]
-            historyRef.current = next
-            if (activeChatIdRef.current) chatHistories.current.set(activeChatIdRef.current, next)
-          }
-          return current
-        })
       }
     })
     void window.vanta.getMcpStatus?.().then(setMcpStatus).catch(() => undefined)
@@ -5210,14 +5306,18 @@ export function App() {
     event.currentTarget.setPointerCapture(event.pointerId)
   }
 
-  const sendChat = async () => {
-    const text = chatInput.trim()
-    if (text && jev.on) {
-      setChatInput('')
-      jev.apply(text)
-      return
-    }
-    if (!text || agentBusy || !activeChat) return
+  const canvasChatContext = () => {
+    const selected = designSelectedRef.current
+      .map(id => designRef.current.find(node => node.id === id))
+      .filter((node): node is DesignNode => Boolean(node))
+    if (!selected.length) return '\n\n[Canvas context] Nothing is selected.'
+    const items = selected.slice(0, 40).map(node => `${node.id} (${node.type}${node.name ? ` “${node.name.slice(0, 100)}”` : ''}, ${Math.round(node.width || 0)}×${Math.round(node.height || 0)})`)
+    return `\n\n[Canvas context] Selected layers: ${items.join('; ')}.${selected.length > 40 ? ` ${selected.length - 40} more layers selected; inspect their frame if needed.` : ''}`
+  }
+
+  const sendChat = async (submitted?: string, editIndex?: number) => {
+    const text = (submitted ?? chatInput).trim()
+    if (!text || agentBusy || agentChatRef.current || !activeChat) return
     if (rail !== 'chat' && !chatPoppedOut) {
       onCanvasRef.current = false
       syncLayout()
@@ -5227,31 +5327,38 @@ export function App() {
     }
     setChatInput('')
     const chatId = activeChat.id
+    const baseMessages = editIndex == null ? activeChat.messages : activeChat.messages.slice(0, editIndex)
+    const startedAt = Date.now()
     const titled = activeChat.title === 'New chat' ? text.slice(0, 42) : activeChat.title
     setChats((current) =>
       current.map((chat) =>
         chat.id === chatId
-          ? { ...chat, title: titled, messages: [...chat.messages, { role: 'user', text }] }
+          ? { ...chat, title: titled, messages: [...baseMessages, { role: 'user', text, createdAt: startedAt }, { role: 'assistant', text: '', startedAt }] }
           : chat
       )
     )
-    const nextHistory = [...(chatHistories.current.get(chatId) || historyRef.current), { role: 'user' as const, text }]
+    const previous = baseMessages.filter(message => (message.role === 'user' || message.role === 'assistant') && message.text.trim()).map(message => ({ role: message.role as 'user' | 'assistant', text: message.text }))
+    const nextHistory = [...previous, { role: 'user' as const, text: text + canvasChatContext() }]
+    agentChatRef.current = chatId
+    agentTextRef.current = ''
+    sendDesignToMain(designRef.current)
     chatHistories.current.set(chatId, nextHistory)
     historyRef.current = nextHistory
     setAgentBusy(true)
     try {
-      await window.vanta.runAgent(nextHistory)
+      await window.vanta.runAgent(nextHistory, resolveChatModel(activeChat?.model), chatId)
     } catch (error) {
       setChats((current) =>
         current.map((chat) =>
           chat.id === chatId
             ? {
                 ...chat,
-                messages: [...chat.messages, { role: 'system', text: error instanceof Error ? error.message : String(error) }]
+                messages: [...chat.messages.map(message => message.startedAt && !message.finishedAt ? { ...message, finishedAt: Date.now() } : message), { role: 'system', text: error instanceof Error ? error.message : String(error) }]
               }
             : chat
         )
       )
+      agentChatRef.current = null
       setAgentBusy(false)
     }
   }
@@ -5436,21 +5543,16 @@ export function App() {
       return { error: 'Claude needs an API key. Add ANTHROPIC_API_KEY to the project .env (get one at console.anthropic.com/settings/keys) and restart Scobe.' }
     }
     if (agentBusy) return { error: 'Claude is still working on the last request.' }
-    const selectedNodes = designSelectedRef.current
-      .map((nodeId) => designRef.current.find((node) => node.id === nodeId))
-      .filter((node): node is DesignNode => Boolean(node))
-    const context = selectedNodes.length
-      ? `\n\n[Canvas context] Selected layers: ${selectedNodes
-          .map((node) => `${node.id} (${node.type}${node.name ? ` “${node.name}”` : ''}, ${Math.round(node.width || 0)}×${Math.round(node.height || 0)})`)
-          .join('; ')}.`
-      : '\n\n[Canvas context] Nothing is selected.'
+    const context = canvasChatContext()
     const chatId = activeChatIdRef.current || resolvedChatId
     const nextHistory = [...(chatHistories.current.get(chatId) || historyRef.current), { role: 'user' as const, text: request + context }]
     chatHistories.current.set(chatId, nextHistory)
     historyRef.current = nextHistory
     sendDesignToMain(designRef.current)
+    agentChatRef.current = chatId
+    agentTextRef.current = ''
     setAgentBusy(true)
-    void window.vanta.runAgent(nextHistory).catch((error) => {
+    void window.vanta.runAgent(nextHistory, resolveChatModel(chats.find(chat => chat.id === chatId)?.model), chatId).catch((error) => {
       setChats((current) =>
         current.map((chat) =>
           chat.id === chatId
@@ -5458,6 +5560,7 @@ export function App() {
             : chat
         )
       )
+      agentChatRef.current = null
       setAgentBusy(false)
     })
     return { summary: 'Claude is building this. Its steps show below.' }
@@ -5804,6 +5907,8 @@ export function App() {
           activeChatId={resolvedChatId}
           onSelectChat={selectChat}
           onNewChat={newChat}
+          canvasHistory={canvasHistory}
+          onRestoreHistory={restoreCanvasVersion}
           pages={pages}
           activePageId={activePageId}
           pageQuery={pageQuery}
@@ -5844,6 +5949,7 @@ export function App() {
           }}
           onToggleLayerVisible={toggleLayerVisible}
           onToggleLayerLock={toggleLayerLock}
+          onMoveLayers={moveLayersInPanel}
           onCollapseLayersToken={collapseLayersToken}
           panelOpen={leftOpen}
           panelWidth={leftWidth}

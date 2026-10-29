@@ -12,7 +12,7 @@ import type {
   McpStatus,
   Workspace
 } from '../shared/types'
-import type { AgentMcpLinkStatus, CodingAgentId } from '../shared/codingAgents'
+import type { AgentMcpLinkStatus, McpAgentId } from '../shared/codingAgents'
 import type { SnapshotEvent } from '../shared/snapshot'
 import type { JevQuestions, JevResponse, JevStatus, TranscriberStatus } from '../shared/jev'
 import type { QuiverGenerateInput, QuiverStatus, QuiverStreamEvent, QuiverVectorizeInput } from '../shared/quiver'
@@ -62,8 +62,16 @@ const api = {
     ipcRenderer.invoke('vanta:screenshotBrowser', tabOrWindowId),
   setPages: (pages: DesignPage[], activePageId: string): Promise<void> =>
     ipcRenderer.invoke('vanta:setPages', pages, activePageId),
-  runAgent: (messages: Array<{ role: 'user' | 'assistant'; text: string }>): Promise<void> =>
-    ipcRenderer.invoke('vanta:runAgent', messages),
+  runAgent: (messages: Array<{ role: 'user' | 'assistant'; text: string }>, model?: string, conversationId?: string): Promise<void> =>
+    ipcRenderer.invoke('vanta:runAgent', messages, model, conversationId),
+  cloudStatus: (): Promise<{ enabled: boolean; signedIn: boolean; email: string }> => ipcRenderer.invoke('vanta:cloudStatus'),
+  cloudSendCode: (email: string): Promise<void> => ipcRenderer.invoke('vanta:cloudSendCode', email),
+  cloudVerifyCode: (email: string, code: string): Promise<{ enabled: boolean; signedIn: boolean; email: string }> => ipcRenderer.invoke('vanta:cloudVerifyCode', email, code),
+  cloudSignOut: (): Promise<{ enabled: boolean; signedIn: boolean; email: string }> => ipcRenderer.invoke('vanta:cloudSignOut'),
+  speechStatus: (): Promise<{ configured: boolean; managed: boolean }> => ipcRenderer.invoke('vanta:speechStatus'),
+  speechKey: (key: string): Promise<{ configured: boolean }> => ipcRenderer.invoke('vanta:speechKey', key),
+  speechVoices: (): Promise<Array<{ id: string; name: string }>> => ipcRenderer.invoke('vanta:speechVoices'),
+  speechCreate: (text: string, voice: string, model: string): Promise<string> => ipcRenderer.invoke('vanta:speechCreate', text, voice, model),
   agentStatus: (): Promise<{ configured: boolean }> => ipcRenderer.invoke('vanta:agentStatus'),
   /** Answer main-process requests that only the canvas can fulfil (render a layer, read tokens). */
   onRpc: (handler: (method: string, args: unknown) => Promise<unknown> | unknown): (() => void) => {
@@ -80,13 +88,13 @@ const api = {
   },
   agentSetKey: (key: string): Promise<{ configured: boolean }> => ipcRenderer.invoke('vanta:agentSetKey', key),
   getMcpStatus: (): Promise<McpStatus> => ipcRenderer.invoke('vanta:getMcpStatus'),
-  getAgentMcpLink: (agentId: CodingAgentId): Promise<AgentMcpLinkStatus> =>
+  getAgentMcpLink: (agentId: McpAgentId): Promise<AgentMcpLinkStatus> =>
     ipcRenderer.invoke('vanta:getAgentMcpLink', agentId),
-  connectAgentMcp: (agentId: CodingAgentId): Promise<AgentMcpLinkStatus> =>
+  connectAgentMcp: (agentId: McpAgentId): Promise<AgentMcpLinkStatus> =>
     ipcRenderer.invoke('vanta:connectAgentMcp', agentId),
-  disconnectAgentMcp: (agentId: CodingAgentId): Promise<AgentMcpLinkStatus> =>
+  disconnectAgentMcp: (agentId: McpAgentId): Promise<AgentMcpLinkStatus> =>
     ipcRenderer.invoke('vanta:disconnectAgentMcp', agentId),
-  confirmCloudAgentMcp: (agentId: CodingAgentId): Promise<AgentMcpLinkStatus> =>
+  confirmCloudAgentMcp: (agentId: McpAgentId): Promise<AgentMcpLinkStatus> =>
     ipcRenderer.invoke('vanta:confirmCloudAgentMcp', agentId),
   openExternal: (url: string): Promise<void> => ipcRenderer.invoke('vanta:openExternal', url),
   jevStatus: (): Promise<JevStatus> => ipcRenderer.invoke('vanta:jevStatus'),

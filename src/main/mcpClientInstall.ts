@@ -4,7 +4,8 @@ import { dirname, join } from 'node:path'
 import {
   VANTA_BUILD_PROMPT,
   type AgentMcpLinkStatus,
-  type CodingAgentId
+  type CodingAgentId,
+  type McpAgentId
 } from '../shared/codingAgents'
 import { VANTA_MCP_URL } from './mcpServer'
 import {
@@ -13,7 +14,7 @@ import {
   buildCursorMcpDeeplink
 } from './mcpInstallLinks'
 import { ensureMcpTunnel, getPublicMcpUrl, getTunnelError, hasNamedTunnel, stopMcpTunnel } from './mcpTunnel'
-import { scobeBridgePath, scobeCommand } from './mcpCli'
+import { scobeBridgePath, scobeLaunchCommand } from './mcpCli'
 
 export type { AgentMcpLinkStatus }
 
@@ -45,7 +46,8 @@ function isCloudMcpConfirmed(agentId: CodingAgentId): boolean {
   return Boolean(entry && typeof entry === 'object' && (entry as { confirmed?: boolean }).confirmed)
 }
 
-export function confirmCloudAgentMcp(agentId: CodingAgentId): AgentMcpLinkStatus {
+export function confirmCloudAgentMcp(agentId: McpAgentId): AgentMcpLinkStatus {
+  if (agentId === 'antigravity') return antigravityStatus()
   const doc = readJsonFile(cloudPrefPath())
   doc[agentId] = { confirmed: true, publicUrl: getPublicMcpUrl(), updatedAt: Date.now() }
   writeJsonFile(cloudPrefPath(), doc)
@@ -182,7 +184,7 @@ const LEGACY_KEY = 'vanta'
 
 /** Same server the Scobe agent plugin installs: the stdio bridge run by Scobe's own runtime. */
 function stdioEntry(): { command: string; args: string[]; env: Record<string, string> } {
-  return { command: scobeCommand(), args: [scobeBridgePath()], env: { ELECTRON_RUN_AS_NODE: '1' } }
+  return { command: scobeLaunchCommand(), args: [scobeBridgePath()], env: { ELECTRON_RUN_AS_NODE: '1' } }
 }
 
 function hasScobeEntry(servers: Record<string, unknown>): boolean {
@@ -304,6 +306,110 @@ function disconnectCodex(): AgentMcpLinkStatus {
   return { agentId: 'codex', state: 'off', detail: path }
 }
 
+/**
+ * Antigravity reads `~/.gemini/config/mcp_config.json` (App, IDE and CLI). Older IDE builds keep their
+ * own copy in `~/.gemini/antigravity-ide`, so Scobe writes there too when that folder exists.
+ */
+function antigravityConfigPaths(): string[] {
+  const root = join(homedir(), '.gemini')
+  const paths = [join(root, 'config', 'mcp_config.json')]
+  if (existsSync(join(root, 'antigravity-ide'))) paths.push(join(root, 'antigravity-ide', 'mcp_config.json'))
+  return paths
+}
+
+/** Unlike the other configs, refuse to rewrite a file we can't parse: it holds the user's other servers. */
+function readJsonForEdit(path: string): Record<string, unknown> {
+  if (!existsSync(path)) return {}
+  const raw = readFileSync(path, 'utf8')
+  if (!raw.trim()) return {}
+  const parsed = JSON.parse(raw) as unknown
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error(`${path} is not a JSON object`)
+  return parsed as Record<string, unknown>
+}
+
+const ANTIGRAVITY_ALLOW_RULE = `mcp(${SERVER_KEY}/*)`
+
+/** Antigravity asks before every MCP call unless a permission rule allows it; the CLI reads this file. */
+function antigravityCliSettingsPath(): string {
+  return join(homedir(), '.gemini', 'antigravity-cli', 'settings.json')
+}
+
+function setAntigravityAllowRule(allow: boolean): void {
+  const path = antigravityCliSettingsPath()
+  if (!allow && !existsSync(path)) return
+  const doc = readJsonForEdit(path)
+  const permissions =
+    doc.permissions && typeof doc.permissions === 'object' && !Array.isArray(doc.permissions)
+      ? { ...(doc.permissions as Record<string, unknown>) }
+      : {}
+  const rules = Array.isArray(permissions.allow) ? permissions.allow.filter((rule) => typeof rule === 'string') : []
+  const legacy = `mcp(${LEGACY_KEY}/*)`
+  const next = rules.filter((rule) => rule !== ANTIGRAVITY_ALLOW_RULE && rule !== legacy)
+  if (allow) next.push(ANTIGRAVITY_ALLOW_RULE)
+  if (next.length === rules.length && next.every((rule, i) => rule === rules[i])) return
+  permissions.allow = next
+  doc.permissions = permissions
+  writeJsonFile(path, doc)
+}
+
+function antigravityHasScobe(): boolean {
+  return antigravityConfigPaths().some((path) => hasScobeEntry(mcpServersOf(readJsonFile(path))))
+}
+
+function antigravitySnippet(): string {
+  return JSON.stringify({ mcpServers: { [SERVER_KEY]: { type: 'stdio', ...stdioEntry() } } }, null, 2)
+}
+
+function antigravityStatus(detail?: string): AgentMcpLinkStatus {
+  const connected = antigravityHasScobe()
+  return {
+    agentId: 'antigravity',
+    state: connected ? 'connected' : 'off',
+    localUrl: VANTA_MCP_URL,
+    detail: detail || antigravityConfigPaths()[0],
+    setupSnippet: antigravitySnippet(),
+    buildPrompt: VANTA_BUILD_PROMPT,
+    allowRule: ANTIGRAVITY_ALLOW_RULE
+  }
+}
+
+function connectAntigravity(): AgentMcpLinkStatus {
+  const paths = antigravityConfigPaths()
+  for (const path of paths) {
+    const doc = readJsonForEdit(path)
+    const servers = mcpServersOf(doc)
+    delete servers[LEGACY_KEY]
+    servers[SERVER_KEY] = { type: 'stdio', ...stdioEntry() }
+    doc.mcpServers = servers
+    writeJsonFile(path, doc)
+  }
+  try {
+    setAntigravityAllowRule(true)
+  } catch (error) {
+    console.warn('[antigravity] could not add the Scobe allow rule:', error instanceof Error ? error.message : error)
+  }
+  return antigravityStatus(paths.join(' · '))
+}
+
+function disconnectAntigravity(): AgentMcpLinkStatus {
+  for (const path of antigravityConfigPaths()) {
+    if (!existsSync(path)) continue
+    const doc = readJsonForEdit(path)
+    const servers = mcpServersOf(doc)
+    if (!(SERVER_KEY in servers) && !(LEGACY_KEY in servers)) continue
+    delete servers[SERVER_KEY]
+    delete servers[LEGACY_KEY]
+    doc.mcpServers = servers
+    writeJsonFile(path, doc)
+  }
+  try {
+    setAntigravityAllowRule(false)
+  } catch {
+    /* leave an unreadable settings file alone */
+  }
+  return antigravityStatus()
+}
+
 function v0Status(connectedHint: boolean): AgentMcpLinkStatus {
   const publicUrl = getPublicMcpUrl()
   return {
@@ -333,7 +439,8 @@ function setV0Pref(linked: boolean): void {
   writeJsonFile(v0PrefPath(), { linked, url: VANTA_MCP_URL, updatedAt: Date.now() })
 }
 
-export function getAgentMcpLinkStatus(agentId: CodingAgentId): AgentMcpLinkStatus {
+export function getAgentMcpLinkStatus(agentId: McpAgentId): AgentMcpLinkStatus {
+  if (agentId === 'antigravity') return antigravityStatus()
   switch (agentId) {
     case 'cursor':
       return cloudLinkState(agentId, cursorHasVanta(), cursorMcpPath())
@@ -348,7 +455,8 @@ export function getAgentMcpLinkStatus(agentId: CodingAgentId): AgentMcpLinkStatu
   }
 }
 
-export async function connectAgentMcp(agentId: CodingAgentId): Promise<AgentMcpLinkStatus> {
+export async function connectAgentMcp(agentId: McpAgentId): Promise<AgentMcpLinkStatus> {
+  if (agentId === 'antigravity') return connectAntigravity()
   if (agentId === 'codex') { connectCodex(); return codexLocalStatus() }
   clearCloudMcpConfirmed(agentId)
   const publicUrl = await ensureMcpTunnel()
@@ -402,7 +510,8 @@ export async function connectAgentMcp(agentId: CodingAgentId): Promise<AgentMcpL
   return status
 }
 
-export function disconnectAgentMcp(agentId: CodingAgentId): AgentMcpLinkStatus {
+export function disconnectAgentMcp(agentId: McpAgentId): AgentMcpLinkStatus {
+  if (agentId === 'antigravity') return disconnectAntigravity()
   // A named tunnel is shared by every agent and started with the app; only quick tunnels are per-connect.
   if (!hasNamedTunnel()) stopMcpTunnel()
   clearCloudMcpConfirmed(agentId)

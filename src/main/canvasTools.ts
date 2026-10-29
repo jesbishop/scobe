@@ -1,3 +1,4 @@
+import { inspectCanvas } from './canvasInspection'
 import { randomUUID } from 'node:crypto'
 import type { AutoLayout, DesignNode } from '../shared/types'
 import { DEFAULT_PAGE } from '../shared/types'
@@ -15,6 +16,8 @@ import { normalizeUrl } from '../shared/url'
 import { finishWorking, stageCreate, emitBuild } from './buildBus'
 import { DESIGN_GUIDE } from '../shared/designGuide'
 import { DEFAULT_TOKENS } from '../shared/designTokens'
+import { prepareSvg, recolorSvg, svgIntrinsicSize } from '../shared/svgMarkup'
+import { fetchSvg, iconSvg, searchIconify, searchLucide } from './icons'
 
 export type BrowserGeometry = {
   x: number
@@ -68,25 +71,7 @@ function fileStyleSummary(nodes: DesignNode[]) {
   }
 }
 
-export type CanvasToolResult = { content: string; image?: string; createdIds?: string[] }
-
-function listDesignSummary() {
-  const nodes = getDesign()
-  return nodes.map((node) => {
-    const world = resolveWorldRect(node, nodes)
-    return {
-      id: node.id,
-      type: node.type,
-      name: node.name,
-      text: node.text,
-      parentId: node.parentId || null,
-      layout: node.layout || null,
-      clipsContent: node.clipsContent,
-      local: { x: node.x, y: node.y, width: node.width, height: node.height },
-      world
-    }
-  })
-}
+export type CanvasToolResult = { content: string; image?: string; createdIds?: string[]; reviewedId?: string }
 
 function placeNode(node: DesignNode, parentId?: string | null): DesignNode {
   const nodes = getDesign()
@@ -118,6 +103,44 @@ function placeNode(node: DesignNode, parentId?: string | null): DesignNode {
     y: rel.y,
     pageId: parent.pageId || withPage.pageId
   }
+}
+
+function svgDataUrl(svg: string): string {
+  return `data:image/svg+xml;base64,${Buffer.from(svg).toString('base64')}`
+}
+
+/** Vector layers are image nodes carrying live SVG, the same thing Snapshot and Create SVG make. */
+function addVector(
+  svg: string,
+  box: { x: number; y: number; width: number; height: number },
+  name: string,
+  parentId?: string
+): DesignNode {
+  const node = placeNode(
+    {
+      id: randomUUID(),
+      type: 'image',
+      x: box.x,
+      y: box.y,
+      width: Math.max(1, box.width),
+      height: Math.max(1, box.height),
+      name,
+      svgMarkup: svg,
+      imageDataUrl: svgDataUrl(svg)
+    },
+    parentId
+  )
+  addDesign(node)
+  return node
+}
+
+function vectorScope(): string {
+  return `sv${randomUUID().slice(0, 8)}`
+}
+
+function compactNode(node: DesignNode) {
+  const { svgMarkup: _svg, imageDataUrl: _img, ...rest } = node
+  return rest
 }
 
 function parseLayout(input: Record<string, unknown> | undefined): AutoLayout | undefined {
@@ -172,55 +195,9 @@ export async function runCanvasTool(
     return { ...result, createdIds: ids }
   }
 
-  if (name === 'get_basic_info' || name === 'list_design') {
+  if (['get_basic_info', 'list_design', 'get_tree_summary'].includes(name)) {
     const nodes = getDesign()
-    const frames = nodes.filter((node) => node.type === 'frame' || node.type === 'section')
-    return {
-      content: JSON.stringify(
-        {
-          nodeCount: nodes.length,
-          artboards: frames.map((node) => {
-            const world = resolveWorldRect(node, nodes)
-            return {
-              id: node.id,
-              name: node.name || node.type,
-              type: node.type,
-              width: world.width,
-              height: world.height,
-              x: world.x,
-              y: world.y
-            }
-          }),
-          nodes: listDesignSummary()
-        },
-        null,
-        2
-      )
-    }
-  }
-
-  if (name === 'get_tree_summary') {
-    const rootId = input.id != null ? String(input.id) : null
-    const depth = Math.max(1, Math.min(8, Number(input.depth) || 4))
-    const nodes = getDesign()
-    const lines: string[] = []
-    const walk = (parentId: string | null, level: number) => {
-      if (level > depth) return
-      for (const node of nodes.filter((item) => (item.parentId || null) === parentId)) {
-        const pad = '  '.repeat(level)
-        lines.push(`${pad}- ${node.type} ${node.name || node.text || node.id} (${node.id})`)
-        walk(node.id, level + 1)
-      }
-    }
-    if (rootId) {
-      const root = nodes.find((node) => node.id === rootId)
-      if (!root) throw new Error('Node not found')
-      lines.push(`${root.type} ${root.name || root.id}`)
-      walk(root.id, 1)
-    } else {
-      walk(null, 0)
-    }
-    return { content: lines.join('\n') || '(empty)' }
+    return { content: inspectCanvas(nodes, name, input, node => resolveWorldRect(node, nodes)) }
   }
 
   if (name === 'get_node_info') {
@@ -269,7 +246,8 @@ export async function runCanvasTool(
       content:
         `Rendered “${shot.name}” (${shot.id}), ${shot.width}×${shot.height} at ${shot.scale}x. ` +
         'Review it against the design guide checklist: focal point, alignment, spacing rhythm, type sizes, contrast, accent use. Fix what fails, then render again.',
-      image: shot.base64
+      image: shot.base64,
+      reviewedId: shot.id
     }
   }
 
@@ -307,7 +285,7 @@ export async function runCanvasTool(
         fill: String(input.fill || '#FFFFFF'),
         clipsContent: true,
         pageId: DEFAULT_PAGE.id,
-        layout: layout ?? { mode: 'none' }
+        layout: layout ?? (input.autoLayout ? defaultFrameLayout() : { mode: 'none' })
       },
       input.parentId != null ? String(input.parentId) : undefined
     )
@@ -360,6 +338,85 @@ export async function runCanvasTool(
     )
     addDesign(node)
     return stage([node.id], { content: JSON.stringify(node) })
+  }
+
+  if (name === 'add_icon') {
+    const size = Math.max(8, Number(input.size) || 24)
+    const color = String(input.color || '#0a0a0a')
+    const strokeWidth = Math.min(4, Math.max(0.5, Number(input.strokeWidth) || 2))
+    const icon = await iconSvg(String(input.name || input.icon || ''), { color, strokeWidth })
+    const svg = prepareSvg(icon.svg, vectorScope())
+    const node = addVector(
+      svg,
+      { x: Number(input.x) || 0, y: Number(input.y) || 0, width: size, height: size },
+      String(input.layerName || `${icon.id} icon`),
+      input.parentId != null ? String(input.parentId) : undefined
+    )
+    return stage([node.id], { content: JSON.stringify({ ...compactNode(node), icon: icon.id, source: icon.source, color }) })
+  }
+
+  if (name === 'add_svg') {
+    const url = input.url ? String(input.url) : ''
+    const raw = input.svg ? String(input.svg) : url ? await fetchSvg(url) : ''
+    if (!raw.trim()) throw new Error('Pass svg markup or a url to an .svg file')
+    const color = input.color ? String(input.color) : undefined
+    const svg = prepareSvg(raw, vectorScope(), { color })
+    const intrinsic = svgIntrinsicSize(svg) || { width: 120, height: 120 }
+    const aspect = intrinsic.width / intrinsic.height
+    let width = Number(input.width) || 0
+    let height = Number(input.height) || 0
+    if (width && !height) height = width / aspect
+    else if (height && !width) width = height * aspect
+    else if (!width && !height) {
+      const scale = Math.min(1, 800 / Math.max(intrinsic.width, intrinsic.height))
+      width = intrinsic.width * scale
+      height = intrinsic.height * scale
+    }
+    const fallbackName = url ? decodeURIComponent(url.split(/[?#]/)[0].split('/').pop() || 'SVG').replace(/\.svg$/i, '') : 'SVG'
+    const node = addVector(
+      svg,
+      { x: Number(input.x) || 0, y: Number(input.y) || 0, width: Math.round(width), height: Math.round(height) },
+      String(input.name || fallbackName),
+      input.parentId != null ? String(input.parentId) : undefined
+    )
+    return stage([node.id], { content: JSON.stringify(compactNode(node)) })
+  }
+
+  if (name === 'search_icons') {
+    const query = String(input.query || '').trim()
+    if (!query) throw new Error('Pass a query, e.g. "settings" or "arrow right"')
+    const limit = Math.min(64, Math.max(1, Number(input.limit) || 24))
+    const lucideHits = searchLucide(query, limit)
+    let iconifyHits: string[] = []
+    let iconifyError: string | undefined
+    if (input.library !== 'lucide') {
+      try {
+        iconifyHits = await searchIconify(query, limit)
+      } catch (error) {
+        iconifyError = error instanceof Error ? error.message : String(error)
+      }
+    }
+    return {
+      content: JSON.stringify({
+        lucide: lucideHits,
+        iconify: iconifyHits,
+        ...(iconifyError ? { iconifyError } : {}),
+        note: 'Pass a Lucide name ("settings") or an Iconify id ("mdi:cog") to add_icon. Prefer Lucide so a screen keeps one icon style.'
+      })
+    }
+  }
+
+  if (name === 'set_svg_color') {
+    const id = String(input.id || '')
+    const node = getDesign().find((item) => item.id === id)
+    if (!node) throw new Error('Node not found')
+    if (!node.svgMarkup?.trim()) throw new Error('That layer is not a vector (no SVG markup)')
+    const color = String(input.color || '')
+    if (!color) throw new Error('Pass a color, e.g. #2563eb')
+    const svg = recolorSvg(node.svgMarkup, color)
+    updateDesign(id, { svgMarkup: svg, imageDataUrl: svgDataUrl(svg) })
+    const next = getDesign().find((item) => item.id === id)
+    return { content: JSON.stringify(next ? compactNode(next) : null) }
   }
 
   if (name === 'add_design_comment') {

@@ -1,13 +1,17 @@
+import { gatewayUrl, cloudToken } from './cloudAi'
+import { resolveChatModel } from '../shared/chatModels'
 import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import Anthropic from '@anthropic-ai/sdk'
-import type { MessageParam, Tool, ToolResultBlockParam } from '@anthropic-ai/sdk/resources/messages'
+import type { Tool } from '@anthropic-ai/sdk/resources/messages'
 import { app } from 'electron'
 import type { AgentEvent } from '../shared/types'
 import { runCanvasTool, type CanvasToolContext } from './canvasTools'
+import { chatCanvasTools, validateCanvasTool } from './canvasToolRegistry'
+import { friendlyAgentError, runCanvasAgentLoop } from './canvasAgentLoop'
 import { DESIGN_GUIDE } from '../shared/designGuide'
 
-const MODEL = 'claude-sonnet-4-5'
+
 
 function keyFile(): string {
   return join(app.getPath('userData'), 'anthropic.json')
@@ -27,7 +31,7 @@ function resolveKey(): string | null {
 }
 
 export function agentStatus(): { configured: boolean } {
-  return { configured: Boolean(resolveKey()) }
+  return { configured: Boolean(gatewayUrl() || resolveKey()) }
 }
 
 export function setAgentKey(key: string): { configured: boolean } {
@@ -35,267 +39,28 @@ export function setAgentKey(key: string): { configured: boolean } {
   return agentStatus()
 }
 
-const TOOLS: Tool[] = [
-  {
-    name: 'list_browsers',
-    description: 'List browser windows and tabs currently on the Scobe canvas.',
-    input_schema: { type: 'object', properties: {} }
-  },
-  {
-    name: 'open_browser',
-    description: 'Open a new real browser on the canvas.',
-    input_schema: {
-      type: 'object',
-      properties: { url: { type: 'string' } },
-      required: ['url']
-    }
-  },
-  {
-    name: 'navigate',
-    description: 'Navigate a canvas browser to a URL.',
-    input_schema: {
-      type: 'object',
-      properties: {
-        browserId: { type: 'string' },
-        url: { type: 'string' }
-      },
-      required: ['browserId', 'url']
-    }
-  },
-  {
-    name: 'list_design',
-    description: 'List design nodes with parentId, layout, and world bounds.',
-    input_schema: { type: 'object', properties: {} }
-  },
-  {
-    name: 'add_design_frame',
-    description: 'Add a design frame. Optional auto-layout and parentId.',
-    input_schema: {
-      type: 'object',
-      properties: {
-        x: { type: 'number' },
-        y: { type: 'number' },
-        width: { type: 'number' },
-        height: { type: 'number' },
-        name: { type: 'string' },
-        parentId: { type: 'string' }
-      },
-      required: ['x', 'y', 'width', 'height']
-    }
-  },
-  {
-    name: 'add_design_rect',
-    description: 'Add a rectangle on the design canvas.',
-    input_schema: {
-      type: 'object',
-      properties: {
-        x: { type: 'number' },
-        y: { type: 'number' },
-        width: { type: 'number' },
-        height: { type: 'number' },
-        name: { type: 'string' },
-        parentId: { type: 'string' },
-        fill: { type: 'string' }
-      },
-      required: ['x', 'y', 'width', 'height']
-    }
-  },
-  {
-    name: 'add_design_ellipse',
-    description: 'Add an ellipse on the design canvas.',
-    input_schema: {
-      type: 'object',
-      properties: {
-        x: { type: 'number' },
-        y: { type: 'number' },
-        width: { type: 'number' },
-        height: { type: 'number' },
-        name: { type: 'string' },
-        parentId: { type: 'string' },
-        fill: { type: 'string' }
-      },
-      required: ['x', 'y', 'width', 'height']
-    }
-  },
-  {
-    name: 'add_design_text',
-    description: 'Add text on the design canvas.',
-    input_schema: {
-      type: 'object',
-      properties: {
-        x: { type: 'number' },
-        y: { type: 'number' },
-        text: { type: 'string' },
-        parentId: { type: 'string' },
-        fontSize: { type: 'number' },
-        fill: { type: 'string' }
-      },
-      required: ['x', 'y', 'text']
-    }
-  },
-  {
-    name: 'add_design_comment',
-    description: 'Pin a comment on the design canvas.',
-    input_schema: {
-      type: 'object',
-      properties: {
-        x: { type: 'number' },
-        y: { type: 'number' },
-        text: { type: 'string' }
-      },
-      required: ['x', 'y', 'text']
-    }
-  },
-  {
-    name: 'update_design',
-    description: 'Patch any fields on a design node.',
-    input_schema: {
-      type: 'object',
-      properties: {
-        id: { type: 'string' },
-        patch: { type: 'object' }
-      },
-      required: ['id', 'patch']
-    }
-  },
-  {
-    name: 'delete_design',
-    description: 'Delete design nodes by id.',
-    input_schema: {
-      type: 'object',
-      properties: {
-        ids: { type: 'array', items: { type: 'string' } },
-        keepChildren: { type: 'boolean' }
-      },
-      required: ['ids']
-    }
-  },
-  {
-    name: 'set_parent',
-    description: 'Reparent a node under a frame/section.',
-    input_schema: {
-      type: 'object',
-      properties: {
-        id: { type: 'string' },
-        parentId: { type: ['string', 'null'] }
-      },
-      required: ['id']
-    }
-  },
-  {
-    name: 'set_layout',
-    description: 'Set flex / auto-layout on a frame (direction, gap, align, justify, wrap).',
-    input_schema: {
-      type: 'object',
-      properties: {
-        id: { type: 'string' },
-        mode: { type: 'string', enum: ['none', 'horizontal', 'vertical'] },
-        gap: { type: 'number' },
-        padding: { type: 'number' },
-        alignItems: { type: 'string', enum: ['start', 'center', 'end', 'stretch'] },
-        justifyContent: { type: 'string', enum: ['start', 'center', 'end', 'space-between'] },
-        wrap: { type: 'boolean' }
-      },
-      required: ['id', 'mode']
-    }
-  },
-  {
-    name: 'move_design',
-    description: 'Move a design node.',
-    input_schema: {
-      type: 'object',
-      properties: {
-        id: { type: 'string' },
-        x: { type: 'number' },
-        y: { type: 'number' },
-        relative: { type: 'boolean' }
-      },
-      required: ['id', 'x', 'y']
-    }
-  },
-  {
-    name: 'resize_design',
-    description: 'Resize a design node.',
-    input_schema: {
-      type: 'object',
-      properties: {
-        id: { type: 'string' },
-        width: { type: 'number' },
-        height: { type: 'number' }
-      },
-      required: ['id', 'width', 'height']
-    }
-  },
-  {
-    name: 'snapshot_browser_to_frame',
-    description:
-      'Bring a live browser region into the canvas with Scobe Snapshot (DOM → editable layers, not a flat PNG). Optional CSS selector for sidebars.',
-    input_schema: {
-      type: 'object',
-      properties: {
-        browserId: { type: 'string' },
-        selector: { type: 'string', description: 'CSS selector to snapshot (e.g. ytd-guide-renderer)' },
-        pointX: { type: 'number' },
-        pointY: { type: 'number' },
-        x: { type: 'number' },
-        y: { type: 'number' },
-        name: { type: 'string' }
-      },
-      required: ['browserId']
-    }
-  },
-  {
-    name: 'get_tokens',
-    description:
-      'Design tokens from the Tokens panel plus the colors, fonts, sizes, radii and spacing this file already uses most. Call before designing and reuse them.',
-    input_schema: { type: 'object', properties: {} }
-  },
-  {
-    name: 'render_node',
-    description:
-      'Render a design layer (usually the top-level frame you built) to an image so you can see it. Review it against the design guide checklist, fix issues, and render again. Omit id to render the newest top-level frame.',
-    input_schema: {
-      type: 'object',
-      properties: {
-        id: { type: 'string', description: 'Layer id; omit for the newest top-level frame' },
-        maxEdge: { type: 'number', description: 'Longest image edge in px (default 1568)' }
-      }
-    }
-  },
-  {
-    name: 'snapshot_to_canvas',
-    description: 'Alias of snapshot_browser_to_frame — Scobe Snapshot layered paste onto the canvas.',
-    input_schema: {
-      type: 'object',
-      properties: {
-        browserId: { type: 'string' },
-        selector: { type: 'string' },
-        pointX: { type: 'number' },
-        pointY: { type: 'number' },
-        x: { type: 'number' },
-        y: { type: 'number' },
-        name: { type: 'string' }
-      },
-      required: ['browserId']
-    }
-  }
-]
+const TOOLS: Tool[] = chatCanvasTools()
+const conversationNotes = new Map<string, string[]>()
 
-const SYSTEM_BASE = `You operate Scobe, an infinite canvas of real website browsers plus a Paper-like design layer.
+const SYSTEM_BASE = `You are Scobe’s helpful conversational AI assistant, powered by Claude. Answer questions, explain ideas, brainstorm, and carry on natural multi-turn conversations. Use the conversation history to understand follow-ups. Only call canvas tools when the user asks for canvas work or when inspecting the canvas is needed to answer their question. Never interpret ordinary conversation as an instruction to modify the canvas. For general questions, answer directly with appropriate detail and readable formatting.
+
+You operate Scobe, an infinite canvas of real website browsers plus a Paper-like design layer.
 
 Browsers: open, list, and navigate URLs. Do not click or type inside pages — there is no computer-use / screenshot click loop.
 
 Design: build UI on the canvas with frames, auto-layout, shapes, and text — like Paper/Figma.
 - Prefer nested frames with vertical/horizontal auto-layout over one giant image when generating from scratch.
-- Children of a parent use parent-relative x/y when parentId is set.
+- Creation tools accept world x/y even with parentId. Stored children use parent-relative coordinates: update_design patches local x/y; move_design uses world x/y unless relative=true.
 - list_design returns parentId, layout, and world bounds.
 - Use snapshot_browser_to_frame / snapshot_to_canvas to bring a live page region into the canvas via Scobe Snapshot (editable layers). Do not flat-screenshot for “snapshot” requests.
+- Icons are vector layers: add_icon with a Lucide name or Iconify id (search_icons finds them). Logos and illustrations: add_svg with markup or an .svg URL. Recolor vectors with set_svg_color, not update_design.
 - Design objects sit behind browsers and never replace a live page.
 - Do not close, move, or resize browsers unless the user asks.
 - The user's message may end with a [Canvas context] block listing the selected layers. "This", "it", and "these" mean those layers. Edit them in place with update_design instead of rebuilding them.
-- Start with list_design when you need to see what exists, and get_tokens before designing anything new. Build big things in passes: container frame first, then sections, then content.
+- Start with get_basic_info and get_tokens before designing. Never enumerate the entire file for a new design. Use get_tree_summary for a relevant subtree and get_node_info for individual layers. list_design is paginated; follow nextOffset only when needed. Build big things in passes: container frame first, then sections, then content. Issue independent tool calls together in one response to reduce round trips. Reuse actual returned layer IDs; never invent IDs.
 - When you build or restyle a design, finish with render_node on its top-level frame, check the image against the review checklist below, fix what fails, and render again. One review pass at minimum; stop after three.
 - Small single-property edits (one color, one size) don't need a render.
+- Complete the full requested scope. A plan or a placeholder frame is not a finished design. For large builds, use consistent reusable sections and group independent tool calls. If a limit stops you, say what remains unfinished. Never claim completion before visual review. Call finish_working_on_nodes after building.
 - Work quickly and silently; after the last tool call, reply with one or two plain sentences saying what you built or changed.`
 
 const SYSTEM_FIELDS = `update_design accepts any of these layer fields in "patch" (omit what you don't change):
@@ -320,9 +85,15 @@ export async function runAgent(
   emit: (event: AgentEvent) => void,
   openBrowser: (url: string) => Promise<string>,
   resolveBrowserGeometry?: CanvasToolContext['resolveBrowserGeometry'],
-  canvas?: Pick<CanvasToolContext, 'renderNode' | 'getTokens'>
+  canvas?: Pick<CanvasToolContext, 'renderNode' | 'getTokens'>,
+  model?: string,
+  conversationId?: string
 ): Promise<void> {
-  const apiKey = resolveKey()
+  if (conversationId && messages.length <= 1) conversationNotes.delete(conversationId)
+  const cloud = gatewayUrl()
+  let apiKey: string | null
+  if (cloud) emit({ type: 'tool', name: 'connect_ai', summary: 'Connecting to Scobe AI; the hosted service may take a moment to wake up.' })
+  try { apiKey = cloud ? await cloudToken() : resolveKey() } catch (error) { emit({ type: 'error', message: friendlyAgentError(error) }); return }
   if (!apiKey) {
     emit({
       type: 'error',
@@ -330,60 +101,25 @@ export async function runAgent(
     })
     return
   }
-  const client = new Anthropic({ apiKey })
-  const thread: MessageParam[] = messages.map((message) => ({
-    role: message.role,
-    content: message.text
-  }))
+  const client = new Anthropic({ apiKey, ...(cloud ? { baseURL: cloud + '/claude', maxRetries: 0, timeout: 300000 } : {}) })
   const ctx: CanvasToolContext = { openBrowser, resolveBrowserGeometry, ...canvas }
-
-  for (let step = 0; step < 40; step++) {
-    const response = await client.messages.create({
-      model: MODEL,
-      max_tokens: 8000,
-      system: SYSTEM,
-      tools: TOOLS,
-      messages: thread
-    })
-    const toolUses = response.content.filter((block) => block.type === 'tool_use')
-    const texts = response.content.filter((block) => block.type === 'text')
-    for (const block of texts) emit({ type: 'text', text: block.text })
-    if (response.stop_reason !== 'tool_use' || toolUses.length === 0) {
-      emit({ type: 'done' })
-      return
-    }
-    thread.push({ role: 'assistant', content: response.content })
-    const toolResults: ToolResultBlockParam[] = []
-    for (const tool of toolUses) {
-      if (tool.type !== 'tool_use') continue
-      emit({ type: 'tool', name: tool.name, summary: summarize(tool.name, tool.input) })
-      try {
-        const output = await runCanvasTool(tool.name, tool.input as Record<string, unknown>, ctx)
-        toolResults.push({
-          type: 'tool_result',
-          tool_use_id: tool.id,
-          content: output.image
-            ? [
-                { type: 'text', text: output.content },
-                {
-                  type: 'image',
-                  source: { type: 'base64', media_type: 'image/png', data: output.image }
-                }
-              ]
-            : output.content
-        })
-      } catch (error) {
-        toolResults.push({
-          type: 'tool_result',
-          tool_use_id: tool.id,
-          is_error: true,
-          content: error instanceof Error ? error.message : String(error)
-        })
-      }
-    }
-    thread.push({ role: 'user', content: toolResults })
-  }
-  emit({ type: 'done' })
+  await runCanvasAgentLoop({
+    messages, emit, summarize,
+    remember: notes => {
+      if (!conversationId || !notes.length) return
+      const previous = conversationNotes.get(conversationId) || []
+      conversationNotes.delete(conversationId)
+      conversationNotes.set(conversationId, [...previous, ...notes].slice(-30))
+      if (conversationNotes.size > 20) conversationNotes.delete(conversationNotes.keys().next().value!)
+    },
+    request: async (thread, onText) => {
+      const stream = client.messages.stream({
+        model: resolveChatModel(model), max_tokens: 8000, system: SYSTEM + (conversationId && messages.length > 1 && conversationNotes.has(conversationId) ? '\n\nPrior tool results in this chat (may be stale; verify live layers before editing):\n' + conversationNotes.get(conversationId)!.join('\n') : ''), tools: TOOLS, messages: thread
+      }).on('text', onText)
+      return stream.finalMessage()
+    },
+    execute: (name, input) => runCanvasTool(name, validateCanvasTool(name, name === 'render_node' ? { maxEdge: 1024, ...input } : input), ctx)
+  })
 }
 
 function summarize(name: string, input: unknown): string {
@@ -396,6 +132,10 @@ function summarize(name: string, input: unknown): string {
   if (name === 'add_design_rect' || name === 'add_design_ellipse') return `${data.width}×${data.height}`
   if (name === 'add_design_text') return String(data.text || 'text')
   if (name === 'add_design_comment') return String(data.text || 'comment')
+  if (name === 'add_icon') return `${data.name} icon`
+  if (name === 'search_icons') return `Looking for “${data.query}” icons`
+  if (name === 'add_svg') return String(data.name || data.url || 'SVG')
+  if (name === 'set_svg_color') return `${data.id} → ${data.color}`
   if (name === 'update_design' || name === 'delete_design' || name === 'set_parent' || name === 'set_layout') {
     return String(data.id || data.ids || name)
   }

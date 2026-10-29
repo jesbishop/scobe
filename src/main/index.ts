@@ -1,3 +1,5 @@
+import { cloudStatus, sendSignInCode, verifySignInCode, signOutCloud } from './cloudAi'
+import { speechStatus, saveSpeechKey, speechVoices, createSpeech } from './chatSpeech'
 import { app, BrowserWindow, ipcMain, nativeTheme, session, shell, systemPreferences } from 'electron'
 import { join } from 'node:path'
 import { randomUUID } from 'node:crypto'
@@ -37,7 +39,7 @@ import { installScobeCli } from './mcpCli'
 import type { CanvasToolContext, RenderedNode } from './canvasTools'
 import { callRenderer, initRendererRpc } from './rendererRpc'
 import { startAutoUpdates } from './updater'
-import type { CodingAgentId } from '../shared/codingAgents'
+import type { McpAgentId } from '../shared/codingAgents'
 import {
   DEFAULT_PAGE,
   DEFAULT_URL,
@@ -523,9 +525,17 @@ function registerIpc(): void {
     chromeHost.setSnapshot(id)
   })
   ipcMain.handle('vanta:snapshotPage', (_event, id: string) => chromeHost.snapshotPage(id))
+  ipcMain.handle('vanta:cloudStatus', () => cloudStatus())
+  ipcMain.handle('vanta:cloudSendCode', (_event, email: string) => sendSignInCode(email))
+  ipcMain.handle('vanta:cloudVerifyCode', (_event, email: string, code: string) => verifySignInCode(email, code))
+  ipcMain.handle('vanta:cloudSignOut', () => signOutCloud())
+  ipcMain.handle('vanta:speechStatus', () => speechStatus())
+  ipcMain.handle('vanta:speechKey', (_event, key: string) => saveSpeechKey(key))
+  ipcMain.handle('vanta:speechVoices', () => speechVoices())
+  ipcMain.handle('vanta:speechCreate', (_event, text: string, voice: string, model: string) => createSpeech(text, voice, model))
   ipcMain.handle('vanta:agentStatus', () => agentStatus())
   ipcMain.handle('vanta:agentSetKey', (_event, key: string) => setAgentKey(key))
-  ipcMain.handle('vanta:runAgent', async (_event, messages: Array<{ role: 'user' | 'assistant'; text: string }>) => {
+  ipcMain.handle('vanta:runAgent', async (_event, messages: Array<{ role: 'user' | 'assistant'; text: string }>, model?: string, conversationId?: string) => {
     if (agentRunning) throw new Error('Agent is already running')
     agentRunning = true
     const emit = (event: AgentEvent) => mainWindow?.webContents.send('vanta:agent', event)
@@ -554,7 +564,9 @@ function registerIpc(): void {
           }
           return null
         },
-        canvasBridge
+        canvasBridge,
+        model,
+        conversationId
       )
     } finally {
       agentRunning = false
@@ -659,10 +671,10 @@ function registerIpc(): void {
     port: VANTA_MCP_PORT
   }))
 
-  ipcMain.handle('vanta:getAgentMcpLink', (_event, agentId: CodingAgentId) => getAgentMcpLinkStatus(agentId))
-  ipcMain.handle('vanta:connectAgentMcp', (_event, agentId: CodingAgentId) => connectAgentMcp(agentId))
-  ipcMain.handle('vanta:disconnectAgentMcp', (_event, agentId: CodingAgentId) => disconnectAgentMcp(agentId))
-  ipcMain.handle('vanta:confirmCloudAgentMcp', (_event, agentId: CodingAgentId) => confirmCloudAgentMcp(agentId))
+  ipcMain.handle('vanta:getAgentMcpLink', (_event, agentId: McpAgentId) => getAgentMcpLinkStatus(agentId))
+  ipcMain.handle('vanta:connectAgentMcp', (_event, agentId: McpAgentId) => connectAgentMcp(agentId))
+  ipcMain.handle('vanta:disconnectAgentMcp', (_event, agentId: McpAgentId) => disconnectAgentMcp(agentId))
+  ipcMain.handle('vanta:confirmCloudAgentMcp', (_event, agentId: McpAgentId) => confirmCloudAgentMcp(agentId))
   ipcMain.handle('vanta:openExternal', async (_event, url: string) => {
     if (typeof url !== 'string' || !url.trim()) return
     await shell.openExternal(url.trim())

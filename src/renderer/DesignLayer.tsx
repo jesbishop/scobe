@@ -24,6 +24,7 @@ import { ShaderHandles } from './ShaderHandles'
 import { useShaderEdit } from './shaderEdit'
 import { layoutGridBands } from '../shared/layoutGrids'
 import { getNodePaints, gradientCss } from '../shared/paint'
+import { sanitizeSvg } from '../shared/svgMarkup'
 import {
   borderRadiusCss,
   clampCornerRadii,
@@ -98,7 +99,7 @@ function LiveSvg({
   style?: CSSProperties
 }) {
   const host = useRef<HTMLDivElement>(null)
-  const svg = markup.trim()
+  const svg = useMemo(() => sanitizeSvg(markup), [markup])
   useEffect(() => {
     const el = host.current
     if (!el || !svg) return

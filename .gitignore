@@ -17,3 +17,5 @@ Thumbs.db
 scripts/.*
 scripts/patch-*.mjs
 scripts/fix-voidpromise.mjs
+
+.build-cache/

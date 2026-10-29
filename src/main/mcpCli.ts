@@ -13,7 +13,7 @@ import {
 import { homedir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { app } from 'electron'
-import { listToolDefinitions, SCOBE_MCP_INSTRUCTIONS } from './mcpServer'
+import { listToolDefinitions, SCOBE_MCP_INSTRUCTIONS, scobeServerInfo } from './mcpServer'
 import type { CanvasToolContext } from './canvasTools'
 
 /**
@@ -31,6 +31,14 @@ export function scobeBinDir(): string {
 /** What agents run. On Windows, `bin` is a junction to the install folder, so this resolves to Scobe.exe. */
 export function scobeCommand(): string {
   return join(scobeBinDir(), process.platform === 'win32' ? 'Scobe.exe' : 'scobe')
+}
+
+/**
+ * What agent configs should launch. The installed app uses `~/.scobe/bin`; a development build
+ * (`npm run dev`) has no installed command, so it points straight at its own Electron runtime.
+ */
+export function scobeLaunchCommand(): string {
+  return app.isPackaged ? scobeCommand() : process.execPath
 }
 
 export function scobeBridgePath(): string {
@@ -103,7 +111,7 @@ function installBridge(): void {
 
 async function writeToolCache(ctx: CanvasToolContext): Promise<void> {
   const tools = await listToolDefinitions(ctx)
-  const doc = { version: app.getVersion(), instructions: SCOBE_MCP_INSTRUCTIONS, tools }
+  const doc = { version: app.getVersion(), serverInfo: scobeServerInfo(), instructions: SCOBE_MCP_INSTRUCTIONS, tools }
   writeIfChanged(cachePath(), `${JSON.stringify(doc, null, 2)}\n`)
 }
 

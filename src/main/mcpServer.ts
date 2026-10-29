@@ -1,12 +1,15 @@
 import { randomUUID } from 'node:crypto'
+import { readFileSync } from 'node:fs'
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http'
+import { join } from 'node:path'
 import { app } from 'electron'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js'
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js'
 import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js'
-import * as z from 'zod'
+import type * as z from 'zod'
+import { CANVAS_TOOLS, toolAnnotations } from './canvasToolRegistry'
 import { emitBuild } from './buildBus'
 import { getMcpToken, isMcpRequestAuthorized } from './mcpAuth'
 import { runCanvasTool, type CanvasToolContext } from './canvasTools'
@@ -14,6 +17,31 @@ import { DESIGN_GUIDE, DESIGN_GUIDE_SUMMARY } from '../shared/designGuide'
 
 export const VANTA_MCP_PORT = 29980
 export const VANTA_MCP_URL = `http://127.0.0.1:${VANTA_MCP_PORT}/mcp`
+
+const SCOBE_WEBSITE = 'https://github.com/jesbishop/scobe'
+const SCOBE_ICON_URL = 'https://raw.githubusercontent.com/jesbishop/scobe/main/resources/icon.png'
+
+type ServerIcon = { src: string; mimeType: string; sizes: string[] }
+
+let iconDataUri: string | null | undefined
+
+/** Clients that only accept https icons get the GitHub copy; the inline copy works offline. */
+function scobeIcons(): ServerIcon[] {
+  if (iconDataUri === undefined) {
+    try {
+      iconDataUri = `data:image/png;base64,${readFileSync(join(app.getAppPath(), 'resources', 'icon.png')).toString('base64')}`
+    } catch {
+      iconDataUri = null
+    }
+  }
+  const remote: ServerIcon = { src: SCOBE_ICON_URL, mimeType: 'image/png', sizes: ['256x256'] }
+  return iconDataUri ? [{ src: iconDataUri, mimeType: 'image/png', sizes: ['256x256'] }, remote] : [remote]
+}
+
+/** How Scobe introduces itself in `initialize`, so agents show its name and icon. */
+export function scobeServerInfo() {
+  return { name: 'scobe', title: 'Scobe', version: app.getVersion(), websiteUrl: SCOBE_WEBSITE, icons: scobeIcons() }
+}
 
 type Session = {
   server: McpServer
@@ -40,7 +68,7 @@ function registerTools(server: McpServer, ctx: CanvasToolContext) {
     schema: z.ZodRawShape,
     handler: (args: Record<string, unknown>) => Promise<{ content: string; image?: string }>
   ) => {
-    server.registerTool(name, { description, inputSchema: schema }, async (args) => {
+    server.registerTool(name, { description, inputSchema: schema, annotations: toolAnnotations(name) }, async (args) => {
       emitBuild({ type: 'build:start', label: name })
       try {
         const result = await handler(args as Record<string, unknown>)
@@ -56,260 +84,9 @@ function registerTools(server: McpServer, ctx: CanvasToolContext) {
 
   const run = (name: string) => (args: Record<string, unknown>) => runCanvasTool(name, args, ctx)
 
-  tool('get_basic_info', 'File overview: node count and artboards/frames with sizes.', {}, run('get_basic_info'))
-  tool('list_design', 'List all design nodes with parentId, layout, and world bounds.', {}, run('list_design'))
-  tool(
-    'get_tree_summary',
-    'Compact hierarchy summary of the canvas or a subtree.',
-    {
-      id: z.string().optional().describe('Root node id; omit for whole canvas'),
-      depth: z.number().optional().describe('Max depth (default 4)')
-    },
-    run('get_tree_summary')
-  )
-  tool(
-    'get_node_info',
-    'Details for a design node by id.',
-    { id: z.string().describe('Node id') },
-    run('get_node_info')
-  )
-  tool(
-    'get_screenshot',
-    'Screenshot a live browser tab by id (base64 PNG).',
-    { id: z.string().describe('Browser tab id'), browserId: z.string().optional() },
-    run('get_screenshot')
-  )
-  tool('list_browsers', 'List live browsers/tabs on the Scobe canvas.', {}, run('list_browsers'))
-  tool(
-    'get_design_guide',
-    'The Scobe design guide: process, spacing and type scales, color, components, what to avoid, and the review checklist. Read it before designing.',
-    {},
-    run('get_design_guide')
-  )
-  tool(
-    'get_tokens',
-    'Design tokens from the Tokens panel plus the colors, fonts, sizes, radii and spacing the file already uses most. Reuse these so new work matches.',
-    {},
-    run('get_tokens')
-  )
-  tool(
-    'render_node',
-    'Render a design layer (usually the top-level frame you built) to a PNG so you can see it. Use after building, review against the design guide checklist, fix issues, and render again. Omit id to render the newest top-level frame on the current page.',
-    {
-      id: z.string().optional().describe('Layer id to render; omit for the newest top-level frame'),
-      maxEdge: z.number().optional().describe('Longest edge of the image in px (default 1568)')
-    },
-    run('render_node')
-  )
-  tool(
-    'create_artboard',
-    'Create a design frame (artboard). Prefer auto-layout for UI builds.',
-    {
-      x: z.number(),
-      y: z.number(),
-      width: z.number(),
-      height: z.number(),
-      name: z.string().optional(),
-      parentId: z.string().optional(),
-      fill: z.string().optional(),
-      autoLayout: z.boolean().optional()
-    },
-    run('create_artboard')
-  )
-  tool(
-    'add_design_frame',
-    'Add a design frame with optional auto-layout and parentId.',
-    {
-      x: z.number(),
-      y: z.number(),
-      width: z.number(),
-      height: z.number(),
-      name: z.string().optional(),
-      parentId: z.string().optional(),
-      fill: z.string().optional()
-    },
-    run('add_design_frame')
-  )
-  tool(
-    'add_design_rect',
-    'Add a rectangle.',
-    {
-      x: z.number(),
-      y: z.number(),
-      width: z.number(),
-      height: z.number(),
-      name: z.string().optional(),
-      parentId: z.string().optional(),
-      fill: z.string().optional()
-    },
-    run('add_design_rect')
-  )
-  tool(
-    'add_design_ellipse',
-    'Add an ellipse.',
-    {
-      x: z.number(),
-      y: z.number(),
-      width: z.number(),
-      height: z.number(),
-      name: z.string().optional(),
-      parentId: z.string().optional(),
-      fill: z.string().optional()
-    },
-    run('add_design_ellipse')
-  )
-  tool(
-    'add_design_text',
-    'Add text on the canvas.',
-    {
-      x: z.number(),
-      y: z.number(),
-      text: z.string(),
-      parentId: z.string().optional(),
-      fontSize: z.number().optional(),
-      fill: z.string().optional()
-    },
-    run('add_design_text')
-  )
-  tool(
-    'set_text_content',
-    'Set text on an existing text node, or create text if only x/y/text are given.',
-    {
-      id: z.string().optional(),
-      text: z.string(),
-      x: z.number().optional(),
-      y: z.number().optional(),
-      parentId: z.string().optional(),
-      fontSize: z.number().optional(),
-      fill: z.string().optional()
-    },
-    run('set_text_content')
-  )
-  tool(
-    'update_design',
-    'Patch fields on a design node.',
-    { id: z.string(), patch: z.record(z.string(), z.unknown()) },
-    run('update_design')
-  )
-  tool(
-    'update_styles',
-    'Update style-like fields on a node (fill, opacity, radius, etc).',
-    { id: z.string(), styles: z.record(z.string(), z.unknown()).optional(), fill: z.string().optional() },
-    run('update_styles')
-  )
-  tool(
-    'set_layout',
-    'Set auto-layout on a frame.',
-    {
-      id: z.string(),
-      mode: z.enum(['none', 'horizontal', 'vertical']),
-      gap: z.number().optional(),
-      padding: z.number().optional(),
-      alignItems: z.enum(['start', 'center', 'end', 'stretch']).optional(),
-      justifyContent: z.enum(['start', 'center', 'end', 'space-between']).optional()
-    },
-    run('set_layout')
-  )
-  tool(
-    'set_parent',
-    'Reparent a node under a frame/section (or null).',
-    { id: z.string(), parentId: z.string().nullable().optional() },
-    run('set_parent')
-  )
-  tool(
-    'move_design',
-    'Move a node. World coords unless relative=true.',
-    { id: z.string(), x: z.number(), y: z.number(), relative: z.boolean().optional() },
-    run('move_design')
-  )
-  tool(
-    'resize_design',
-    'Resize a node.',
-    { id: z.string(), width: z.number(), height: z.number() },
-    run('resize_design')
-  )
-  tool(
-    'rename_nodes',
-    'Rename a layer.',
-    { id: z.string(), name: z.string() },
-    run('rename_nodes')
-  )
-  tool(
-    'duplicate_nodes',
-    'Duplicate a node.',
-    { id: z.string() },
-    run('duplicate_nodes')
-  )
-  tool(
-    'delete_nodes',
-    'Delete nodes. keepChildren unparents instead of cascading.',
-    { ids: z.array(z.string()).optional(), id: z.string().optional(), keepChildren: z.boolean().optional() },
-    run('delete_nodes')
-  )
-  tool(
-    'snapshot_browser_to_frame',
-    'Bring a live browser region into the canvas using Scobe’s real Snapshot tool (DOM → editable layers, not a flat PNG). Prefer selector for sidebars (e.g. ytd-guide-renderer). Place beside the browser by default.',
-    {
-      browserId: z.string().describe('Browser window id or tab id from list_browsers'),
-      selector: z
-        .union([z.string(), z.array(z.string())])
-        .optional()
-        .describe('CSS selector(s) to snapshot. Defaults to common nav/sidebar landmarks.'),
-      pointX: z.number().optional().describe('Optional CSS viewport X to pick an element'),
-      pointY: z.number().optional().describe('Optional CSS viewport Y to pick an element'),
-      x: z.number().optional().describe('Canvas X for the pasted root'),
-      y: z.number().optional().describe('Canvas Y for the pasted root'),
-      name: z.string().optional()
-    },
-    run('snapshot_browser_to_frame')
-  )
-  tool(
-    'snapshot_to_canvas',
-    'Alias of snapshot_browser_to_frame — use Scobe Snapshot (layered) to paste a browser region onto the design canvas.',
-    {
-      browserId: z.string(),
-      selector: z.union([z.string(), z.array(z.string())]).optional(),
-      pointX: z.number().optional(),
-      pointY: z.number().optional(),
-      x: z.number().optional(),
-      y: z.number().optional(),
-      name: z.string().optional()
-    },
-    run('snapshot_to_canvas')
-  )
-  tool(
-    'open_browser',
-    'Open a live browser on the canvas.',
-    { url: z.string() },
-    run('open_browser')
-  )
-  tool(
-    'navigate',
-    'Navigate a browser tab.',
-    { browserId: z.string(), url: z.string() },
-    run('navigate')
-  )
-  tool(
-    'screenshot',
-    'Screenshot a browser for click coordinates.',
-    { browserId: z.string() },
-    run('screenshot')
-  )
-  tool(
-    'finish_working_on_nodes',
-    'Clear Paper-like working indicators after a build pass. Call when done building.',
-    { ids: z.array(z.string()).optional() },
-    run('finish_working_on_nodes')
-  )
-  tool(
-    'open_coding_agent',
-    'Open a coding agent in the Scobe left sidebar (cursor, claude-code, codex, or v0).',
-    {
-      agentId: z.enum(['cursor', 'claude-code', 'codex', 'v0']).describe('Which agent to open'),
-      projectName: z.string().optional()
-    },
-    run('open_coding_agent')
-  )
+  for (const definition of CANVAS_TOOLS) {
+    tool(definition.name, definition.description, definition.schema, run(definition.name))
+  }
 }
 
 export const SCOBE_MCP_INSTRUCTIONS =
@@ -318,6 +95,7 @@ export const SCOBE_MCP_INSTRUCTIONS =
   'Build UI with Scobe tools only: get_design_guide + get_tokens → get_basic_info → create_artboard / add_design_frame → add_design_* → set_layout / update_styles → render_node to review → fix → finish_working_on_nodes. ' +
   'To bring a live page region into the canvas, use snapshot_browser_to_frame / snapshot_to_canvas (Scobe Snapshot → editable layers). Never use flat screenshot-only paste for “snapshot” / “bring into canvas”. ' +
   'Prefer auto-layout frames. Live browsers stay open; design sits on the canvas beside them. ' +
+  'For icons use add_icon (Lucide names, or Iconify ids like mdi:home; search_icons finds them). For logos and illustrations use add_svg with markup or an .svg URL. Never fake icons with emoji, text or colored circles. ' +
   DESIGN_GUIDE_SUMMARY
 
 function registerGuide(server: McpServer) {
@@ -336,7 +114,7 @@ function registerGuide(server: McpServer) {
           role: 'user' as const,
           content: {
             type: 'text' as const,
-            text: `${DESIGN_GUIDE}\n\nFollow this guide for everything you build on the Scobe canvas. Start with get_tokens and list_design, and finish each build with render_node and a review pass.`
+            text: `${DESIGN_GUIDE}\n\nFollow this guide for everything you build on the Scobe canvas. Start with get_tokens and get_basic_info; inspect only relevant subtrees with get_tree_summary and get_node_info, and finish each build with render_node and a review pass.`
           }
         }
       ]
@@ -345,7 +123,7 @@ function registerGuide(server: McpServer) {
 }
 
 function newServer(ctx: CanvasToolContext): McpServer {
-  const server = new McpServer({ name: 'scobe', version: app.getVersion() }, { instructions: SCOBE_MCP_INSTRUCTIONS })
+  const server = new McpServer(scobeServerInfo(), { instructions: SCOBE_MCP_INSTRUCTIONS })
   registerTools(server, ctx)
   registerGuide(server)
   return server

@@ -4,6 +4,8 @@ import { TokensPanel } from './TokensPanel'
 import { AnimatePresence, motion, useReducedMotion } from 'motion/react'
 import { PhotoCameraOutlinedIcon, StraightenIcon, CenterFocusStrongIcon, GridOnIcon, AccessTimeIcon, AddIcon, ArrowForwardIcon, ChangeHistoryIcon, ChatBubbleOutlineOutlinedIcon, CheckIcon, CircleOutlinedIcon, CloseIcon, CropSquareIcon, DescriptionOutlinedIcon, DrawIcon, EastIcon, FrameIcon, FullscreenExitIcon, FullscreenIcon, HorizontalRuleIcon, ImageLayerIcon, Inventory2OutlinedIcon, KeyboardArrowDownIcon, LanguageIcon, MoreHorizIcon, SearchIcon, SettingsOutlinedIcon, StarBorderIcon, TitleIcon, VectorLayerIcon, ViewListIcon, ViewModuleIcon, WidgetsOutlinedIcon } from './lucideIcons'
 import type { BrowserFrame, DesignNode, DesignPage, DesignTool, InspectInfo } from '../shared/types'
+import type { LayerDropTarget } from '../shared/layerMove'
+import type { HistorySource } from './designHistory'
 import { CURRENT_USER } from '../shared/comments'
 import type { FramePreset } from '../shared/framePresets'
 import { DesignInspector } from './DesignInspector'
@@ -13,6 +15,7 @@ import { ShapeCaptureOverlay } from './shapeCapture'
 import { stepNumberInput } from './numberArrowKeys'
 import { TabFavicon } from './tabFavicon'
 import { ConnectAgentModal } from './ConnectAgentModal'
+import { LayerTree } from './LayerTree'
 import { TabsOpenPopup } from './TabsOpenPopup'
 import { UrlOmnibox } from './UrlOmnibox'
 import { recordVisit } from './urlHistory'
@@ -65,6 +68,10 @@ export type LayerItem = {
   /** Image layer holding live SVG (icons from Snapshot / Create SVG) — shown as a vector. */
   vector?: boolean
   depth?: number
+  /** Design parent (frame/section) for nested layers. */
+  parentId?: string | null
+  /** Frames and sections accept dropped layers. */
+  container?: boolean
   hidden?: boolean
   locked?: boolean
 }
@@ -387,6 +394,8 @@ export function LeftSidebar({
   activeChatId,
   onSelectChat,
   onNewChat,
+  canvasHistory = [],
+  onRestoreHistory,
   pages,
   activePageId,
   pageQuery,
@@ -400,6 +409,7 @@ export function LeftSidebar({
   onOpenLayerMenu,
   onToggleLayerVisible,
   onToggleLayerLock,
+  onMoveLayers,
   onCollapseLayersToken = 0,
   panelOpen,
   panelWidth,
@@ -466,6 +476,8 @@ export function LeftSidebar({
   activeChatId: string
   onSelectChat: (id: string) => void
   onNewChat: () => void
+  canvasHistory?: CanvasHistoryItem[]
+  onRestoreHistory?: (id: string) => void
   pages: DesignPage[]
   activePageId: string
   pageQuery: string
@@ -479,6 +491,7 @@ export function LeftSidebar({
   onOpenLayerMenu?: (id: string, kind: LayerItem['kind'], rect: DOMRect) => void
   onToggleLayerVisible?: (id: string) => void
   onToggleLayerLock?: (id: string) => void
+  onMoveLayers?: (ids: string[], target: LayerDropTarget) => void
   onCollapseLayersToken?: number
   panelOpen: boolean
   panelWidth: number
@@ -580,6 +593,7 @@ export function LeftSidebar({
     })
   ]
   const reduceMotion = useReducedMotion()
+  const [chatPane, setChatPane] = useState<'chat' | 'history'>('chat')
   const notifyLayout = () => onChromeLayout?.()
   const prevTabRef = useRef(tab)
   const sectionDir = RAIL_ORDER.indexOf(tab) >= RAIL_ORDER.indexOf(prevTabRef.current) ? 1 : -1
@@ -788,12 +802,26 @@ export function LeftSidebar({
               onOpenLayerMenu={onOpenLayerMenu}
               onToggleLayerVisible={onToggleLayerVisible}
               onToggleLayerLock={onToggleLayerLock}
+              onMoveLayers={onMoveLayers}
               collapseToken={onCollapseLayersToken}
             />
           </div>
         )}
         {tab === 'chat' && (
           <div className="leftbar-chat-list">
+            <SidebarSegment
+              layoutId="chat-pane-pill"
+              value={chatPane}
+              options={[
+                { id: 'chat', label: 'Chat' },
+                { id: 'history', label: 'History' }
+              ]}
+              onChange={setChatPane}
+            />
+            {chatPane === 'history' ? (
+              <CanvasHistoryList entries={canvasHistory} onRestore={onRestoreHistory} />
+            ) : (
+            <>
             <div className="chat-list-head">
               <span>Recents</span>
               <button type="button" title="New chat" onClick={onNewChat}>
@@ -834,6 +862,8 @@ export function LeftSidebar({
               ))}
               {chats.length === 0 && <p className="panel-empty">No chats yet.</p>}
             </div>
+            </>
+            )}
           </div>
         )}
         {tab === 'search' && (
@@ -1502,6 +1532,100 @@ function LayerLockClosedIcon() {
   )
 }
 
+export type CanvasHistoryItem = { id: string; at: number; label: string; source: HistorySource }
+
+const HISTORY_SOURCE_LABEL: Record<HistorySource, string> = { you: 'You', chat: 'Chat', agent: 'Agent' }
+
+function historyTime(at: number, now: number): string {
+  const seconds = Math.max(0, Math.round((now - at) / 1000))
+  if (seconds < 45) return 'Just now'
+  const minutes = Math.round(seconds / 60)
+  if (minutes < 60) return `${minutes} min ago`
+  const date = new Date(at)
+  const time = date.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })
+  return date.toDateString() === new Date(now).toDateString()
+    ? time
+    : `${date.toLocaleDateString([], { month: 'short', day: 'numeric' })}, ${time}`
+}
+
+/** Two-option switch with a sliding pill, like the Design / Theme switch. */
+function SidebarSegment<T extends string>({
+  value,
+  options,
+  onChange,
+  layoutId
+}: {
+  value: T
+  options: Array<{ id: T; label: string }>
+  onChange: (value: T) => void
+  layoutId: string
+}) {
+  const reduceMotion = useReducedMotion()
+  return (
+    <div className="sidebar-segment" role="tablist">
+      {options.map((option) => {
+        const active = option.id === value
+        return (
+          <button
+            key={option.id}
+            type="button"
+            role="tab"
+            aria-selected={active}
+            className={`sidebar-segment-btn${active ? ' is-active' : ''}`}
+            onClick={() => onChange(option.id)}
+          >
+            {active ? (
+              <motion.span
+                layoutId={layoutId}
+                className="sidebar-segment-pill"
+                transition={reduceMotion ? { duration: 0 } : { type: 'spring', stiffness: 520, damping: 40, mass: 0.7 }}
+              />
+            ) : null}
+            <span className="sidebar-segment-label">{option.label}</span>
+          </button>
+        )
+      })}
+    </div>
+  )
+}
+
+/** Every settled canvas change, newest first. Clicking an older one restores it (undoable). */
+function CanvasHistoryList({ entries, onRestore }: { entries: CanvasHistoryItem[]; onRestore?: (id: string) => void }) {
+  const [now, setNow] = useState(() => Date.now())
+  useEffect(() => {
+    const timer = window.setInterval(() => setNow(Date.now()), 30_000)
+    return () => window.clearInterval(timer)
+  }, [])
+  useEffect(() => setNow(Date.now()), [entries])
+  if (!entries.length) return <p className="panel-empty">Changes to the canvas will show up here.</p>
+  return (
+    <div className="history-list" role="list">
+      {entries.map((entry, index) => {
+        const current = index === 0
+        const meta = `${HISTORY_SOURCE_LABEL[entry.source]} · ${historyTime(entry.at, now)}`
+        return (
+          <button
+            key={entry.id}
+            type="button"
+            role="listitem"
+            className={`history-item${current ? ' is-current' : ''}`}
+            disabled={current || !onRestore}
+            title={current ? 'This is the canvas right now' : 'Restore this version'}
+            onClick={() => onRestore?.(entry.id)}
+          >
+            <span className={`history-dot is-${entry.source}`} aria-hidden="true" />
+            <span className="history-copy">
+              <span className="history-label">{entry.label}</span>
+              <span className="history-meta">{meta}</span>
+            </span>
+            <span className="history-action">{current ? 'Current' : 'Restore'}</span>
+          </button>
+        )
+      })}
+    </div>
+  )
+}
+
 function PagesLayers({
   pages,
   activePageId,
@@ -1516,6 +1640,7 @@ function PagesLayers({
   onOpenLayerMenu,
   onToggleLayerVisible,
   onToggleLayerLock,
+  onMoveLayers,
   collapseToken = 0
 }: {
   pages: DesignPage[]
@@ -1531,14 +1656,10 @@ function PagesLayers({
   onOpenLayerMenu?: (id: string, kind: LayerItem['kind'], rect: DOMRect) => void
   onToggleLayerVisible?: (id: string) => void
   onToggleLayerLock?: (id: string) => void
+  onMoveLayers?: (ids: string[], target: LayerDropTarget) => void
   collapseToken?: number
 }) {
-  const [collapseDepth, setCollapseDepth] = useState(false)
-  useEffect(() => {
-    if (collapseToken > 0) setCollapseDepth(true)
-  }, [collapseToken])
   const visiblePages = pages.filter((page) => page.name.toLowerCase().includes(pageQuery.trim().toLowerCase()))
-  const visibleLayers = collapseDepth ? layers.filter((layer) => !layer.depth) : layers
   const openMenu = (layer: LayerItem, target: HTMLElement) => {
     onSelectLayer(layer.id, layer.kind)
     if (layer.kind === 'browser' || layer.kind === 'comment') return
@@ -1614,80 +1735,21 @@ function PagesLayers({
       <div className="tree-head">
         <span>Layers</span>
       </div>
-      <div className="tree-list">
-        {layers.length === 0 && <p className="panel-empty">No layers on this page yet.</p>}
-        {visibleLayers.map((layer) => {
-          const rowClass = [
-            'tree-row',
-            'layer-row',
-            layer.selected ? 'is-active' : '',
-            layer.hidden ? 'is-hidden' : '',
-            layer.locked ? 'is-locked' : ''
-          ]
-            .filter(Boolean)
-            .join(' ')
-          if (layer.textOnPath) {
-            return (
-              <div
-                key={layer.id}
-                role="button"
-                tabIndex={0}
-                className={rowClass}
-                style={layer.depth ? { paddingLeft: 8 + layer.depth * 14 } : undefined}
-                onClick={() => onSelectLayer(layer.id, layer.kind)}
-                onKeyDown={(event) => {
-                  if (event.key === 'Enter' || event.key === ' ') {
-                    event.preventDefault()
-                    onSelectLayer(layer.id, layer.kind)
-                  }
-                }}
-                onContextMenu={(event) => {
-                  event.preventDefault()
-                  openMenu(layer, event.currentTarget)
-                }}
-                onDoubleClick={() => {
-                  const name = window.prompt('Rename', layer.name)
-                  if (name?.trim()) onRenameLayer(layer.id, name.trim())
-                }}
-              >
-                <IconTextOnPath size={16} />
-                <span>{layer.name}</span>
-                {layerActions(layer)}
-              </div>
-            )
-          }
+      <LayerTree
+        layers={layers}
+        collapseToken={collapseToken}
+        onSelectLayer={onSelectLayer}
+        onRenameLayer={onRenameLayer}
+        onOpenMenu={openMenu}
+        onMoveLayers={onMoveLayers}
+        renderActions={layerActions}
+        renderIcon={(layer) => {
+          if (layer.textOnPath) return <IconTextOnPath size={16} />
+          if (layer.kind === 'section') return <IconSection size={16} />
           const Icon = layer.vector ? VectorLayerIcon : LAYER_ICONS[layer.kind]
-          return (
-            <div
-              key={layer.id}
-              role="button"
-              tabIndex={0}
-              className={rowClass}
-              style={layer.depth ? { paddingLeft: 8 + layer.depth * 14 } : undefined}
-              onClick={() => onSelectLayer(layer.id, layer.kind)}
-              onKeyDown={(event) => {
-                if (event.key === 'Enter' || event.key === ' ') {
-                  event.preventDefault()
-                  onSelectLayer(layer.id, layer.kind)
-                }
-              }}
-              onContextMenu={(event) => {
-                event.preventDefault()
-                openMenu(layer, event.currentTarget)
-              }}
-              onDoubleClick={() => {
-                if (layer.kind === 'browser') return
-                const name = window.prompt('Rename', layer.name)
-                if (name?.trim()) onRenameLayer(layer.id, name.trim())
-              }}
-            >
-              {layer.kind === 'section' ? <IconSection size={16} /> : <Icon sx={{ fontSize: 16 }} />}
-              <span>{layer.name}</span>
-              {layerActions(layer)}
-            </div>
-          )
-        })}
-      </div>
+          return <Icon sx={{ fontSize: 16 }} />
+        }}
+      />
     </>
   )
 }

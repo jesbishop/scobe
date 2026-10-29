@@ -1,6 +1,7 @@
 import type { AutoLayout, DesignNode, LayoutSizing } from './types'
 import type { Paint } from './paint'
 import { applyAutoLayout } from './layoutEngine'
+import { sanitizeSvg } from './svgMarkup'
 
 /** Element captured from a live browser, in Paper Snapshot shape. */
 export type SnapshotFill =
@@ -607,7 +608,7 @@ export function importSnapshot(
           pageId: place.pageId,
           name,
           imageDataUrl: snap.fill.dataUrl,
-          svgMarkup: snap.svg || undefined,
+          svgMarkup: snap.svg ? sanitizeSvg(snap.svg) : undefined,
           radius: snap.radius
         },
         snap

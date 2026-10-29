@@ -4,6 +4,8 @@ import { app } from 'electron'
 
 export function loadEnv(): void {
   const files = [
+    // The bundled main process lives in out/main, including desktop launches.
+    join(__dirname, '..', '..', '.env'),
     join(process.cwd(), '.env'),
     join(app.getAppPath(), '.env'),
     join(app.getAppPath(), '..', '.env'),

@@ -1,4 +1,8 @@
-import { useEffect, useId, useRef, useState, type FormEvent, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from 'react'
+import { CloudAccount } from './CloudAccount'
+import { MessageActions, WorkingBanner } from './ChatMessageTools'
+import { createPortal } from 'react-dom'
+import { CHAT_MODELS, resolveChatModel, type ChatModelId } from '../shared/chatModels'
+import { useEffect, useLayoutEffect, useId, useRef, useState, type FormEvent, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from 'react'
 import { AnimatePresence, motion, useDragControls, useReducedMotion } from 'motion/react'
 import { ArrowUpwardIcon, CloseRoundedIcon, KeyboardOutlinedIcon, MicNoneOutlinedIcon, NearMeIcon, OpenInNewIcon, TagOutlinedIcon } from './lucideIcons'
 import { normalizeUrl } from '../shared/url'
@@ -9,6 +13,9 @@ import type { JevDecision } from './jevEngine'
 import type { VoiceState } from './useVoiceCapture'
 
 export type ChatMessage = {
+  createdAt?: number
+  startedAt?: number
+  finishedAt?: number
   role: 'user' | 'assistant' | 'system'
   text: string
   jev?: JevDecision
@@ -17,10 +24,13 @@ export type ChatMessage = {
 }
 
 export type JevThreadHandlers = {
+  onEdit?: (index: number, text: string) => void
   onUndo: (decisionId: string) => void
 }
 
 export type JevComposerProps = {
+  chatModel?: ChatModelId
+  onChatModel?: (model: ChatModelId) => void
   on: boolean
   onToggle: (on: boolean) => void
   micOn: boolean
@@ -49,6 +59,7 @@ export type JevComposerProps = {
 }
 
 export type ChatSession = {
+  model?: ChatModelId
   id: string
   title: string
   messages: ChatMessage[]
@@ -58,12 +69,51 @@ export function createChatSession(title = 'New chat'): ChatSession {
   return { id: crypto.randomUUID(), title, messages: [] }
 }
 
+/** Reveal only fresh answers; existing conversation history stays immediately readable. */
+function AnswerText({ text, animate = false }: { text: string; animate?: boolean }) {
+  const reduced = useReducedMotion()
+  const [shown, setShown] = useState(animate && !reduced ? 0 : text.length)
+  const previous = useRef(text)
+  const revealed = useRef(shown)
+  useEffect(() => {
+    const old = previous.current
+    previous.current = text
+    if (!animate || reduced) {
+      revealed.current = text.length
+      setShown(text.length)
+      return
+    }
+    if (!text.startsWith(old)) revealed.current = 0
+    let frame = 0
+    let last = 0
+    const tick = (now: number) => {
+      if (now - last >= 28) {
+        const rest = text.slice(revealed.current)
+        const next = rest.match(/^\s*\S+\s*/)?.[0].length || rest.length
+        revealed.current = Math.min(text.length, revealed.current + next)
+        setShown(revealed.current)
+        last = now
+      }
+      if (revealed.current < text.length) frame = requestAnimationFrame(tick)
+    }
+    frame = requestAnimationFrame(tick)
+    return () => cancelAnimationFrame(frame)
+  }, [text, animate, reduced])
+  return <span className="chat-answer" aria-label={text}>
+    <span aria-hidden="true">{text.slice(0, shown).match(/\S+\s*|\s+/g)?.map((word, index) =>
+      <span className={animate && !reduced ? 'chat-answer-word' : undefined} key={index}>{word}</span>
+    )}</span>
+  </span>
+}
+
 function ChatChangeRow({
   decision,
   fallback,
+  animate,
   onUndo
 }: {
   decision?: JevDecision
+  animate?: boolean
   fallback: string
   onUndo?: () => void
 }) {
@@ -80,11 +130,10 @@ function ChatChangeRow({
     <div className="chat-bubble-row assistant">
       <div className={`chat-bubble assistant chat-change is-${status}`}>
         <div className="chat-bubble-label">
-          Scobe
           {status === 'undone' ? <span className="chat-change-tag">Undone</span> : null}
           {status === 'error' ? <span className="chat-change-tag">Not applied</span> : null}
         </div>
-        <div className={`chat-bubble-text${status === 'deciding' || status === 'needs-choice' ? ' muted' : ''}`}>{text}</div>
+        <div className={`chat-bubble-text${status === 'deciding' || status === 'needs-choice' ? ' muted' : ''}`}><AnswerText text={text} animate={animate && status !== 'deciding' && status !== 'needs-choice'} /></div>
         {status === 'applied' && onUndo ? (
           <button type="button" className="chat-change-undo" onClick={onUndo}>
             Undo
@@ -106,13 +155,49 @@ function ChatThread({
   className?: string
   jev?: JevThreadHandlers
 }) {
+  const [editingIndex, setEditingIndex] = useState<number | null>(null)
+  const [editText, setEditText] = useState('')
+  const initialCount = useRef(messages.length)
   let jevCount = 0
   const logRef = useRef<HTMLDivElement>(null)
+  useLayoutEffect(() => {
+    const log = logRef.current
+    if (!log || className?.includes('chat-agents-popout-thread')) return
+    const inner = log.querySelector<HTMLElement>('.chat-thread-inner')
+    if (!inner) return
+    let composer: HTMLElement | null = null
+    const align = () => {
+      const next = document.querySelector<HTMLElement>('.canvas-toolbar-stack .cursor-composer') || document.querySelector<HTMLElement>('.canvas-toolbar-shell')
+      if (!next) return
+      if (next !== composer) { if (composer) observer.unobserve(composer); composer = next; observer.observe(next) }
+      const bounds = next.getBoundingClientRect()
+      const host = log.getBoundingClientRect()
+      const inset = parseFloat(getComputedStyle(log).paddingLeft) || 0
+      inner.style.width = bounds.width + 'px'
+      inner.style.maxWidth = 'none'
+      inner.style.marginLeft = (bounds.left - host.left - inset) + 'px'
+      inner.style.marginRight = '0'
+    }
+    const observer = new ResizeObserver(align)
+    observer.observe(log)
+    const mutations = new MutationObserver(records => {
+      if (records.some(record => Array.from(record.addedNodes).some(node => node instanceof HTMLElement && (node.matches('.canvas-toolbar-stack, .cursor-composer') || node.querySelector('.canvas-toolbar-stack, .cursor-composer'))))) align()
+    })
+    mutations.observe(document.body, { childList: true, subtree: true })
+    window.addEventListener('resize', align)
+    align()
+    return () => { observer.disconnect(); mutations.disconnect(); window.removeEventListener('resize', align) }
+  }, [className, messages.length === 0])
+
 
   useEffect(() => {
     const el = logRef.current
     if (!el) return
+    const follow = () => { if (el.scrollHeight - el.scrollTop - el.clientHeight < 120) el.scrollTop = el.scrollHeight }
     el.scrollTop = el.scrollHeight
+    const observer = new ResizeObserver(follow)
+    if (el.firstElementChild) observer.observe(el.firstElementChild)
+    return () => observer.disconnect()
   }, [messages, busy])
 
   if (messages.length === 0) {
@@ -134,6 +219,7 @@ function ChatThread({
                 key={item.jevId}
                 decision={item.jev}
                 fallback={item.text}
+                animate={index >= initialCount.current}
                 onUndo={jev && item.jev ? () => jev.onUndo(item.jevId!) : undefined}
               />
             )
@@ -150,16 +236,19 @@ function ChatThread({
               />
             )
           }
+          const running = Boolean(item.startedAt && !item.finishedAt && busy)
           return (
             <div key={index} className={`chat-bubble-row ${item.role}`}>
-              {item.role === 'user' ? (
-                <div className="chat-bubble user">{item.text}</div>
-              ) : (
-                <div className={`chat-bubble ${item.role}`}>
-                  {item.role === 'assistant' && <div className="chat-bubble-label">Scobe</div>}
-                  <div className="chat-bubble-text">{item.text}</div>
-                </div>
-              )}
+              <div className="chat-message-content">
+                {item.role === 'assistant' && item.startedAt ? <WorkingBanner startedAt={item.startedAt} finishedAt={item.finishedAt} busy={running} /> : null}
+                {editingIndex === index ? <form className="chat-edit-message" onSubmit={event => { event.preventDefault(); if (editText.trim()) { jev?.onEdit?.(index, editText.trim()); setEditingIndex(null) } }}>
+                  <textarea autoFocus value={editText} onChange={event => setEditText(event.target.value)} />
+                  <div><button type="button" onClick={() => setEditingIndex(null)}>Cancel</button><button type="submit" disabled={!editText.trim() || busy}>Save & send</button></div>
+                </form> : <div className={`chat-bubble ${item.role}`}>
+                  <div className="chat-bubble-text">{!item.text && running ? <span className="chat-thinking-shimmer">Thinking…</span> : <AnswerText text={item.text} animate={item.role === 'assistant' && index >= initialCount.current} />}</div>
+                </div>}
+                {item.text && item.role !== 'system' && editingIndex !== index ? <MessageActions message={item} busy={running || busy} onEdit={item.role === 'user' && jev?.onEdit ? () => { setEditingIndex(index); setEditText(item.text) } : undefined} /> : null}
+              </div>
             </div>
           )
         })}
@@ -167,7 +256,7 @@ function ChatThread({
           <div className="chat-bubble-row assistant">
             <div className="chat-bubble assistant">
               <div className="chat-bubble-label">Scobe</div>
-              <div className="chat-bubble-text muted">Working…</div>
+              <div className="chat-bubble-text muted chat-thinking-shimmer">Thinking…</div>
             </div>
           </div>
         )}
@@ -389,6 +478,77 @@ export function InputModeToggle({
   )
 }
 
+function ChatModelPicker({ value, onChange, disabled }: { value?: ChatModelId; onChange: (model: ChatModelId) => void; disabled: boolean }) {
+  const [open, setOpen] = useState(false)
+  const [position, setPosition] = useState({ left: 0, top: 0, width: 200 })
+  const trigger = useRef<HTMLButtonElement>(null)
+  const popup = useRef<HTMLDivElement>(null)
+  const reduced = useReducedMotion()
+  const menuId = useId()
+  const selected = resolveChatModel(value)
+  useEffect(() => {
+    if (!open) return
+    const place = () => {
+      const button = trigger.current
+      if (!button) return
+      const rect = button.getBoundingClientRect()
+      const toolbar = button.closest('.canvas-toolbar')?.getBoundingClientRect()
+      const min = Math.max(8, toolbar?.left ?? 8)
+      const max = Math.min(window.innerWidth - 8, toolbar?.right ?? window.innerWidth - 8)
+      const width = Math.min(200, max - min)
+      setPosition({ left: Math.max(min, Math.min(rect.right - width, max - width)), top: Math.max(8, rect.top - 8), width })
+    }
+    place()
+    const frame = requestAnimationFrame(() => {
+      const items = popup.current?.querySelectorAll<HTMLButtonElement>('[role="menuitemradio"]')
+      items?.[CHAT_MODELS.findIndex(model => model.id === selected)]?.focus()
+    })
+    const outside = (event: PointerEvent) => {
+      if (!trigger.current?.contains(event.target as Node) && !popup.current?.contains(event.target as Node)) setOpen(false)
+    }
+    const escape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') { event.preventDefault(); setOpen(false); trigger.current?.focus() }
+    }
+    window.addEventListener('pointerdown', outside)
+    window.addEventListener('keydown', escape)
+    window.addEventListener('resize', place)
+    window.addEventListener('scroll', place, true)
+    return () => {
+      cancelAnimationFrame(frame)
+      window.removeEventListener('pointerdown', outside)
+      window.removeEventListener('keydown', escape)
+      window.removeEventListener('resize', place)
+      window.removeEventListener('scroll', place, true)
+    }
+  }, [open, selected])
+  useEffect(() => { if (disabled) setOpen(false) }, [disabled])
+  return <>
+    <button ref={trigger} type="button" className="chat-model-picker" aria-label="Choose AI model" aria-haspopup="menu" aria-expanded={open} aria-controls={open ? menuId : undefined} disabled={disabled} onClick={() => setOpen(value => !value)}>
+      {CHAT_MODELS.find(model => model.id === selected)?.label}<svg width="12" height="12" viewBox="0 0 12 12" fill="none" aria-hidden="true"><path d="m3 4.5 3 3 3-3" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" /></svg>
+    </button>
+    {createPortal(<AnimatePresence>{open && <div className="chat-model-menu-anchor" style={{ left: position.left, top: position.top, width: position.width }}>
+      <motion.div ref={popup} id={menuId} role="menu" aria-label="AI model" className="chat-model-menu"
+        initial={reduced ? false : { opacity: 0, y: 3, scale: .985 }} animate={{ opacity: 1, y: 0, scale: 1 }} exit={{ opacity: 0, y: 2, scale: .99 }} transition={{ duration: reduced ? 0 : .12 }}
+        onKeyDown={event => {
+          const items = Array.from(popup.current?.querySelectorAll<HTMLButtonElement>('[role="menuitemradio"]') || [])
+          const index = items.indexOf(document.activeElement as HTMLButtonElement)
+          let next = index
+          if (event.key === 'ArrowDown') next = (index + 1) % items.length
+          else if (event.key === 'ArrowUp') next = (index - 1 + items.length) % items.length
+          else if (event.key === 'Home') next = 0
+          else if (event.key === 'End') next = items.length - 1
+          else if (event.key === 'Tab') { setOpen(false); return }
+          else return
+          event.preventDefault(); items[next]?.focus()
+        }}>
+        {CHAT_MODELS.map(model => <button key={model.id} type="button" role="menuitemradio" aria-checked={model.id === selected} className="chat-model-option" onClick={() => { onChange(model.id); setOpen(false); trigger.current?.focus() }}>
+          <span className="chat-model-check" aria-hidden="true">{model.id === selected ? '✓' : ''}</span><span>{model.label}</span>
+        </button>)}
+      </motion.div>
+    </div>}</AnimatePresence>, document.body)}
+  </>
+}
+
 export function ChatComposer({
   value,
   onChange,
@@ -413,7 +573,7 @@ export function ChatComposer({
   const [draft, setDraft] = useState(value)
   const text = draft
   const hasText = text.trim().length > 0
-  const canSend = hasText
+  const canSend = hasText && !busy
   const micOn = Boolean(jev?.micOn)
 
   useEffect(() => {
@@ -475,7 +635,7 @@ export function ChatComposer({
   const voiceState = jev?.voiceState || 'off'
   const hearing = voiceState === 'hearing'
   const voiceError = jev?.voiceError || (micOn && jev?.model?.state === 'error' ? jev.model.error || null : null)
-  const hint = placeholder || (micOn ? 'Start talking…' : 'Send follow-up')
+  const hint = placeholder || (micOn ? 'Start talking…' : 'Message Scobe…')
 
   if (jev && jev.configured === false) {
     return (
@@ -568,6 +728,11 @@ export function ChatComposer({
           {jev ? <InputModeToggle micOn={micOn} onMic={jev.onMic} /> : null}
         </div>
         <div className="cursor-composer-right">
+          <CloudAccount />
+          <MessageActions message={{ role: 'assistant', text: '' }} busy={busy} settingsOnly />
+          {jev?.onChatModel ? (
+            <ChatModelPicker value={jev.chatModel} onChange={jev.onChatModel} disabled={busy} />
+          ) : null}
           <button type="submit" className={`cursor-send${canSend ? ' is-ready' : ''}`} title="Send" disabled={!canSend}>
             <ArrowUpwardIcon sx={{ fontSize: 18 }} />
           </button>
